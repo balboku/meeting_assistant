@@ -1,0 +1,34 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Python/runtime
+.venv/
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local databases and generated artifacts
+meetings.db
+meetings.db-*
+meetings.db*
+4-QA-005 V01 會議紀錄.docx
+*.sqlite
+*.sqlite3
+temp/
+output/
+backups/
+logs/
+*.log
+
+# OS/editor/tooling
+.DS_Store
+Thumbs.db
+.gstack/
+.vscode/
+.idea/

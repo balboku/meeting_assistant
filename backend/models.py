@@ -1,0 +1,208 @@
+"""
+=============================================================================
+backend/models.py — Pydantic 資料模型定義
+=============================================================================
+定義所有 API 的請求 (Request) 與回應 (Response) 資料結構，
+確保型別安全與自動化的 OpenAPI 文件生成。
+=============================================================================
+"""
+
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+from pydantic import BaseModel, Field
+
+
+# =============================================================================
+# 列舉型別
+# =============================================================================
+
+class JobStatus(str, Enum):
+    """任務處理狀態列舉"""
+    PENDING    = "pending"     # 已接收，等待處理
+    PROCESSING = "processing"  # 處理中（上傳音檔 / 呼叫 AI）
+    DONE       = "done"        # 完成
+    FAILED     = "failed"      # 失敗
+    CANCELLED  = "cancelled"   # 已取消
+
+
+# =============================================================================
+# 任務相關模型
+# =============================================================================
+
+class JobResponse(BaseModel):
+    """POST /upload-audio 的回應格式"""
+    job_id: str = Field(..., description="任務唯一識別碼 (UUID)")
+    status: JobStatus = Field(..., description="當前任務狀態")
+    message: str = Field(..., description="人類可讀的狀態描述")
+
+    model_config = {"json_schema_extra": {
+        "example": {
+            "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "status": "pending",
+            "message": "音檔已接收，處理中請稍候..."
+        }
+    }}
+
+
+class JobStatusResponse(BaseModel):
+    """GET /status/{job_id} 的回應格式"""
+    job_id: str
+    status: JobStatus
+    message: str
+    output_path: Optional[str] = Field(None, description="完成後的 Markdown 檔案路徑")
+    error_detail: Optional[str] = Field(None, description="失敗時的錯誤訊息")
+    attempts: Optional[int] = Field(None, description="已嘗試處理次數")
+    max_attempts: Optional[int] = Field(None, description="最多重試次數")
+    progress_current: Optional[int] = Field(None, description="目前進度")
+    progress_total: Optional[int] = Field(None, description="總進度")
+    created_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
+class JobRecord(BaseModel):
+    """任務清單列項目"""
+    job_id: str
+    status: JobStatus
+    message: Optional[str] = None
+    source: Optional[str] = None
+    task_type: Optional[str] = None
+    output_path: Optional[str] = None
+    error_detail: Optional[str] = None
+    attempts: Optional[int] = None
+    max_attempts: Optional[int] = None
+    progress_current: Optional[int] = None
+    progress_total: Optional[int] = None
+    created_at: Optional[datetime] = None
+    queued_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
+class JobListResponse(BaseModel):
+    """GET /jobs 的回應格式"""
+    total: int
+    jobs: list[JobRecord]
+
+
+class JobEventRecord(BaseModel):
+    """單一任務事件時間線項目"""
+    id: int
+    job_id: str
+    event_type: str
+    message: Optional[str] = None
+    detail: Optional[str] = None
+    created_at: datetime
+
+
+class JobEventsResponse(BaseModel):
+    """GET /jobs/{job_id}/events 的回應格式"""
+    job_id: str
+    events: list[JobEventRecord]
+
+
+class JobMetrics(BaseModel):
+    """任務統計摘要"""
+    total: int
+    by_status: dict[str, int]
+    average_completed_seconds: Optional[float] = None
+
+
+class NgrokStatus(BaseModel):
+    """本機 ngrok tunnel 狀態摘要"""
+    running: bool
+    public_url: Optional[str] = None
+    webhook_url: Optional[str] = None
+    message: str
+    error: Optional[str] = None
+    api_url: Optional[str] = None
+
+
+class RecentJobError(BaseModel):
+    """最近失敗任務摘要"""
+    job_id: str
+    status: JobStatus
+    message: Optional[str] = None
+    error_detail: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
+class MetricsResponse(BaseModel):
+    """GET /metrics 的回應格式"""
+    generated_at: datetime
+    jobs: JobMetrics
+    recent_errors: list[RecentJobError]
+    meetings: dict[str, int]
+    ngrok: NgrokStatus
+
+
+class AppConfigResponse(BaseModel):
+    """GET /config 的回應格式"""
+    model: str
+    transcription_model: str
+    summary_model: str
+    summary_fallback_model: str
+    max_upload_mb: int
+    max_upload_bytes: int
+    supported_extensions: list[str]
+
+
+# =============================================================================
+# 會議記錄相關模型
+# =============================================================================
+
+class MeetingRecord(BaseModel):
+    """會議記錄摘要（用於清單顯示）"""
+    id: int
+    title: str = Field(..., description="會議標題（來自音檔名）")
+    date: str = Field(..., description="會議日期 YYYY/MM/DD")
+    source_audio: str = Field(..., description="原始音檔名")
+    output_path: str = Field(..., description="Markdown 檔案路徑")
+    summary_preview: Optional[str] = Field(None, description="摘要前 200 字預覽")
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class MeetingDetail(MeetingRecord):
+    """會議記錄完整內容（用於單筆查詢）"""
+    full_content: str = Field(..., description="完整 Markdown 會議記錄")
+
+
+class MeetingListResponse(BaseModel):
+    """GET /meetings 的回應格式"""
+    total: int
+    records: list[MeetingRecord]
+
+
+class MeetingEvidenceResponse(BaseModel):
+    """POST /meetings/{meeting_id}/evidence 的回應格式"""
+    status: str
+    meeting_id: int
+    file_name: str
+    attachment_path: str
+    evidence_markdown: str
+    full_content: str
+
+
+# =============================================================================
+# 通用回應模型
+# =============================================================================
+
+class HealthResponse(BaseModel):
+    """GET /health 的回應格式"""
+    status: str = "ok"
+    version: str = "1.0.0"
+    model: str
+    transcription_model: str
+    summary_model: str
+    summary_fallback_model: str
+    checks: list[dict[str, str]] = Field(default_factory=list)
+
+
+class ErrorResponse(BaseModel):
+    """錯誤回應格式"""
+    error: str
+    detail: Optional[str] = None

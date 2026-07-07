@@ -1,0 +1,1694 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI 語音會議助理 · 歷史記錄</title>
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/purify.min.js"></script>
+  <style>
+    /* ── Reset & Base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:        #1a1b26;
+      --bg-card:   #24283b;
+      --bg-card2:  #2f3349;
+      --bg-hover:  #343a53;
+      --border:    #3b4261;
+      --blue:      #7aa2f7;
+      --blue-dim:  #3d59a1;
+      --green:     #9ece6a;
+      --red:       #f7768e;
+      --yellow:    #e0af68;
+      --purple:    #bb9af7;
+      --cyan:      #7dcfff;
+      --text:      #c0caf5;
+      --text-dim:  #565f89;
+      --text-mid:  #a9b1d6;
+      --radius:    12px;
+      --shadow:    0 4px 24px rgba(0,0,0,0.4);
+    }
+    html, body {
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    /* ── Layout ── */
+    .app { display: flex; flex-direction: column; height: 100vh; }
+
+    /* ── Header ── */
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 32px;
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 100;
+      backdrop-filter: blur(8px);
+    }
+    .header-left { display: flex; align-items: center; gap: 12px; }
+    .logo { font-size: 22px; font-weight: 700; color: var(--blue);
+            letter-spacing: -0.5px; }
+    .logo span { color: var(--text-dim); font-weight: 400; font-size: 14px; }
+    .badge {
+      background: var(--blue-dim); color: var(--blue);
+      font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 99px;
+    }
+    .stats { display: flex; gap: 20px; }
+    .stat { text-align: right; }
+    .stat-num { font-size: 20px; font-weight: 700; color: var(--blue); line-height: 1; }
+    .stat-label { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+
+    /* ── Search Bar ── */
+    .search-bar {
+      padding: 20px 32px;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+    }
+    .search-wrap {
+      position: relative; max-width: 600px;
+    }
+    .search-icon {
+      position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
+      color: var(--text-dim); font-size: 18px; pointer-events: none;
+    }
+    #search-input {
+      width: 100%; padding: 12px 16px 12px 48px;
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text);
+      font-family: inherit; font-size: 15px;
+      outline: none; transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    #search-input:focus {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(122,162,247,0.15);
+    }
+    #search-input::placeholder { color: var(--text-dim); }
+
+    /* ── Job Dashboard ── */
+    .job-dashboard {
+      padding: 12px 32px;
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .job-dashboard-header {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    }
+    .job-dashboard-title {
+      font-size: 13px; font-weight: 700; color: var(--text-mid);
+    }
+    .job-refresh {
+      padding: 6px 10px;
+      font-size: 12px;
+    }
+    .job-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 8px;
+    }
+    .job-pill {
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: var(--bg);
+      display: grid;
+      gap: 6px;
+    }
+    .job-pill.status-processing { border-color: var(--blue-dim); }
+    .job-pill.status-done { border-color: rgba(158,206,106,0.55); }
+    .job-pill.status-failed { border-color: rgba(247,118,142,0.65); }
+    .job-pill.status-cancelled { border-color: rgba(224,175,104,0.65); }
+    .job-pill-top {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      min-width: 0;
+    }
+    .job-pill strong {
+      min-width: 0;
+      color: var(--text);
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .job-pill span {
+      flex-shrink: 0;
+      border-radius: 99px;
+      padding: 2px 8px;
+      background: var(--bg-card2);
+      color: var(--text-mid);
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .job-pill.status-processing span { color: var(--blue); }
+    .job-pill.status-done span { color: var(--green); }
+    .job-pill.status-failed span { color: var(--red); }
+    .job-pill.status-cancelled span { color: var(--yellow); }
+    .job-pill small {
+      color: var(--text-mid);
+      font-size: 12px;
+      line-height: 1.4;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .job-pill em {
+      color: var(--text-dim);
+      font-size: 11px;
+      font-style: normal;
+    }
+    .job-empty {
+      color: var(--text-dim);
+      font-size: 13px;
+      padding: 8px 0;
+    }
+    .job-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .job-action {
+      background: transparent;
+      color: var(--text-mid);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .job-action:hover { background: var(--bg-hover); color: var(--text); }
+    .job-event-panel {
+      display: none;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      padding: 10px 12px;
+    }
+    .job-event-panel.show { display: block; }
+    .job-event-title {
+      display: flex; justify-content: space-between; align-items: center; gap: 8px;
+      color: var(--text-mid); font-size: 12px; font-weight: 700; margin-bottom: 8px;
+    }
+    .job-event-list {
+      display: grid;
+      gap: 6px;
+    }
+    .job-event {
+      display: grid;
+      gap: 2px;
+      border-left: 2px solid var(--blue-dim);
+      padding-left: 8px;
+      color: var(--text-mid);
+      font-size: 12px;
+    }
+    .job-event em {
+      color: var(--text-dim);
+      font-size: 11px;
+      font-style: normal;
+    }
+
+    /* ── Ops Dashboard ── */
+    .ops-dashboard {
+      padding: 12px 32px;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+    }
+    .ops-tile {
+      min-width: 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: var(--bg-card);
+    }
+    .ops-label {
+      color: var(--text-dim);
+      font-size: 11px;
+      margin-bottom: 4px;
+    }
+    .ops-value {
+      color: var(--text);
+      font-size: 16px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+    .ops-value.warn { color: var(--red); }
+    .ops-detail {
+      margin-top: 4px;
+      color: var(--text-dim);
+      font-size: 11px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    /* ── Content Area ── */
+    .content { display: flex; flex: 1; overflow: hidden; }
+
+    /* ── List Panel ── */
+    .list-panel {
+      width: 400px; flex-shrink: 0;
+      overflow-y: auto; padding: 20px;
+      border-right: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 12px;
+    }
+
+    .empty-state {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 12px;
+      padding: 60px 20px; color: var(--text-dim);
+      text-align: center;
+    }
+    .empty-state .icon { font-size: 48px; }
+    .empty-state p { font-size: 14px; line-height: 1.6; }
+
+    /* ── Meeting Card ── */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, transform 0.15s;
+    }
+    .card:hover {
+      background: var(--bg-hover);
+      border-color: var(--blue-dim);
+      transform: translateY(-1px);
+    }
+    .card.active {
+      border-color: var(--blue);
+      background: var(--bg-hover);
+      box-shadow: 0 0 0 2px rgba(122,162,247,0.2);
+    }
+    .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+    .card-title {
+      font-size: 15px; font-weight: 600; color: var(--text);
+      line-height: 1.4; flex: 1;
+    }
+    .card-id {
+      font-size: 11px; color: var(--text-dim);
+      background: var(--bg-card2); padding: 2px 8px; border-radius: 4px;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    .card-meta {
+      display: flex; align-items: center; gap: 12px;
+      margin-top: 8px; font-size: 12px; color: var(--text-dim);
+    }
+    .card-meta .dot { width: 4px; height: 4px; border-radius: 50%; background: var(--text-dim); }
+    .card-preview {
+      margin-top: 10px; font-size: 13px; color: var(--text-mid);
+      line-height: 1.6; display: -webkit-box;
+      -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+    }
+
+    /* ── Detail Panel ── */
+    .detail-panel {
+      flex: 1; overflow-y: auto; padding: 32px 40px;
+      display: flex; flex-direction: column; gap: 0;
+    }
+    .detail-placeholder {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; height: 100%; gap: 16px;
+      color: var(--text-dim); text-align: center;
+    }
+    .detail-placeholder .icon { font-size: 56px; opacity: 0.4; }
+    .detail-placeholder p { font-size: 15px; }
+
+    .detail-header {
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 32px;
+    }
+    .detail-title {
+      font-size: 26px; font-weight: 700; color: var(--text);
+      line-height: 1.3; margin-bottom: 14px;
+    }
+    .detail-meta-row {
+      display: flex; flex-wrap: wrap; gap: 12px;
+    }
+    .meta-chip {
+      display: flex; align-items: center; gap: 6px;
+      background: var(--bg-card2); padding: 6px 14px; border-radius: 8px;
+      font-size: 13px; color: var(--text-mid);
+    }
+    .meta-chip .icon { font-size: 14px; }
+    .detail-actions {
+      display: flex; align-items: center; justify-content: flex-end;
+      gap: 10px; flex-wrap: wrap; flex-shrink: 0;
+    }
+
+    /* ── Markdown Content ── */
+    .md-content { line-height: 1.8; color: var(--text-mid); font-size: 15px; }
+    .md-content h1, .md-content h2 {
+      color: var(--text); margin: 28px 0 12px;
+      padding-bottom: 8px; border-bottom: 1px solid var(--border);
+    }
+    .md-content h1 { font-size: 22px; }
+    .md-content h2 { font-size: 18px; color: var(--blue); }
+    .md-content h3 { font-size: 16px; color: var(--purple); margin: 20px 0 8px; }
+    .md-content p { margin-bottom: 12px; }
+    .md-content ul, .md-content ol { padding-left: 24px; margin-bottom: 12px; }
+    .md-content li { margin-bottom: 4px; }
+    .md-content strong { color: var(--text); font-weight: 600; }
+    .md-content code {
+      background: var(--bg-card2); color: var(--cyan);
+      padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 13px;
+    }
+    .md-content pre {
+      background: var(--bg-card2); padding: 16px; border-radius: 10px;
+      overflow-x: auto; margin: 16px 0;
+    }
+    .md-content pre code { background: none; padding: 0; }
+    .md-content blockquote {
+      border-left: 3px solid var(--blue-dim); padding-left: 16px;
+      color: var(--text-dim); margin: 16px 0;
+    }
+    .md-content table {
+      width: 100%; border-collapse: collapse; margin: 16px 0;
+    }
+    .md-content th {
+      background: var(--bg-card2); color: var(--blue);
+      padding: 10px 14px; text-align: left; font-size: 13px;
+    }
+    .md-content td {
+      padding: 10px 14px; border-bottom: 1px solid var(--border);
+      font-size: 14px;
+    }
+    .md-content tr:hover td { background: var(--bg-hover); }
+    .md-content hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+
+    /* ── Loading ── */
+    .loading-spinner {
+      display: inline-block; width: 20px; height: 20px;
+      border: 2px solid var(--border); border-top-color: var(--blue);
+      border-radius: 50%; animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Modal & Upload ── */
+    .btn-primary {
+      background: var(--blue); color: var(--bg);
+      border: none; padding: 10px 18px; border-radius: 8px;
+      font-size: 14px; font-weight: 600; font-family: inherit;
+      cursor: pointer; transition: opacity 0.2s, transform 0.1s;
+      display: inline-flex; align-items: center; gap: 8px;
+    }
+    .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(4px);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000; opacity: 0; pointer-events: none; transition: opacity 0.2s;
+    }
+    .modal-overlay.show { opacity: 1; pointer-events: auto; }
+    .modal {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: 16px; padding: 32px; width: 100%; max-width: 500px;
+      box-shadow: var(--shadow); transform: translateY(20px); transition: transform 0.3s;
+    }
+    .modal-overlay.show .modal { transform: translateY(0); }
+    .modal-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 24px;
+    }
+    .modal-title { font-size: 20px; font-weight: 600; color: var(--text); }
+    .modal-close {
+      background: transparent; border: none; color: var(--text-dim);
+      font-size: 24px; cursor: pointer;
+    }
+    .modal-close:hover { color: var(--text); }
+
+    .upload-area {
+      border: 2px dashed var(--border); border-radius: 12px;
+      padding: 40px 20px; text-align: center; color: var(--text-dim);
+      cursor: pointer; transition: border-color 0.2s, background 0.2s;
+      margin-bottom: 20px;
+    }
+    .upload-area:hover, .upload-area.dragover {
+      border-color: var(--blue); background: rgba(122, 162, 247, 0.05);
+    }
+    .upload-area .icon { font-size: 32px; margin-bottom: 12px; color: var(--blue-dim); }
+    .upload-area span { display: block; font-size: 14px; margin-top: 8px; color: var(--text-mid); }
+    #file-input { display: none; }
+    #evidence-file-input { display: none; }
+
+    .form-group { margin-bottom: 20px; }
+    .form-label { display: block; font-size: 13px; color: var(--text-mid); margin-bottom: 8px; }
+    .form-input {
+      width: 100%; padding: 12px 16px; background: var(--bg);
+      border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+      font-family: inherit; font-size: 14px; outline: none;
+    }
+    .form-input:focus { border-color: var(--blue); }
+
+    .modal-footer { display: flex; justify-content: flex-end; gap: 12px; margin-top: 32px; }
+    .btn-secondary {
+      background: transparent; color: var(--text); border: 1px solid var(--border);
+      padding: 10px 18px; border-radius: 8px; font-size: 14px; cursor: pointer;
+    }
+    .btn-secondary:hover { background: var(--bg-hover); }
+
+    .progress-box {
+      margin-top: 16px; display: none; background: var(--bg);
+      border-radius: 8px; padding: 16px; border: 1px solid var(--border);
+    }
+    .progress-box.show { display: block; }
+    .progress-text { font-size: 13px; color: var(--text-mid); display: flex; align-items: center; gap: 8px; }
+
+    /* ── Recording Modal ── */
+    .btn-record {
+      background: transparent; color: var(--red);
+      border: 1.5px solid var(--red); padding: 10px 18px; border-radius: 8px;
+      font-size: 14px; font-weight: 600; font-family: inherit;
+      cursor: pointer; transition: background 0.2s, transform 0.1s;
+      display: inline-flex; align-items: center; gap: 8px;
+    }
+    .btn-record:hover { background: rgba(247,118,142,0.1); transform: translateY(-1px); }
+
+    .rec-mode-tabs {
+      display: flex; gap: 8px; margin-bottom: 24px;
+    }
+    .rec-tab {
+      flex: 1; padding: 10px; border-radius: 8px; border: 1.5px solid var(--border);
+      background: transparent; color: var(--text-mid); font-size: 14px;
+      font-family: inherit; cursor: pointer; transition: all 0.2s;
+    }
+    .rec-tab.active {
+      border-color: var(--blue); background: rgba(122,162,247,0.1); color: var(--blue); font-weight: 600;
+    }
+    .rec-preview {
+      width: 100%; border-radius: 10px; background: var(--bg);
+      margin-bottom: 16px; display: none;
+    }
+    .rec-preview.show { display: block; }
+    .rec-visualizer {
+      width: 100%; height: 56px; border-radius: 8px; background: var(--bg);
+      display: block; margin-bottom: 16px;
+    }
+    .rec-timer {
+      font-size: 36px; font-weight: 700; color: var(--red);
+      text-align: center; letter-spacing: 4px; margin: 12px 0;
+      font-variant-numeric: tabular-nums;
+    }
+    .rec-status {
+      text-align: center; font-size: 13px; color: var(--text-dim); margin-bottom: 20px;
+    }
+    .rec-controls {
+      display: flex; justify-content: center; gap: 12px; margin-bottom: 20px;
+    }
+    .btn-rec-start {
+      background: var(--red); color: white; border: none;
+      padding: 12px 28px; border-radius: 99px; font-size: 15px; font-weight: 700;
+      font-family: inherit; cursor: pointer; transition: opacity 0.2s, transform 0.1s;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .btn-rec-start:hover { opacity: 0.85; transform: scale(1.03); }
+    .btn-rec-stop {
+      background: var(--bg-card2); color: var(--text); border: 1.5px solid var(--border);
+      padding: 12px 28px; border-radius: 99px; font-size: 15px; font-weight: 700;
+      font-family: inherit; cursor: pointer; display: none;
+      align-items: center; gap: 8px;
+    }
+    .btn-rec-stop.show { display: flex; }
+    .rec-dot {
+      width: 10px; height: 10px; border-radius: 50%; background: white;
+      animation: blink 1s step-start infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    .rec-result {
+      display: none; text-align: center; padding: 16px;
+      background: rgba(158,206,106,0.1); border: 1px solid var(--green);
+      border-radius: 10px; color: var(--green); font-size: 14px;
+    }
+    .rec-result.show { display: block; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Header -->
+  <header>
+    <div class="header-left">
+      <div class="logo">🎙 AI 會議助理 <span>· 歷史記錄</span></div>
+      <div class="badge">Powered by Gemini</div>
+    </div>
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-num" id="total-count">–</div>
+        <div class="stat-label">會議記錄</div>
+      </div>
+      <button class="btn-record" onclick="openRecordModal()">
+        <span style="font-size:16px;">🔴</span> 開始錄製
+      </button>
+      <button class="btn-primary" onclick="openUploadModal()">
+        <span style="font-size:16px;">⬆️</span> 上傳音檔
+      </button>
+    </div>
+  </header>
+
+  <!-- Search -->
+  <div class="search-bar">
+    <div class="search-wrap">
+      <span class="search-icon">🔍</span>
+      <input id="search-input" type="text"
+             placeholder="搜尋會議標題或內容關鍵字..."
+             autocomplete="off" />
+    </div>
+  </div>
+
+  <!-- Job Dashboard -->
+  <section class="job-dashboard" id="job-dashboard">
+    <div class="job-dashboard-header">
+      <div class="job-dashboard-title">任務狀態</div>
+      <button class="btn-secondary job-refresh" onclick="loadJobs()">更新</button>
+    </div>
+    <div class="job-list" id="job-list">
+      <div class="job-empty">載入任務中...</div>
+    </div>
+    <div class="job-event-panel" id="job-event-panel">
+      <div class="job-event-title">
+        <span id="job-event-heading">任務事件</span>
+        <button class="job-action" onclick="closeJobEvents()">關閉</button>
+      </div>
+      <div class="job-event-list" id="job-event-list"></div>
+    </div>
+  </section>
+
+  <!-- Ops Dashboard -->
+  <section class="ops-dashboard" id="ops-dashboard">
+    <div class="ops-tile">
+      <div class="ops-label">維運狀態</div>
+      <div class="ops-value" id="ops-health">載入中</div>
+    </div>
+    <div class="ops-tile">
+      <div class="ops-label">LINE/ngrok</div>
+      <div class="ops-value" id="ops-ngrok">載入中</div>
+      <div class="ops-detail" id="ops-ngrok-detail">–</div>
+    </div>
+    <div class="ops-tile">
+      <div class="ops-label">任務總數</div>
+      <div class="ops-value" id="ops-total-jobs">–</div>
+    </div>
+    <div class="ops-tile">
+      <div class="ops-label">失敗任務</div>
+      <div class="ops-value" id="ops-failed-jobs">–</div>
+    </div>
+    <div class="ops-tile">
+      <div class="ops-label">平均秒數</div>
+      <div class="ops-value" id="ops-average-seconds">–</div>
+    </div>
+  </section>
+
+  <!-- Content -->
+  <div class="content">
+
+    <!-- List -->
+    <div class="list-panel" id="list-panel">
+      <div class="empty-state">
+        <div class="icon">⏳</div>
+        <p>載入中...</p>
+      </div>
+    </div>
+
+    <!-- Detail -->
+    <div class="detail-panel" id="detail-panel">
+      <div class="detail-placeholder">
+        <div class="icon">📋</div>
+        <p>從左側選擇一筆會議記錄以查看詳情</p>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Upload Modal -->
+<div class="modal-overlay" id="upload-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">上傳音檔並產生會議記錄</div>
+      <button class="modal-close" onclick="closeUploadModal()">×</button>
+    </div>
+    <div class="upload-area" id="drop-zone" onclick="document.getElementById('file-input').click()">
+      <div class="icon">📤</div>
+      <div id="file-name-display">點擊選擇檔案，或將檔案拖曳至此</div>
+      <span id="upload-limit-hint">支援 mp3, wav, m4a, aac, flac (預設最高 500MB)</span>
+      <input type="file" id="file-input" accept="audio/*,video/mp4,video/webm" />
+    </div>
+    <div class="form-group">
+      <label class="form-label">自訂會議標題 (選填)</label>
+      <input type="text" id="custom-title" class="form-input" placeholder="例如：2026 Q3 產品規畫會議" />
+    </div>
+    <div class="progress-box" id="progress-box">
+      <div class="progress-text">
+        <div class="loading-spinner" style="width: 14px; height: 14px; border-width: 2px;"></div>
+        <span id="progress-msg">正在準備上傳...</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="cancelUploadOrClose()" id="btn-cancel">取消</button>
+      <button class="btn-primary" onclick="startUpload()" id="btn-upload">開始處理</button>
+    </div>
+  </div>
+</div>
+
+<!-- Recording Modal -->
+<div class="modal-overlay" id="record-modal">
+  <div class="modal" style="max-width: 520px;">
+    <div class="modal-header">
+      <div class="modal-title">🔴 即時錄製會議</div>
+      <button class="modal-close" id="rec-close-btn" onclick="closeRecordModal()">×</button>
+    </div>
+
+    <!-- 模式選擇 -->
+    <div class="rec-mode-tabs">
+      <button class="rec-tab active" id="tab-audio" onclick="switchRecMode('audio')">🎙 僅錄音</button>
+      <button class="rec-tab" id="tab-video" onclick="switchRecMode('video')">🎥 錄音 + 視訊</button>
+    </div>
+
+    <!-- 視訊預覽（錄影模式才顯示） -->
+    <video id="rec-preview" class="rec-preview" autoplay muted playsinline></video>
+
+    <!-- 聲波視覺化 -->
+    <canvas id="rec-visualizer" class="rec-visualizer" width="480" height="56"></canvas>
+
+    <!-- 計時器 -->
+    <div class="rec-timer" id="rec-timer">00:00</div>
+    <div class="rec-status" id="rec-status">準備就緒，按下開始錄製</div>
+
+    <!-- 標題 -->
+    <div class="form-group" style="margin-bottom: 16px;">
+      <label class="form-label">會議標題 (選填)</label>
+      <input type="text" id="rec-title" class="form-input" placeholder="例如：週例會" />
+    </div>
+
+    <!-- 控制按鈕 -->
+    <div class="rec-controls">
+      <button class="btn-rec-start" id="btn-rec-start" onclick="startRecording()">
+        <div class="rec-dot"></div> 開始錄製
+      </button>
+      <button class="btn-rec-stop" id="btn-rec-stop" onclick="stopRecording()">
+        ⏹ 停止並送出
+      </button>
+    </div>
+
+    <!-- 完成提示 -->
+    <div class="rec-result" id="rec-result">
+      ✅ 錄製完成！正在送出 AI 分析，請稍候...
+    </div>
+
+    <!-- 進度 -->
+    <div class="progress-box" id="rec-progress-box">
+      <div class="progress-text">
+        <div class="loading-spinner" style="width: 14px; height: 14px; border-width: 2px;"></div>
+        <span id="rec-progress-msg">正在上傳...</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';  // 同源請求，不需要前綴
+let debounceTimer = null;
+let currentId = null;
+let runtimeConfig = {
+  model: '',
+  max_upload_mb: 500,
+  max_upload_bytes: 500 * 1024 * 1024,
+  supported_extensions: ['.mp3', '.wav', '.m4a', '.aac', '.flac']
+};
+
+function formatBytes(bytes = 0) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(0)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(0)} KB`;
+  return `${value} B`;
+}
+
+async function apiErrorMessage(res) {
+  const fallback = `HTTP ${res.status}`;
+  const copy = res.clone();
+  try {
+    const payload = await res.json();
+    return payload.detail || payload.error || fallback;
+  } catch {
+    const text = await copy.text();
+    return text || fallback;
+  }
+}
+
+function updateUploadLimitHint() {
+  const hint = document.getElementById('upload-limit-hint');
+  if (!hint) return;
+  const extensions = (runtimeConfig.supported_extensions || [])
+    .filter(ext => ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.webm', '.mp4'].includes(ext))
+    .map(ext => ext.replace('.', ''))
+    .join(', ');
+  hint.textContent = `支援 ${extensions || '常見音訊/影片格式'}，單檔上限 ${formatBytes(runtimeConfig.max_upload_bytes)}`;
+}
+
+async function loadRuntimeConfig() {
+  try {
+    const res = await fetch(`${API}/config`);
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    runtimeConfig = { ...runtimeConfig, ...(await res.json()) };
+  } catch (err) {
+    console.warn('載入執行期設定失敗，使用預設值。', err);
+  }
+  updateUploadLimitHint();
+}
+
+// ── 主要資料載入 ──────────────────────────────────────────────────
+async function loadMeetings(query = '') {
+  const listEl = document.getElementById('list-panel');
+  listEl.innerHTML = `<div class="empty-state"><div class="loading-spinner"></div></div>`;
+
+  try {
+    let url = query
+      ? `${API}/meetings/search?q=${encodeURIComponent(query)}`
+      : `${API}/meetings?limit=50`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    const data = await res.json();
+
+    const records = data.records ?? data;  // search 回傳陣列；list 回傳物件
+    const total = data.total ?? records.length;
+
+    document.getElementById('total-count').textContent = total;
+
+    if (!records.length) {
+      const safeQuery = escapeHtml(query);
+      listEl.innerHTML = `
+        <div class="empty-state">
+          <div class="icon">🗂</div>
+          <p>${query ? `找不到包含「${safeQuery}」的會議記錄` : '尚無會議記錄<br>請先透過 LINE Bot 或桌面 GUI 處理一段音檔'}</p>
+        </div>`;
+      return;
+    }
+
+    listEl.innerHTML = records.map(r => `
+      <div class="card ${r.id === currentId ? 'active' : ''}"
+           data-id="${r.id}" data-title="${escapeHtml(r.title)}" onclick="openDetail(${r.id})">
+        <div class="card-header">
+          <div class="card-title">${escapeHtml(r.title)}</div>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <div class="card-id">#${r.id}</div>
+            <button onclick="deleteMeeting(event, ${r.id})"
+                    title="刪除會議記錄"
+                    style="background: transparent; border: none; cursor: pointer; font-size: 16px; opacity: 0.5; transition: opacity 0.2s;"
+                    onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.5">
+              🗑️
+            </button>
+          </div>
+        </div>
+        <div class="card-meta">
+          <span>📅 ${r.date}</span>
+          <span class="dot"></span>
+          <span>🔊 ${escapeHtml(r.source_audio)}</span>
+        </div>
+        <div class="card-preview">${escapeHtml(r.summary_preview || '（無摘要）')}</div>
+      </div>
+    `).join('');
+
+  } catch (err) {
+    listEl.innerHTML = `
+      <div class="empty-state">
+        <div class="icon">❌</div>
+        <p>載入失敗：${err.message}<br>請確認後端 API 是否正常運行</p>
+      </div>`;
+  }
+}
+
+// ── 刪除會議記錄 ────────────────────────────────────────────────────
+async function deleteMeeting(event, id) {
+  event.stopPropagation(); // 阻止點擊事件氣泡，避免觸發 openDetail
+  const card = event.currentTarget.closest('.card');
+  const title = card?.dataset?.title || `#${id}`;
+
+  if (!confirm(`確定要刪除「${title}」嗎？\n此動作將一併刪除關聯的 Markdown 檔案，且無法復原。`)) {
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API}/meetings/${id}`, { method: 'DELETE' });
+    if (!res.ok) {
+      throw new Error(await apiErrorMessage(res));
+    }
+
+    // 如果刪除的是當前正在檢視的記錄，清空右側面板
+    if (currentId === id) {
+      currentId = null;
+      document.getElementById('detail-panel').innerHTML = `
+        <div class="empty-state">
+          <div class="icon">🤖</div>
+          <p>AI 語音會議助理<br>請在左側點選會議記錄，或點擊「上傳音檔」</p>
+        </div>`;
+    }
+
+    // 重新載入列表
+    loadMeetings(document.getElementById('search-input').value.trim());
+
+  } catch (err) {
+    alert(`刪除失敗：${err.message}`);
+  }
+}
+
+// ── 上傳補充資料 ────────────────────────────────────────────────────
+async function uploadEvidence(id, file) {
+  if (!file) return;
+
+  const allowed = ['.png', '.jpg', '.jpeg', '.webp', '.pdf', '.txt', '.md', '.csv', '.docx'];
+  const suffix = file.name.includes('.') ? `.${file.name.split('.').pop().toLowerCase()}` : '';
+  if (!allowed.includes(suffix)) {
+    alert(`不支援的補充資料格式：${suffix || '無副檔名'}`);
+    return;
+  }
+  if (file.size > runtimeConfig.max_upload_bytes) {
+    alert(`檔案過大，請上傳 ${formatBytes(runtimeConfig.max_upload_bytes)} 以內的補充資料。`);
+    return;
+  }
+
+  const button = document.getElementById('evidence-upload-button');
+  const originalButtonText = button?.innerHTML;
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = '<span class="loading-spinner"></span> 分析中';
+  }
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const res = await fetch(`${API}/meetings/${id}/evidence`, {
+      method: 'POST',
+      body: formData
+    });
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    await openDetail(id);
+    await loadMeetings(document.getElementById('search-input').value.trim());
+  } catch (err) {
+    alert(`補充資料分析失敗：${err.message}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = originalButtonText || '📎 補充資料';
+    }
+  }
+}
+
+// ── 開啟詳情 ────────────────────────────────────────────────────────
+async function openDetail(id) {
+  currentId = id;
+
+  // 更新 active 狀態
+  document.querySelectorAll('.card').forEach(c => {
+    c.classList.toggle('active', parseInt(c.dataset.id) === id);
+  });
+
+  const detail = document.getElementById('detail-panel');
+  detail.innerHTML = `
+    <div class="detail-placeholder">
+      <div class="loading-spinner"></div>
+      <p style="margin-top:12px">載入會議記錄中...</p>
+    </div>`;
+
+  try {
+    const res = await fetch(`${API}/meetings/${id}`);
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    const r = await res.json();
+
+    // 渲染 Markdown
+    const md = r.full_content || '（無內容）';
+    const html = DOMPurify.sanitize(marked.parse(md));
+
+    detail.innerHTML = `
+      <div class="detail-header">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;">
+          <div class="detail-title">${escapeHtml(r.title)}</div>
+          <div class="detail-actions">
+            <button id="evidence-upload-button" class="btn-secondary" onclick="document.getElementById('evidence-file-input').click()">📎 補充資料</button>
+            <input id="evidence-file-input"
+                   type="file"
+                   accept=".png,.jpg,.jpeg,.webp,.pdf,.txt,.md,.csv,.docx"
+                   onchange="uploadEvidence(${id}, this.files[0]); this.value='';">
+            <a href="${API}/meetings/${id}/export/docx" class="btn-primary" style="text-decoration: none; flex-shrink: 0;" download>📥 下載 4-QA-005 V01</a>
+          </div>
+        </div>
+        <div class="detail-meta-row" style="margin-top: 12px;">
+          <div class="meta-chip"><span class="icon">📅</span>${r.date}</div>
+          <div class="meta-chip"><span class="icon">🔊</span>${escapeHtml(r.source_audio)}</div>
+          <div class="meta-chip"><span class="icon">⏰</span>${formatDate(r.created_at)}</div>
+        </div>
+      </div>
+      <div class="md-content">${html}</div>
+    `;
+  } catch (err) {
+    detail.innerHTML = `
+      <div class="detail-placeholder">
+        <div class="icon">❌</div>
+        <p>無法載入詳情：${err.message}</p>
+      </div>`;
+  }
+}
+
+// ── 搜尋 debounce ───────────────────────────────────────────────────
+document.getElementById('search-input').addEventListener('input', e => {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => loadMeetings(e.target.value.trim()), 300);
+});
+
+// ── 工具函式 ────────────────────────────────────────────────────────
+function escapeHtml(s = '') {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+          .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function formatDate(iso = '') {
+  if (!iso) return '';
+  return iso.replace('T', ' ').slice(0, 16);
+}
+
+function jobStatusLabel(status = '') {
+  return {
+    pending: '等待',
+    processing: '處理中',
+    done: '完成',
+    failed: '失敗',
+    cancelled: '取消'
+  }[status] || status || '未知';
+}
+
+function jobProgressText(job) {
+  if (job.progress_total) {
+    return `${job.progress_current || 0}/${job.progress_total}`;
+  }
+  if (job.max_attempts) {
+    return `嘗試 ${job.attempts || 0}/${job.max_attempts}`;
+  }
+  return formatDate(job.updated_at || job.created_at);
+}
+
+function renderJobPill(job) {
+  const status = String(job.status || 'unknown');
+  const statusClass = ['pending', 'processing', 'done', 'failed', 'cancelled'].includes(status)
+    ? status
+    : 'unknown';
+  const jobId = String(job.job_id || 'unknown');
+  const source = job.source ? ` · ${job.source}` : '';
+  const message = job.error_detail || job.message || '無狀態訊息';
+  const canRetry = ['failed', 'cancelled'].includes(status);
+  const canDelete = ['done', 'failed', 'cancelled'].includes(status);
+  const actions = [
+    `<button class="job-action" onclick="loadJobEvents('${escapeHtml(jobId)}')">事件</button>`,
+    canRetry ? `<button class="job-action" onclick="retryJob('${escapeHtml(jobId)}')">重試</button>` : '',
+    canDelete ? `<button class="job-action" onclick="deleteJob('${escapeHtml(jobId)}')">刪除</button>` : ''
+  ].join('');
+  return `
+    <div class="job-pill status-${statusClass}">
+      <div class="job-pill-top">
+        <strong title="${escapeHtml(jobId)}">${escapeHtml(jobId.slice(0, 12))}</strong>
+        <span>${escapeHtml(jobStatusLabel(status))}</span>
+      </div>
+      <small>${escapeHtml(message)}</small>
+      <em>${escapeHtml(jobProgressText(job))}${escapeHtml(source)}</em>
+      ${actions ? `<div class="job-actions">${actions}</div>` : ''}
+    </div>`;
+}
+
+function jobEventLabel(type = '') {
+  return {
+    created: '建立任務',
+    claimed: '開始處理',
+    requeued: '手動重試',
+    retry_scheduled: '自動重試',
+    interrupted_requeued: '中斷後重排',
+    cancel_requested: '取消要求',
+    status_pending: '等待',
+    status_processing: '處理中',
+    status_done: '完成',
+    status_failed: '失敗',
+    status_cancelled: '取消'
+  }[type] || type || '事件';
+}
+
+function renderJobEvent(event) {
+  const detail = event.detail ? `<small>${escapeHtml(event.detail)}</small>` : '';
+  const message = event.message ? `<small>${escapeHtml(event.message)}</small>` : '';
+  return `
+    <div class="job-event">
+      <strong>${escapeHtml(jobEventLabel(event.event_type))}</strong>
+      ${message}
+      ${detail}
+      <em>${escapeHtml(formatDate(event.created_at))}</em>
+    </div>`;
+}
+
+function closeJobEvents() {
+  const panel = document.getElementById('job-event-panel');
+  if (panel) panel.classList.remove('show');
+}
+
+async function loadJobEvents(jobId) {
+  const panel = document.getElementById('job-event-panel');
+  const heading = document.getElementById('job-event-heading');
+  const list = document.getElementById('job-event-list');
+  if (!panel || !heading || !list) return;
+
+  panel.classList.add('show');
+  heading.textContent = `任務事件 · ${jobId.slice(0, 12)}`;
+  list.innerHTML = '<div class="job-empty">載入事件中...</div>';
+
+  try {
+    const res = await fetch(`${API}/jobs/${jobId}/events`);
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    const data = await res.json();
+    const events = data.events || [];
+    list.innerHTML = events.length
+      ? events.map(renderJobEvent).join('')
+      : '<div class="job-empty">尚無事件</div>';
+  } catch (err) {
+    list.innerHTML = `<div class="job-empty">事件載入失敗：${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function loadJobs() {
+  const jobList = document.getElementById('job-list');
+  if (!jobList) return;
+
+  try {
+    const res = await fetch(`${API}/jobs?limit=20`);
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    const jobs = data.jobs || [];
+
+    if (!jobs.length) {
+      jobList.innerHTML = '<div class="job-empty">目前沒有任務</div>';
+      return;
+    }
+
+    jobList.innerHTML = jobs.slice(0, 6).map(renderJobPill).join('');
+  } catch (err) {
+    jobList.innerHTML = `<div class="job-empty">任務載入失敗：${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function retryJob(jobId) {
+  if (!jobId) return;
+  try {
+    const res = await fetch(`${API}/jobs/${jobId}/retry`, { method: 'POST' });
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    await loadJobs();
+    await loadMetrics();
+  } catch (err) {
+    alert(`重試失敗：${err.message}`);
+  }
+}
+
+async function deleteJob(jobId) {
+  if (!jobId) return;
+  if (!confirm(`刪除任務 ${jobId}？`)) return;
+
+  try {
+    const res = await fetch(`${API}/jobs/${jobId}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    await loadJobs();
+    await loadMetrics();
+  } catch (err) {
+    alert(`刪除失敗：${err.message}`);
+  }
+}
+
+async function loadMetrics() {
+  const healthEl = document.getElementById('ops-health');
+  const totalEl = document.getElementById('ops-total-jobs');
+  const failedEl = document.getElementById('ops-failed-jobs');
+  const averageEl = document.getElementById('ops-average-seconds');
+  const ngrokEl = document.getElementById('ops-ngrok');
+  const ngrokDetailEl = document.getElementById('ops-ngrok-detail');
+  if (!healthEl || !totalEl || !failedEl || !averageEl || !ngrokEl || !ngrokDetailEl) return;
+
+  try {
+    const [metricsRes, healthRes] = await Promise.all([
+      fetch(`${API}/metrics`),
+      fetch(`${API}/health`)
+    ]);
+    if (!metricsRes.ok) throw new Error(await metricsRes.text());
+    if (!healthRes.ok) throw new Error(await healthRes.text());
+    const data = await metricsRes.json();
+    const health = await healthRes.json();
+    const failed = data.jobs?.by_status?.failed || 0;
+    const healthOk = health.status === 'ok';
+    healthEl.textContent = healthOk ? '正常' : '需注意';
+    healthEl.classList.toggle('warn', !healthOk);
+    totalEl.textContent = data.jobs?.total ?? 0;
+    failedEl.textContent = failed;
+    failedEl.classList.toggle('warn', failed > 0);
+    averageEl.textContent = data.jobs?.average_completed_seconds == null
+      ? '–'
+      : `${data.jobs.average_completed_seconds}s`;
+
+    const ngrok = data.ngrok || {};
+    ngrokEl.textContent = ngrok.running ? '已連線' : '未連線';
+    ngrokEl.classList.toggle('warn', !ngrok.running);
+    ngrokDetailEl.textContent = ngrok.webhook_url || ngrok.message || '尚無 tunnel 資訊';
+  } catch (err) {
+    healthEl.textContent = '載入失敗';
+    healthEl.classList.add('warn');
+    ngrokEl.textContent = '載入失敗';
+    ngrokEl.classList.add('warn');
+    ngrokDetailEl.textContent = '無法讀取 /metrics';
+  }
+}
+
+// ── 上傳與輪詢邏輯 ──────────────────────────────────────────────────
+const uploadModal = document.getElementById('upload-modal');
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+const fileNameDisplay = document.getElementById('file-name-display');
+const btnUpload = document.getElementById('btn-upload');
+const btnCancel = document.getElementById('btn-cancel');
+const progressBox = document.getElementById('progress-box');
+const progressMsg = document.getElementById('progress-msg');
+
+let selectedFile = null;
+let activeUploadJobId = null;
+let activeUploadPoll = null;
+
+async function cancelBackendJob(jobId) {
+  if (!jobId) return;
+  const res = await fetch(`${API}/jobs/${jobId}/cancel`, { method: 'POST' });
+  if (!res.ok) throw new Error(await apiErrorMessage(res));
+}
+
+function clearActiveUploadPoll() {
+  if (activeUploadPoll) {
+    clearInterval(activeUploadPoll);
+    activeUploadPoll = null;
+  }
+}
+
+function openUploadModal() {
+  uploadModal.classList.add('show');
+  resetUploadForm();
+}
+
+function closeUploadModal() {
+  if (btnUpload.disabled && activeUploadJobId) {
+    cancelActiveUpload();
+    return;
+  }
+  if (btnUpload.disabled) return; // 檔案仍在上傳中，尚未取得可取消的 job id
+  uploadModal.classList.remove('show');
+}
+
+async function cancelUploadOrClose() {
+  if (activeUploadJobId) {
+    await cancelActiveUpload();
+    return;
+  }
+  closeUploadModal();
+}
+
+async function cancelActiveUpload() {
+  if (!activeUploadJobId) return;
+  const jobId = activeUploadJobId;
+  btnCancel.disabled = true;
+  progressMsg.textContent = '正在取消處理...';
+  try {
+    await cancelBackendJob(jobId);
+  } catch (err) {
+    progressMsg.textContent = `取消失敗：${err.message}`;
+    btnCancel.disabled = false;
+    return;
+  }
+  clearActiveUploadPoll();
+  activeUploadJobId = null;
+  progressMsg.textContent = '已取消處理。';
+  btnUpload.disabled = false;
+  btnCancel.disabled = false;
+  btnCancel.textContent = '取消';
+  loadJobs();
+  loadMetrics();
+}
+
+function resetUploadForm() {
+  clearActiveUploadPoll();
+  activeUploadJobId = null;
+  selectedFile = null;
+  fileInput.value = '';
+  document.getElementById('custom-title').value = '';
+  fileNameDisplay.textContent = '點擊選擇檔案，或將檔案拖曳至此';
+  fileNameDisplay.style.color = '';
+  progressBox.classList.remove('show');
+  btnUpload.disabled = false;
+  btnCancel.disabled = false;
+  btnCancel.textContent = '取消';
+}
+
+// 拖曳事件
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) handleFileSelect(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e => {
+  if (e.target.files.length) handleFileSelect(e.target.files[0]);
+});
+
+function handleFileSelect(file) {
+  selectedFile = file;
+  const sizeText = formatBytes(file.size);
+  if (selectedFile.size > runtimeConfig.max_upload_bytes) {
+    fileNameDisplay.textContent = `檔案過大：${file.name}（${sizeText}），上限 ${formatBytes(runtimeConfig.max_upload_bytes)}`;
+    fileNameDisplay.style.color = 'var(--red)';
+    return;
+  }
+  fileNameDisplay.textContent = `📄 ${file.name} (${sizeText})`;
+  fileNameDisplay.style.color = 'var(--text)';
+}
+
+async function startUpload() {
+  if (!selectedFile) {
+    alert("請先選擇一個音檔！");
+    return;
+  }
+  if (selectedFile.size > runtimeConfig.max_upload_bytes) {
+    alert(`檔案大小超過上限 ${formatBytes(runtimeConfig.max_upload_bytes)}，請選擇較小的檔案。`);
+    return;
+  }
+
+  btnUpload.disabled = true;
+  btnCancel.disabled = true;
+  progressBox.classList.add('show');
+  progressMsg.textContent = '正在上傳檔案... (1/2)';
+
+  const formData = new FormData();
+  formData.append('file', selectedFile);
+  const customTitle = document.getElementById('custom-title').value.trim();
+  if (customTitle) formData.append('title', customTitle);
+
+  try {
+    const res = await fetch(`${API}/upload-audio`, { method: 'POST', body: formData });
+    if (!res.ok) {
+      throw new Error(await apiErrorMessage(res));
+    }
+    const data = await res.json();
+    activeUploadJobId = data.job_id;
+    btnCancel.disabled = false;
+    btnCancel.textContent = '取消處理';
+    loadJobs();
+    loadMetrics();
+    pollStatus(data.job_id);
+  } catch (err) {
+    progressMsg.textContent = `❌ 上傳失敗: ${err.message}`;
+    btnUpload.disabled = false;
+    btnCancel.disabled = false;
+  }
+}
+
+async function pollStatus(jobId) {
+  clearActiveUploadPoll();
+  activeUploadJobId = jobId;
+  progressMsg.textContent = '檔案上傳成功！正在等待 AI 處理...';
+  const startTime = Date.now();
+
+  activeUploadPoll = setInterval(async () => {
+    try {
+      const res = await fetch(`${API}/status/${jobId}`);
+      if (!res.ok) throw new Error("查詢狀態失敗");
+      const data = await res.json();
+
+      // 即時顯示後端的 message，並附加已等待時間
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      const timeStr = elapsed < 60
+        ? `（已等待 ${elapsed} 秒）`
+        : `（已等待 ${Math.floor(elapsed / 60)} 分 ${elapsed % 60} 秒）`;
+      const progressText = data.progress_total
+        ? `（${data.progress_current || 0}/${data.progress_total}）`
+        : '';
+
+      if (data.status === 'done') {
+        clearActiveUploadPoll();
+        activeUploadJobId = null;
+        progressMsg.innerHTML = '✅ 處理完成！';
+        btnUpload.disabled = false;
+        btnCancel.disabled = false;
+        btnCancel.textContent = '取消';
+        loadJobs();
+        loadMetrics();
+        setTimeout(() => {
+          closeUploadModal();
+          document.getElementById('search-input').value = '';
+          loadMeetings().then(() => {
+            const firstCard = document.querySelector('.card');
+            if (firstCard) firstCard.click();
+          });
+        }, 1500);
+      } else if (data.status === 'failed') {
+        clearActiveUploadPoll();
+        activeUploadJobId = null;
+        progressMsg.textContent = `❌ 處理失敗: ${data.message || '未知錯誤'}`;
+        btnUpload.disabled = false;
+        btnCancel.disabled = false;
+        btnCancel.textContent = '取消';
+        loadJobs();
+        loadMetrics();
+      } else if (data.status === 'cancelled') {
+        clearActiveUploadPoll();
+        activeUploadJobId = null;
+        progressMsg.textContent = '已取消處理。';
+        btnUpload.disabled = false;
+        btnCancel.disabled = false;
+        btnCancel.textContent = '取消';
+        loadJobs();
+        loadMetrics();
+      } else {
+        // processing / pending：顯示後端 message
+        const msg = data.message || 'AI 正在處理中...';
+        progressMsg.textContent = `${msg}${progressText} ${timeStr}`;
+        loadJobs();
+        loadMetrics();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  }, 2000);
+}
+
+// ── 啟動 ────────────────────────────────────────────────────────────
+loadRuntimeConfig();
+loadMeetings();
+loadJobs();
+loadMetrics();
+setInterval(loadJobs, 10000);
+setInterval(loadMetrics, 10000);
+
+// =========================================================================
+// 🔴 錄音 / 錄影功能
+// =========================================================================
+let mediaRecorder = null;
+let recordedChunks = [];
+let recTimerInterval = null;
+let recSeconds = 0;
+let recMode = 'audio';   // 'audio' | 'video'
+let recStream = null;
+let recAnimFrame = null;
+let audioCtx = null;
+let analyser = null;
+let activeRecordingJobId = null;
+let activeRecordingPoll = null;
+
+const recModal    = document.getElementById('record-modal');
+const recPreview  = document.getElementById('rec-preview');
+const recVis      = document.getElementById('rec-visualizer');
+const recTimerEl  = document.getElementById('rec-timer');
+const recStatusEl = document.getElementById('rec-status');
+const btnRecStart = document.getElementById('btn-rec-start');
+const btnRecStop  = document.getElementById('btn-rec-stop');
+const recResult   = document.getElementById('rec-result');
+const recProg     = document.getElementById('rec-progress-box');
+const recProgMsg  = document.getElementById('rec-progress-msg');
+
+function openRecordModal() {
+  resetRecorder();
+  recModal.classList.add('show');
+}
+
+function closeRecordModal() {
+  if (activeRecordingJobId) {
+    cancelActiveRecording();
+    return;
+  }
+  // 如果正在錄製，先停止並釋放資源
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+  }
+  if (recStream) {
+    recStream.getTracks().forEach(t => t.stop());
+    recStream = null;
+  }
+  if (recTimerInterval) clearInterval(recTimerInterval);
+  if (recAnimFrame) cancelAnimationFrame(recAnimFrame);
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  recModal.classList.remove('show');
+}
+
+function clearActiveRecordingPoll() {
+  if (activeRecordingPoll) {
+    clearInterval(activeRecordingPoll);
+    activeRecordingPoll = null;
+  }
+}
+
+async function cancelActiveRecording() {
+  if (!activeRecordingJobId) return;
+  const jobId = activeRecordingJobId;
+  const closeBtn = document.getElementById('rec-close-btn');
+  closeBtn.disabled = true;
+  recProgMsg.textContent = '正在取消處理...';
+  try {
+    await cancelBackendJob(jobId);
+  } catch (err) {
+    recProgMsg.textContent = `取消失敗：${err.message}`;
+    closeBtn.disabled = false;
+    return;
+  }
+  clearActiveRecordingPoll();
+  activeRecordingJobId = null;
+  recProgMsg.textContent = '已取消處理。';
+  closeBtn.disabled = false;
+  loadJobs();
+  loadMetrics();
+}
+
+function resetRecorder() {
+  clearActiveRecordingPoll();
+  activeRecordingJobId = null;
+  mediaRecorder = null;
+  recordedChunks = [];
+  recSeconds = 0;
+  recTimerEl.textContent = '00:00';
+  recStatusEl.textContent = '準備就緒，按下開始錄製';
+  btnRecStart.style.display = 'flex';
+  btnRecStop.classList.remove('show');
+  recResult.classList.remove('show');
+  recProg.classList.remove('show');
+  recPreview.classList.remove('show');
+  document.getElementById('rec-title').value = '';
+  // 清空 canvas
+  const ctx = recVis.getContext('2d');
+  ctx.clearRect(0, 0, recVis.width, recVis.height);
+}
+
+function switchRecMode(mode) {
+  recMode = mode;
+  document.getElementById('tab-audio').classList.toggle('active', mode === 'audio');
+  document.getElementById('tab-video').classList.toggle('active', mode === 'video');
+}
+
+async function startRecording() {
+  try {
+    const constraints = recMode === 'video'
+      ? { audio: true, video: { width: 1280, height: 720 } }
+      : { audio: true };
+
+    recStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+    // 視訊預覽
+    if (recMode === 'video') {
+      recPreview.srcObject = recStream;
+      recPreview.classList.add('show');
+    }
+
+    // 聲波視覺化
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    const source = audioCtx.createMediaStreamSource(recStream);
+    source.connect(analyser);
+    drawVisualizer();
+
+    // 選擇容器格式
+    const mimeTypes = recMode === 'video'
+      ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+      : ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
+    const mimeType = mimeTypes.find(t => MediaRecorder.isTypeSupported(t)) || '';
+
+    mediaRecorder = new MediaRecorder(recStream, mimeType ? { mimeType } : {});
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = onRecordingStopped;
+    mediaRecorder.start(1000);  // 每秒收一次 chunk
+
+    // 計時器
+    recTimerInterval = setInterval(() => {
+      recSeconds++;
+      const m = String(Math.floor(recSeconds / 60)).padStart(2, '0');
+      const s = String(recSeconds % 60).padStart(2, '0');
+      recTimerEl.textContent = `${m}:${s}`;
+    }, 1000);
+
+    // UI 更新
+    btnRecStart.style.display = 'none';
+    btnRecStop.classList.add('show');
+    recStatusEl.textContent = '🔴 錄製中...';
+    recTimerEl.style.color = 'var(--red)';
+
+  } catch (err) {
+    alert(`無法存取錄音裝置：${err.message}\n\n請確認瀏覽器已授予麥克風/攝影機權限。`);
+  }
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+  }
+  if (recStream) {
+    recStream.getTracks().forEach(t => t.stop());
+  }
+  clearInterval(recTimerInterval);
+  cancelAnimationFrame(recAnimFrame);
+  recStatusEl.textContent = '✅ 錄製完成，正在送出 AI 分析...';
+  btnRecStop.classList.remove('show');
+}
+
+async function onRecordingStopped() {
+  // 決定副檔名
+  const ext = recMode === 'video' ? 'webm' : 'webm';
+  const title = document.getElementById('rec-title').value.trim()
+    || `現場錄製_${new Date().toLocaleString('zh-TW').replace(/[/:]/g, '-')}`;
+
+  const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+  const file = new File([blob], `recording.${ext}`, { type: blob.type });
+  if (file.size > runtimeConfig.max_upload_bytes) {
+    recProg.classList.add('show');
+    recProgMsg.textContent = `❌ 錄製檔案超過上限 ${formatBytes(runtimeConfig.max_upload_bytes)}，請縮短錄製時間。`;
+    document.getElementById('rec-close-btn').disabled = false;
+    return;
+  }
+
+  recResult.classList.add('show');
+  recProg.classList.add('show');
+  recProgMsg.textContent = '正在上傳...';
+
+  // 關閉錄製按鈕，禁止關閉
+  document.getElementById('rec-close-btn').disabled = true;
+
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('title', title);
+
+  try {
+    const res = await fetch(`${API}/upload-audio`, { method: 'POST', body: formData });
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    const data = await res.json();
+    activeRecordingJobId = data.job_id;
+    document.getElementById('rec-close-btn').disabled = false;
+    loadJobs();
+    loadMetrics();
+
+    // 開始輪詢
+    pollRecStatus(data.job_id);
+  } catch (err) {
+    recProgMsg.textContent = `❌ 上傳失敗：${err.message}`;
+    document.getElementById('rec-close-btn').disabled = false;
+  }
+}
+
+async function pollRecStatus(jobId) {
+  clearActiveRecordingPoll();
+  activeRecordingJobId = jobId;
+  const startTime = Date.now();
+  activeRecordingPoll = setInterval(async () => {
+    try {
+      const res = await fetch(`${API}/status/${jobId}`);
+      const data = await res.json();
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      const timeStr = elapsed < 60
+        ? `（已等待 ${elapsed} 秒）`
+        : `（已等待 ${Math.floor(elapsed / 60)} 分 ${elapsed % 60} 秒）`;
+      const progressText = data.progress_total
+        ? `（${data.progress_current || 0}/${data.progress_total}）`
+        : '';
+
+      if (data.status === 'done') {
+        clearActiveRecordingPoll();
+        activeRecordingJobId = null;
+        recProgMsg.textContent = '✅ AI 分析完成！';
+        document.getElementById('rec-close-btn').disabled = false;
+        loadJobs();
+        loadMetrics();
+        setTimeout(() => {
+          closeRecordModal();
+          document.getElementById('search-input').value = '';
+          loadMeetings().then(() => {
+            const firstCard = document.querySelector('.card');
+            if (firstCard) firstCard.click();
+          });
+        }, 1500);
+      } else if (data.status === 'failed') {
+        clearActiveRecordingPoll();
+        activeRecordingJobId = null;
+        recProgMsg.textContent = `❌ AI 分析失敗：${data.message || '未知錯誤'}`;
+        document.getElementById('rec-close-btn').disabled = false;
+        loadJobs();
+        loadMetrics();
+      } else if (data.status === 'cancelled') {
+        clearActiveRecordingPoll();
+        activeRecordingJobId = null;
+        recProgMsg.textContent = '已取消處理。';
+        document.getElementById('rec-close-btn').disabled = false;
+        loadJobs();
+        loadMetrics();
+      } else {
+        recProgMsg.textContent = `${data.message || 'AI 處理中...'}${progressText} ${timeStr}`;
+        loadJobs();
+        loadMetrics();
+      }
+    } catch (e) { console.error(e); }
+  }, 2000);
+}
+
+function drawVisualizer() {
+  if (!analyser) return;
+  const canvas = recVis;
+  const ctx = canvas.getContext('2d');
+  const bufferLength = analyser.frequencyBinCount;
+  const dataArray = new Uint8Array(bufferLength);
+
+  function draw() {
+    recAnimFrame = requestAnimationFrame(draw);
+    analyser.getByteFrequencyData(dataArray);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const barWidth = (canvas.width / bufferLength) * 2.5;
+    let x = 0;
+    for (let i = 0; i < bufferLength; i++) {
+      const barH = (dataArray[i] / 255) * canvas.height;
+      const alpha = 0.5 + (dataArray[i] / 255) * 0.5;
+      ctx.fillStyle = `rgba(247,118,142,${alpha})`;
+      ctx.fillRect(x, canvas.height - barH, barWidth - 1, barH);
+      x += barWidth;
+    }
+  }
+  draw();
+}
+</script>
+</body>
+</html>

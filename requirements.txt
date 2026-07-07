@@ -1,0 +1,33 @@
+# AI 語音會議助理 - 相依套件
+# 安裝方式：pip install -r requirements.txt
+
+# Google Gemini SDK（核心 AI 功能）
+google-genai>=0.2.0
+
+# 環境變數管理
+python-dotenv>=1.0.0
+
+# ==== Phase 1 新增：FastAPI 後端 ====
+# Web 框架與 ASGI 伺服器
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+
+# 非同步檔案 I/O（音檔串流上傳）
+aiofiles>=23.2.0
+python-multipart>=0.0.20
+
+# Word 文件匯出
+python-docx>=1.1.2
+
+# ==== Phase 2 新增：桌面錄音 GUI ====
+sounddevice>=0.4.6
+soundfile>=0.12.1
+numpy>=1.26.0
+requests>=2.31.0
+
+# ==== Phase 3 新增：LINE Bot Webhook 整合 ====
+line-bot-sdk>=3.21.0
+
+# ==== 長音訊處理 ====
+audioop-lts>=0.2.2
+pydub>=0.25.1
