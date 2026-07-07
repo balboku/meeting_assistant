@@ -76,6 +76,7 @@ from backend.maintenance import run_startup_health_checks, run_startup_maintenan
 from backend.media_validation import validate_media_magic
 from backend.ngrok_status import get_ngrok_status
 from backend.tasks import GEMINI_MODEL, SUMMARY_FALLBACK_MODEL, SUMMARY_MODEL, SUPPORTED_MEDIA_FORMATS
+from backend.logging_utils import configure_utf8_logging
 
 # =============================================================================
 # 路徑常數
@@ -115,11 +116,7 @@ SOURCE_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 # =============================================================================
 # 日誌設定
 # =============================================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
+configure_utf8_logging(level=logging.INFO)
 logger = logging.getLogger("MeetingAssistant.API")
 
 # =============================================================================

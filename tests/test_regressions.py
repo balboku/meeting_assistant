@@ -122,7 +122,8 @@ class SecurityRegressionTests(unittest.TestCase):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn("DOMPurify.sanitize", html)
-        self.assertIn("DOMPurify.sanitize(marked.parse(md))", html)
+        self.assertIn("function normalizeMeetingMarkdown", html)
+        self.assertIn("DOMPurify.sanitize(marked.parse(normalizeMeetingMarkdown(md)))", html)
 
     def test_web_ui_uses_local_static_assets_without_cdn_dependencies(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
@@ -224,10 +225,23 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
         for command in (
             ".venv/bin/python -m unittest discover -v",
             ".venv/bin/python -m compileall -q backend gui tests meeting_assistant.py start.py test_regex.py test_gemini.py",
+            ".venv/bin/python scripts/security_scan.py",
             ".venv/bin/python -m pip check",
             "node --check static/index.html",
         ):
             self.assertIn(command, script)
+
+    def test_ci_runs_unit_tests_and_security_scan(self):
+        ci = ROOT / ".github" / "workflows" / "ci.yml"
+        security_scan = ROOT / "scripts" / "security_scan.py"
+
+        self.assertTrue(ci.is_file())
+        self.assertTrue(security_scan.is_file())
+
+        workflow = ci.read_text(encoding="utf-8")
+        self.assertIn("python scripts/security_scan.py", workflow)
+        self.assertIn("python -m unittest discover -v", workflow)
+        self.assertIn("python -m pip check", workflow)
 
     def test_docs_describe_operational_knobs_events_and_fts(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -451,7 +465,7 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertNotIn("加斯達", normalized)
         self.assertNotIn("嘉士達", normalized)
         self.assertNotIn("Jasta", normalized)
-        self.assertIn("Qisda", normalized)
+        self.assertIn("佳世達", normalized)
         self.assertNotIn("IEC 6304", normalized)
         self.assertIn("IEC 62304", normalized)
         self.assertIn("放電治具", normalized)
@@ -468,6 +482,46 @@ class TaskRegressionTests(unittest.TestCase):
 
         self.assertIn("逐字稿品質註記", with_notice)
         self.assertIn("可能缺漏", with_notice)
+
+    def test_summary_json_response_converts_to_readable_markdown(self):
+        from backend.tasks import _summary_response_to_markdown
+
+        response_text = json.dumps(
+            {
+                "discussion_summary": [
+                    {
+                        "topic": "佳世達測試",
+                        "summary": "**確認** SRS 與 SDS traceability matrix 需要補齊。",
+                        "evidence_timecodes": ["12:30"],
+                    }
+                ],
+                "final_decisions": [
+                    {
+                        "decision": "下次會議前先整理缺口清單。",
+                        "basis": "逐字稿提到先做清單再回來討論。",
+                        "status": "confirmed",
+                    }
+                ],
+                "action_items": [
+                    {
+                        "task": "整理佳世達需求缺口",
+                        "owner": "QA",
+                        "due": "2026/07/10",
+                        "priority": "高",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+        markdown = _summary_response_to_markdown(response_text)
+
+        self.assertIn("## 一、討論摘要 (Discussion Summary)", markdown)
+        self.assertIn("## 二、最終決議 (Final Decisions)", markdown)
+        self.assertIn("## 三、待辦事項 (Action Items)", markdown)
+        self.assertIn("| # | 任務描述 | 負責人 | 期限 | 優先級 |", markdown)
+        self.assertIn("| 1 | 整理佳世達需求缺口 | QA | 2026/07/10 | 高 |", markdown)
+        self.assertNotIn("**", markdown)
 
     def test_segment_transcript_timestamps_are_offset_to_global_time(self):
         from backend.tasks import _offset_transcript_timestamps
@@ -705,6 +759,7 @@ class TaskRegressionTests(unittest.TestCase):
             self.assertEqual([call["model"] for call in fake_client.models.calls], ["gemma-4-31b-it"])
             content = output_path.read_text(encoding="utf-8")
             self.assertIn("單段音檔也使用摘要模型", content)
+            self.assertIn("### [Segment 1/1 | 00:00 - end]", content)
             self.assertIn("transcription_model: gemini-transcribe-test", content)
             self.assertIn("summary_model: gemma-4-31b-it", content)
 
@@ -1552,6 +1607,13 @@ title: 會議記錄 - 測試會議
 """
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = Path(tmpdir) / "template.docx"
+            template_doc = Document()
+            template_doc.add_table(rows=6, cols=2)
+            template_doc.save(str(template_path))
+            template_env = mock.patch.dict(os.environ, {"MEETING_DOCX_TEMPLATE_PATH": str(template_path)})
+            template_env.start()
+            self.addCleanup(template_env.stop)
             output_path = Path(tmpdir) / "meeting.docx"
             ok = export_meeting_to_docx(
                 {

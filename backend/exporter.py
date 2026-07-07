@@ -18,17 +18,23 @@ ACTION_TABLE_WIDTHS_DXA = [550, 5450, 1550, 1450, 850]
 DEFAULT_TABLE_WIDTH_DXA = sum(ACTION_TABLE_WIDTHS_DXA)
 BODY_FONT = "Microsoft JhengHei"
 
+
+def _template_path() -> Path:
+    return Path(os.getenv("MEETING_DOCX_TEMPLATE_PATH", str(TEMPLATE_PATH)))
+
+
 def export_meeting_to_docx(meeting_record: dict, output_filepath: str) -> bool:
     """
     將會議記錄內容填入 4-QA-005 V01 會議紀錄.docx 範本，並儲存到 output_filepath。
     保留原本的格式，僅在特定的儲存格加入文字。
     """
-    if not TEMPLATE_PATH.exists():
-        logger.error(f"找不到範本檔案：{TEMPLATE_PATH}")
+    template_path = _template_path()
+    if not template_path.exists():
+        logger.error(f"找不到範本檔案：{template_path}")
         return False
 
     try:
-        doc = Document(TEMPLATE_PATH)
+        doc = Document(template_path)
 
         if not doc.tables:
             logger.error("範本中沒有找到表格")

@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 
 .venv/bin/python -m unittest discover -v
 .venv/bin/python -m compileall -q backend gui tests meeting_assistant.py start.py test_regex.py test_gemini.py
+.venv/bin/python scripts/security_scan.py
 .venv/bin/python -m pip check
 
 if command -v node >/dev/null 2>&1; then

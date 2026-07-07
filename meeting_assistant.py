@@ -27,6 +27,8 @@ import logging
 from pathlib import Path
 from datetime import datetime
 
+from backend.logging_utils import configure_utf8_logging
+
 # --- 第三方套件 ---
 try:
     from google import genai
@@ -156,6 +158,7 @@ def setup_logger() -> logging.Logger:
     Returns:
         logging.Logger: 已設定完成的 logger 實例
     """
+    configure_utf8_logging(level=logging.INFO)
     logger = logging.getLogger("MeetingAssistant")
     logger.setLevel(logging.DEBUG)
 

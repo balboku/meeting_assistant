@@ -913,6 +913,30 @@ async function uploadEvidence(id, file) {
 }
 
 // ── 開啟詳情 ────────────────────────────────────────────────────────
+function normalizeMeetingMarkdown(markdown = '') {
+  let text = String(markdown || '');
+  const transcriptHeading = /(^|\n)(##\s+.*(?:Verbatim Transcript|完整逐字稿|逐字稿)[^\n]*)(\n|$)/i;
+  const transcriptMatch = text.match(transcriptHeading);
+
+  text = text.replace(transcriptHeading, (_, prefix, heading) => `${prefix}${heading}\n\n`);
+  text = text.replace(/(^|\n)(?!#{1,6}\s)(【第\s*\d+\s*段[^】]*】)(?=\s*(?:\n|$))/g, '$1### $2');
+  text = text.replace(/(^|\n)(?!#{1,6}\s)(第\s*\d+\s*段\s*[｜|].*?)(?=\s*(?:\n|$))/g, '$1### [$2]');
+  text = text.replace(/([^\n])(\[\d{1,3}:[0-5]\d\]\s*\*\*\[[^\]]+\]\*\*)/g, '$1\n\n$2');
+  text = text.replace(/(\S)(#{3}\s+\[?Segment\s+\d+)/g, '$1\n\n$2');
+
+  if (transcriptMatch) {
+    const headingIndex = text.search(transcriptHeading);
+    const transcriptBody = headingIndex >= 0 ? text.slice(headingIndex) : '';
+    const hasSegmentHeading = /(^|\n)#{3,6}\s+(?:【第\s*\d+\s*段|\[?Segment\s+\d+)/i.test(transcriptBody);
+    const hasTimestamp = /\[\d{1,3}:[0-5]\d\]/.test(transcriptBody);
+    if (!hasSegmentHeading && hasTimestamp) {
+      text = text.replace(transcriptHeading, (_, prefix, heading) => `${prefix}${heading}\n\n### [Segment 1/1 | 00:00 - end]\n\n`);
+    }
+  }
+
+  return text.replace(/\n{4,}/g, '\n\n\n').trim();
+}
+
 async function openDetail(id) {
   currentId = id;
 
@@ -935,7 +959,7 @@ async function openDetail(id) {
 
     // 渲染 Markdown
     const md = r.full_content || '（無內容）';
-    const html = DOMPurify.sanitize(marked.parse(md));
+    const html = DOMPurify.sanitize(marked.parse(normalizeMeetingMarkdown(md)));
 
     detail.innerHTML = `
       <div class="detail-header">

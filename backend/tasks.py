@@ -57,7 +57,7 @@ MAX_UPLOAD_WAIT_SECONDS = 600
 POLLING_INTERVAL        = 3
 SEGMENT_MINUTES         = 10
 TIMESTAMP_PATTERN       = re.compile(r"\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\d)\]")
-SEGMENT_CACHE_VERSION   = 1
+SEGMENT_CACHE_VERSION   = 2
 SEGMENT_CACHE_DIRNAME   = "segment_cache"
 SEGMENT_COMPLETENESS_GRACE_SECONDS = 120
 SEGMENT_INCOMPLETE_MARKERS = (
@@ -117,6 +117,8 @@ def _normalize_domain_terms(text: str) -> str:
         text = text.replace(source, target)
     for pattern, target in TERMINOLOGY_REGEX_REPLACEMENTS:
         text = re.sub(pattern, target, text)
+    for source in ("Qisda", "Jasta", "加斯達"):
+        text = text.replace(source, "佳世達")
     return text
 
 
@@ -215,6 +217,44 @@ def _offset_transcript_timestamps(transcript: str, offset_seconds: int) -> str:
         return f"[{_format_mmss(local_seconds + offset_seconds)}]"
 
     return TIMESTAMP_PATTERN.sub(replace, transcript)
+
+
+def _format_transcript_segment(
+    segment_index: int,
+    total_segments: int,
+    start_seconds: int,
+    end_seconds: Optional[int],
+    transcript: str,
+) -> str:
+    """Wrap a transcript chunk in a stable Markdown heading for UI and export."""
+    start = _format_mmss(start_seconds)
+    end = _format_mmss(end_seconds) if end_seconds is not None else "end"
+    body = (transcript or "").strip()
+    return f"\n\n### [Segment {segment_index + 1}/{total_segments} | {start} - {end}]\n\n{body}"
+
+
+def _speaker_context_from_transcripts(transcripts: list[str], max_lines: int = 8) -> str:
+    """Build compact prior-speaker context for the next segmented STT call."""
+    if not transcripts:
+        return ""
+
+    text = "\n".join(transcripts)
+    labels = sorted(set(re.findall(r"\*\*\[([^\]]+)\]\*\*", text)))
+    turns = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and re.search(r"\*\*\[[^\]]+\]\*\*", line)
+    ][-max_lines:]
+    if not labels and not turns:
+        return ""
+
+    parts = ["Existing speaker labels from earlier segments:"]
+    if labels:
+        parts.append(", ".join(labels[:12]))
+    if turns:
+        parts.append("Recent speaker turns:")
+        parts.extend(f"- {line[:180]}" for line in turns)
+    return "\n".join(parts)
 
 
 def _segment_transcript_quality_issues(
@@ -612,6 +652,85 @@ def _meeting_content_quality_issues(content: str) -> list[str]:
     return issues
 
 
+def _extract_summary_preview_v2(content: str, max_chars: int = 200) -> str:
+    text = content or ""
+    patterns = [
+        r"##\s*[^\n]*(?:Discussion Summary|討論摘要)[^\n]*\n(?P<body>.*?)(?=\n##\s*[^\n]*(?:Final Decisions|最終決議)|\n---|\Z)",
+        r"##\s*??\s*銝?^\n]*\n(?P<body>.*?)(?=\n##\s*?\Z)",
+    ]
+    for pattern in patterns:
+        try:
+            match = re.search(pattern, text, flags=re.DOTALL)
+            if match:
+                excerpt = re.sub(r"\s+", " ", match.group("body")).strip()
+                return excerpt[:max_chars]
+        except re.error:
+            continue
+    return text[:max_chars]
+
+
+def _meeting_content_quality_issues_v2(content: str) -> list[str]:
+    text = content or ""
+    issues: list[str] = []
+    required_sections = [
+        ("缺少討論摘要區塊", r"##\s*[^\n]*(?:Discussion Summary|討論摘要|銝)"),
+        ("缺少最終決議區塊", r"##\s*[^\n]*(?:Final Decisions|最終決議|鈭)"),
+        ("缺少待辦事項區塊", r"##\s*[^\n]*(?:Action Items|待辦事項|銝)"),
+        ("缺少完整逐字稿區塊", r"##\s*[^\n]*(?:Verbatim Transcript|完整逐字稿|逐字稿|蝔)"),
+    ]
+    for issue, pattern in required_sections:
+        if not re.search(pattern, text, flags=re.IGNORECASE):
+            issues.append(issue)
+
+    action_match = re.search(
+        r"##\s*[^\n]*(?:Action Items|待辦事項|銝)[^\n]*\n(?P<body>.*?)(?=\n##|\Z)",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if action_match:
+        action_body = action_match.group("body")
+        table_lines = [
+            line.strip()
+            for line in action_body.splitlines()
+            if line.strip().startswith("|") and line.strip().endswith("|")
+        ]
+        header_index = next(
+            (
+                index
+                for index, line in enumerate(table_lines)
+                if re.search(r"(任務描述|隞餃|\btask\b)", line, flags=re.IGNORECASE)
+            ),
+            None,
+        )
+        if header_index is None or header_index + 1 >= len(table_lines):
+            issues.append("待辦事項表格分隔列不完整")
+        else:
+            separator_cells = [
+                cell.strip()
+                for cell in table_lines[header_index + 1].strip("|").split("|")
+            ]
+            if len(separator_cells) < 5 or not all(
+                re.fullmatch(r":?-{3,}:?", cell) for cell in separator_cells[:5]
+            ):
+                issues.append("待辦事項表格分隔列不完整")
+    elif "缺少待辦事項區塊" not in issues:
+        issues.append("缺少待辦事項區塊內容")
+
+    transcript_match = re.search(
+        r"##\s*[^\n]*(?:Verbatim Transcript|完整逐字稿|逐字稿|蝔)[^\n]*\n(?P<body>.*)",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if transcript_match and not transcript_match.group("body").strip():
+        issues.append("完整逐字稿區塊內容空白")
+
+    return issues
+
+
+_extract_summary_preview = _extract_summary_preview_v2
+_meeting_content_quality_issues = _meeting_content_quality_issues_v2
+
+
 def _repair_meeting_content_if_needed(
     client,
     model: str,
@@ -729,10 +848,11 @@ def _transcribe_segment(
     total_segs: int,
     job_id: str,
     model: str,
+    speaker_context: str = "",
 ) -> str:
     """上傳單一分段並請 Gemini 輸出逐字稿（純文字，不含摘要）"""
 
-    SEGMENT_PROMPT = _build_segment_prompt(seg_index, total_segs)
+    SEGMENT_PROMPT = _build_segment_prompt(seg_index, total_segs, speaker_context=speaker_context)
 
     mime = SUPPORTED_MEDIA_FORMATS.get(seg_path.suffix.lower(), "audio/mpeg")
     uploaded = client.files.upload(
@@ -774,8 +894,8 @@ def _transcribe_segment(
     return _normalize_domain_terms(clean_hallucinated_loops(raw_text))
 
 
-def _build_segment_prompt(seg_index: int, total_segs: int) -> str:
-    return f"""
+def _build_segment_prompt(seg_index: int, total_segs: int, speaker_context: str = "") -> str:
+    prompt = f"""
 請聽這段音訊分段（第 {seg_index + 1} 段，共 {total_segs} 段）並進行轉錄。
 請直接輸出這段音訊的逐字稿內容，不需加上標題。
 
@@ -801,10 +921,137 @@ def _build_segment_prompt(seg_index: int, total_segs: int) -> str:
 > 1. 逐字稿應盡量完整，保留語氣詞，不要省略或摘要化。
 > 2. **嚴格禁止重複迴圈**：遇到無聲、背景音樂、雜訊或音檔結束時，請直接結束輸出。絕對不要反覆輸出相同的單字。
 """.strip()
+    if speaker_context.strip():
+        prompt += (
+            "\n\n# Cross-segment speaker continuity\n"
+            "Use the prior speaker context below only to keep anonymous labels stable across chunks. "
+            "If the same voice continues, reuse the same label. If uncertain, use an unknown-speaker label.\n\n"
+            f"{speaker_context.strip()}"
+        )
+    return prompt
+
+
+def _coerce_summary_items(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _plain_markdown_cell(value: Any, default: str = "未提及") -> str:
+    if value is None:
+        text = ""
+    elif isinstance(value, list):
+        text = "、".join(_plain_markdown_cell(item, "") for item in value)
+    elif isinstance(value, dict):
+        text = "；".join(
+            f"{key}: {_plain_markdown_cell(val, '')}"
+            for key, val in value.items()
+            if val not in (None, "", [])
+        )
+    else:
+        text = str(value)
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = text.replace("|", "／").replace("\r", " ").replace("\n", "<br>")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or default
+
+
+def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return None
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    candidate = fence_match.group(1) if fence_match else cleaned
+    if not candidate.lstrip().startswith("{"):
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        candidate = candidate[start : end + 1]
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _summary_json_to_markdown(payload: dict[str, Any]) -> str:
+    discussion_items = _coerce_summary_items(payload.get("discussion_summary"))
+    decision_items = _coerce_summary_items(payload.get("final_decisions"))
+    action_items = _coerce_summary_items(payload.get("action_items"))
+
+    lines: list[str] = ["## 一、討論摘要 (Discussion Summary)", ""]
+    if discussion_items:
+        for item in discussion_items:
+            if isinstance(item, dict):
+                topic = _plain_markdown_cell(item.get("topic") or item.get("title"), "")
+                summary = _plain_markdown_cell(item.get("summary") or item.get("content") or item, "")
+                evidence = _plain_markdown_cell(
+                    item.get("evidence_timecodes") or item.get("timecodes") or item.get("source_timecodes"),
+                    "",
+                )
+                prefix = f"{topic}：" if topic else ""
+                suffix = f"（佐證：{evidence}）" if evidence else ""
+                lines.append(f"- {prefix}{summary}{suffix}")
+            else:
+                lines.append(f"- {_plain_markdown_cell(item)}")
+    else:
+        lines.append("- 未提及")
+
+    lines.extend(["", "---", "", "## 二、最終決議 (Final Decisions)", ""])
+    if decision_items:
+        for item in decision_items:
+            if isinstance(item, dict):
+                decision = _plain_markdown_cell(item.get("decision") or item.get("content") or item, "")
+                basis = _plain_markdown_cell(item.get("basis") or item.get("reason"), "")
+                status = _plain_markdown_cell(item.get("status"), "")
+                detail = "；".join(part for part in (basis and f"依據：{basis}", status and f"狀態：{status}") if part)
+                lines.append(f"- {decision}" + (f"（{detail}）" if detail else ""))
+            else:
+                lines.append(f"- {_plain_markdown_cell(item)}")
+    else:
+        lines.append("- 未提及")
+
+    lines.extend([
+        "",
+        "---",
+        "",
+        "## 三、待辦事項 (Action Items)",
+        "",
+        "| # | 任務描述 | 負責人 | 期限 | 優先級 |",
+        "|---|---------|--------|------|--------|",
+    ])
+    if action_items:
+        for index, item in enumerate(action_items, start=1):
+            if isinstance(item, dict):
+                task = _plain_markdown_cell(item.get("task") or item.get("description") or item.get("content"))
+                owner = _plain_markdown_cell(item.get("owner") or item.get("assignee"))
+                due = _plain_markdown_cell(item.get("due") or item.get("deadline"))
+                priority = _plain_markdown_cell(item.get("priority"), "中")
+            else:
+                task = _plain_markdown_cell(item)
+                owner = due = "未提及"
+                priority = "中"
+            lines.append(f"| {index} | {task} | {owner} | {due} | {priority} |")
+    else:
+        lines.append("| 1 | 未提及 | 未提及 | 未提及 | 中 |")
+
+    return _normalize_domain_terms("\n".join(lines).strip())
+
+
+def _summary_response_to_markdown(text: str) -> str:
+    payload = _extract_json_object(text)
+    if payload:
+        return _summary_json_to_markdown(payload)
+    cleaned = _normalize_domain_terms(clean_hallucinated_loops(text or ""))
+    cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
+    return cleaned.strip()
 
 
 def _build_summary_prompt(full_transcript: str) -> str:
-    return f"""
+    prompt = f"""
 # 角色設定
 你是一位擁有 15 年經驗的國際企業專業高階秘書（Executive Secretary），
 精通醫療器材研發會議記錄、法規文件追蹤、商業寫作與多語言溝通。
@@ -848,6 +1095,30 @@ def _build_summary_prompt(full_transcript: str) -> str:
 
 > ⚠️ 重要：輸出完三個區塊後立即停止，不要輸出逐字稿，也不要附加任何秘書備註或後記。
 """.strip()
+    return prompt + """
+
+---
+
+# Structured output contract
+Return JSON only. Do not wrap it in Markdown fences.
+Schema:
+{
+  "discussion_summary": [
+    {"topic": "主題", "summary": "用會議中的事實整理，不要新增逐字稿沒有的內容", "evidence_timecodes": ["00:00"]}
+  ],
+  "final_decisions": [
+    {"decision": "已確認的決議；若只是討論中請寫成待確認", "basis": "逐字稿依據", "status": "confirmed|pending"}
+  ],
+  "action_items": [
+    {"task": "待辦事項", "owner": "負責人或未提及", "due": "期限或未提及", "priority": "高|中|低", "source_timecodes": ["00:00"]}
+  ]
+}
+Rules:
+- Use Traditional Chinese.
+- Keep Qisda as 佳世達.
+- If owner, due date, or decision is not explicit, write 未提及 or pending instead of guessing.
+- Do not use **bold** markers in JSON values.
+""".strip()
 
 
 def _generate_meeting_content_from_transcript(
@@ -885,7 +1156,7 @@ def _generate_meeting_content_from_transcript(
         stage="會議摘要生成",
     )
 
-    summary_section = _normalize_domain_terms(clean_hallucinated_loops(response.text or ""))
+    summary_section = _summary_response_to_markdown(response.text or "")
     meeting_content = (
         summary_section
         + "\n\n---\n\n## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
@@ -994,7 +1265,16 @@ def process_audio_task(
                     progress_total=total_segs,
                 )
                 logger.info(f"[{job_id}] 🎙 轉錄分段 {i + 1}/{total_segs}：{seg_path.name}")
-                transcript = _transcribe_segment(client, seg_path, i, total_segs, job_id, model)
+                speaker_context = _speaker_context_from_transcripts(all_transcripts)
+                transcript = _transcribe_segment(
+                    client,
+                    seg_path,
+                    i,
+                    total_segs,
+                    job_id,
+                    model,
+                    speaker_context=speaker_context,
+                )
                 transcript = _offset_transcript_timestamps(transcript, offset_seconds)
                 _raise_if_segment_transcript_incomplete(
                     transcript=transcript,
@@ -1064,7 +1344,13 @@ def process_audio_task(
                 logger.info(f"[{job_id}] ♻️  使用單段轉錄快取")
                 update_job_status(job_id, "processing", "♻️ 已載入既有逐字稿轉錄")
 
-            full_transcript = transcript
+            full_transcript = _format_transcript_segment(
+                0,
+                total_segs,
+                0,
+                None,
+                transcript,
+            )
             meeting_content, summary_model_used = _generate_meeting_content_from_transcript(
                 client=client,
                 full_transcript=full_transcript,
