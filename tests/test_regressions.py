@@ -2092,6 +2092,11 @@ class UiRegressionTests(unittest.TestCase):
 
         self.assertIn("python-docx", requirements)
 
+    def test_audioop_lts_is_only_installed_for_python_313_or_newer(self):
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+
+        self.assertIn('audioop-lts>=0.2.2; python_version >= "3.13"', requirements)
+
 
 class TestSuiteQualityRegressionTests(unittest.TestCase):
     def test_root_test_modules_do_not_print_at_import_time(self):

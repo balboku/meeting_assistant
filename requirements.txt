@@ -29,5 +29,5 @@ requests>=2.31.0
 line-bot-sdk>=3.21.0
 
 # ==== 長音訊處理 ====
-audioop-lts>=0.2.2
+audioop-lts>=0.2.2; python_version >= "3.13"
 pydub>=0.25.1
