@@ -29,7 +29,7 @@ from backend.tasks import GEMINI_MODEL, SUMMARY_FALLBACK_MODEL, SUMMARY_MODEL, p
 logger = logging.getLogger("MeetingAssistant.JobQueue")
 
 POLL_INTERVAL_SECONDS = float(os.getenv("JOB_QUEUE_POLL_SECONDS", "2"))
-DEFAULT_MAX_ATTEMPTS = int(os.getenv("JOB_QUEUE_MAX_ATTEMPTS", "2"))
+DEFAULT_MAX_ATTEMPTS = int(os.getenv("JOB_QUEUE_MAX_ATTEMPTS", "5"))
 
 
 def enqueue_audio_job(

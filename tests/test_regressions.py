@@ -1049,6 +1049,14 @@ class DurableQueueRegressionTests(unittest.TestCase):
             }.issubset(columns)
         )
 
+    def test_startup_bumps_active_legacy_jobs_to_default_attempts(self):
+        database = self._isolated_database()
+        database.create_job("legacy-low-attempts-job", max_attempts=2)
+
+        database.init_db()
+
+        self.assertEqual(database.get_job("legacy-low-attempts-job")["max_attempts"], 5)
+
     def test_claim_next_pending_job_persists_payload_and_increments_attempts(self):
         database = self._isolated_database()
         database.create_job(
@@ -1085,6 +1093,19 @@ class DurableQueueRegressionTests(unittest.TestCase):
         self.assertEqual(job["status"], "failed")
         self.assertEqual(job["error_detail"], "permanent failure")
         self.assertIsNotNone(job["completed_at"])
+
+    def test_transient_503_failure_is_requeued_after_delay(self):
+        database = self._isolated_database()
+        database.create_job("queue-job-503", max_attempts=5)
+
+        with mock.patch.dict(os.environ, {"JOB_QUEUE_TRANSIENT_RETRY_DELAY_SECONDS": "60"}, clear=False):
+            database.claim_next_pending_job()
+            status = database.retry_or_fail_job("queue-job-503", "503 UNAVAILABLE")
+            job = database.get_job("queue-job-503")
+
+            self.assertEqual(status, "pending")
+            self.assertIn("服務暫時忙碌", job["message"])
+            self.assertIsNone(database.claim_next_pending_job())
 
     def test_interrupted_processing_jobs_are_requeued_on_startup(self):
         database = self._isolated_database()
@@ -1733,6 +1754,21 @@ class JobQueueWorkerRegressionTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         database.init_db()
         return database, Path(tmpdir.name)
+
+    def test_audio_jobs_default_to_five_attempts(self):
+        database, tmpdir = self._isolated_database()
+        import backend.job_queue as job_queue
+
+        audio_path = tmpdir / "default-attempts.mp3"
+        audio_path.write_bytes(b"audio")
+        job_queue.enqueue_audio_job(
+            "worker-default-attempts-job",
+            audio_path=audio_path,
+            output_dir=tmpdir,
+            model="test-model",
+        )
+
+        self.assertEqual(database.get_job("worker-default-attempts-job")["max_attempts"], 5)
 
     def test_audio_worker_keeps_source_file_for_retry_and_terminal_failure(self):
         database, tmpdir = self._isolated_database()

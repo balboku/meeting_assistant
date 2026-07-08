@@ -11,12 +11,26 @@ import json
 import sqlite3
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 from contextlib import contextmanager
 
 logger = logging.getLogger("MeetingAssistant.DB")
+
+DEFAULT_JOB_MAX_ATTEMPTS = int(os.getenv("JOB_QUEUE_MAX_ATTEMPTS", "5"))
+TRANSIENT_RETRY_MARKERS = (
+    "503",
+    "429",
+    "unavailable",
+    "serviceunavailable",
+    "overloaded",
+    "temporarily",
+    "timeout",
+    "deadline exceeded",
+    "resource exhausted",
+    "rate limit",
+)
 
 # 資料庫檔案位置（預設放在專案根目錄，可用 DB_PATH 覆寫）
 DB_PATH = Path(os.getenv("DB_PATH") or Path(__file__).parent.parent / "meetings.db")
@@ -25,6 +39,28 @@ DB_PATH = Path(os.getenv("DB_PATH") or Path(__file__).parent.parent / "meetings.
 def _now() -> str:
     """Return a local timestamp in the same format SQLite uses in this project."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _transient_retry_delay_seconds() -> int:
+    try:
+        return max(0, int(os.getenv("JOB_QUEUE_TRANSIENT_RETRY_DELAY_SECONDS", "30")))
+    except ValueError:
+        return 30
+
+
+def _is_transient_error(error_detail: str) -> bool:
+    normalized = (error_detail or "").lower().replace("_", "")
+    return any(marker in normalized for marker in TRANSIENT_RETRY_MARKERS)
+
+
+def _retry_queued_at(error_detail: str) -> str:
+    if not _is_transient_error(error_detail):
+        return _now()
+
+    delay_seconds = _transient_retry_delay_seconds()
+    if delay_seconds <= 0:
+        return _now()
+    return (datetime.now() + timedelta(seconds=delay_seconds)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _serialize_payload(payload: Optional[dict[str, Any]]) -> Optional[str]:
@@ -191,7 +227,7 @@ def _ensure_jobs_queue_columns(conn: sqlite3.Connection) -> None:
         "source": "TEXT NOT NULL DEFAULT 'upload'",
         "payload_json": "TEXT",
         "attempts": "INTEGER NOT NULL DEFAULT 0",
-        "max_attempts": "INTEGER NOT NULL DEFAULT 2",
+        "max_attempts": f"INTEGER NOT NULL DEFAULT {DEFAULT_JOB_MAX_ATTEMPTS}",
         "queued_at": "TEXT",
         "started_at": "TEXT",
         "updated_at": "TEXT",
@@ -209,11 +245,18 @@ def _ensure_jobs_queue_columns(conn: sqlite3.Connection) -> None:
            SET task_type = COALESCE(task_type, 'audio_processing'),
                source = COALESCE(source, 'upload'),
                attempts = COALESCE(attempts, 0),
-               max_attempts = COALESCE(max_attempts, 2),
+               max_attempts = COALESCE(max_attempts, ?),
                queued_at = COALESCE(queued_at, created_at),
                updated_at = COALESCE(updated_at, created_at),
                cancel_requested = COALESCE(cancel_requested, 0)
-    """)
+    """, (DEFAULT_JOB_MAX_ATTEMPTS,))
+    conn.execute(
+        """UPDATE jobs
+              SET max_attempts=?
+            WHERE max_attempts < ?
+              AND status IN ('pending', 'processing', 'failed')""",
+        (DEFAULT_JOB_MAX_ATTEMPTS, DEFAULT_JOB_MAX_ATTEMPTS),
+    )
 
 def init_db() -> None:
     """
@@ -237,7 +280,7 @@ def init_db() -> None:
         """)
 
         # 任務狀態追蹤表
-        conn.execute("""
+        conn.execute(f"""
             CREATE TABLE IF NOT EXISTS jobs (
                 job_id        TEXT    PRIMARY KEY,
                 status        TEXT    NOT NULL DEFAULT 'pending',
@@ -250,7 +293,7 @@ def init_db() -> None:
                 source        TEXT    NOT NULL DEFAULT 'upload',
                 payload_json  TEXT,
                 attempts      INTEGER NOT NULL DEFAULT 0,
-                max_attempts  INTEGER NOT NULL DEFAULT 2,
+                max_attempts  INTEGER NOT NULL DEFAULT {DEFAULT_JOB_MAX_ATTEMPTS},
                 queued_at     TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
                 started_at    TEXT,
                 updated_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
@@ -277,7 +320,7 @@ def create_job(
     task_type: str = "audio_processing",
     source: str = "upload",
     payload: Optional[dict[str, Any]] = None,
-    max_attempts: int = 2,
+    max_attempts: int = DEFAULT_JOB_MAX_ATTEMPTS,
     message: Optional[str] = None,
 ) -> None:
     """建立新的任務記錄（初始狀態：pending）"""
@@ -513,8 +556,10 @@ def claim_next_pending_job() -> Optional[dict[str, Any]]:
                  FROM jobs
                 WHERE status='pending'
                   AND cancel_requested=0
+                  AND (queued_at IS NULL OR queued_at <= ?)
                 ORDER BY queued_at ASC, created_at ASC
-                LIMIT 1"""
+                LIMIT 1""",
+            (now,),
         ).fetchone()
         if row is None:
             return None
@@ -573,6 +618,13 @@ def retry_or_fail_job(job_id: str, error_detail: str) -> str:
         attempts = int(row["attempts"] or 0)
         max_attempts = int(row["max_attempts"] or 1)
         if attempts < max_attempts:
+            retry_at = _retry_queued_at(error_detail)
+            retry_message = f"處理失敗，已重新排入佇列（第 {attempts}/{max_attempts} 次嘗試）。"
+            if retry_at > now:
+                retry_message = (
+                    f"處理失敗，服務暫時忙碌，已安排於 {retry_at} 後重試"
+                    f"（第 {attempts}/{max_attempts} 次嘗試）。"
+                )
             conn.execute(
                 """UPDATE jobs
                       SET status='pending',
@@ -584,14 +636,14 @@ def retry_or_fail_job(job_id: str, error_detail: str) -> str:
                           updated_at=?
                     WHERE job_id=?""",
                 (
-                    f"處理失敗，已重新排入佇列（第 {attempts}/{max_attempts} 次嘗試）。",
+                    retry_message,
                     error_detail,
-                    now,
+                    retry_at,
                     now,
                     job_id,
                 ),
             )
-            _record_job_event(conn, job_id, "retry_scheduled", "處理失敗，已重新排入佇列。", error_detail)
+            _record_job_event(conn, job_id, "retry_scheduled", retry_message, error_detail)
             return "pending"
 
         conn.execute(

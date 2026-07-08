@@ -81,6 +81,8 @@ MEETING_BACKUP_DIR=./backups
 MEETING_DOCX_TEMPLATE_PATH=./4-QA-005 V01 會議紀錄.docx
 DB_BACKUP_KEEP=5
 JOB_RETENTION_DAYS=30
+JOB_QUEUE_MAX_ATTEMPTS=5
+JOB_QUEUE_TRANSIENT_RETRY_DELAY_SECONDS=30
 ```
 
 安全預設：`/line-webhook` 可公開給 LINE 呼叫；Web 介面與管理 API 允許本機與信任本機網段存取。若要透過 ngrok 或其他公開網路管理，請使用 `APP_API_KEY`。
@@ -119,6 +121,8 @@ BASE_URL=http://127.0.0.1:8001 scripts/smoke_e2e.sh
 | `MEETING_DOCX_TEMPLATE_PATH` | `./4-QA-005 V01 會議紀錄.docx` | Word 匯出使用的本機範本路徑。公司表單範本請保留在本機，不提交到 Git。 |
 | `DB_BACKUP_KEEP` | `5` | 保留最近幾份資料庫備份。 |
 | `JOB_RETENTION_DAYS` | `30` | 已完成、失敗或取消任務的保留天數。 |
+| `JOB_QUEUE_MAX_ATTEMPTS` | `5` | 自動處理任務最多嘗試次數；用於降低 503/暫時性服務忙碌造成的失敗。 |
+| `JOB_QUEUE_TRANSIENT_RETRY_DELAY_SECONDS` | `30` | 偵測到 503、429、UNAVAILABLE、timeout 等暫時性錯誤時，下一次重試前等待秒數。 |
 | `MEETING_ASSISTANT_TRUST_LOCAL_NETWORK` | `1` | 是否允許同 Wi-Fi / 信任本機網段直接開 Web 介面；設為 `0` 時手機網址會改用 `api_key`。 |
 | `MEETING_ASSISTANT_NGROK` | `1` | 一鍵啟動是否自動啟動 ngrok；設為 `0` / `false` / `no` 可停用。 |
 | `MEETING_ASSISTANT_NGROK_URL` | 空白 | 固定 ngrok 公開 URL，例如 `https://example.ngrok-free.app`。留空時會嘗試沿用 LINE Console 既有 Webhook URL 的網域。 |
