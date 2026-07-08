@@ -532,21 +532,23 @@ MEETING_PROMPT = f"""
 
 ## 📋 一、討論摘要 (Discussion Summary)
 請依專案或議題分組，整理各方提出的關鍵意見、時程、卡點、風險與下一步，幫助讀者快速掌握會議脈絡。
+若有多個討論項目，請以 D1、D2、D3... 表示。
 
 ---
 
 ## ✅ 二、最終決議 (Final Decisions)
 請清楚寫下經過討論後已確認的共識或結論；不要把追蹤目標、背景說明或教學內容列為決議。
 如果某個議題沒有結論，也應明確註記「尚未決定」或「需延至下次討論」。
+每項決議請以 R1、R2、R3... 表示，並標明關聯討論 D 編號。
 
 ---
 
 ## 📌 三、待辦事項 (Action Items)
 請以表格呈現所有被提及的任務、負責人與期限：
 
-| # | 任務描述 | 負責人 | 期限 | 優先級 |
-|---|---------|--------|------|--------|
-| 1 | [任務內容] | [姓名/部門] | [日期或「未定」] | 高/中/低 |
+| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |
+|---|---------|---------|---------|--------|------|--------|
+| A1 | D1 | R1 | [任務內容] | [姓名/部門] | [日期或「未定」] | 高/中/低 |
 
 若未明確提及負責人或期限，請填入「未明確指定」或「未提及」。
 若只能辨識到匿名發言者，負責人請保留匿名標籤，例如「發言者 A」，不要自行推測姓名。
@@ -759,10 +761,13 @@ def _repair_meeting_content_if_needed(
 ## 📝 四、完整逐字稿 (Verbatim Transcript)
 
 待辦事項必須是完整 Markdown 表格，欄位必須為：
-| # | 任務描述 | 負責人 | 期限 | 優先級 |
-|---|---------|--------|------|--------|
+| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |
+|---|---------|---------|---------|--------|------|--------|
 
-若沒有待辦事項，請保留表格並填入一列「未提及」。
+討論摘要若有多個議題，請使用 D1、D2、D3... 分段。
+最終決議請使用 R1、R2、R3...，並在內容或表格中標明關聯的 D 編號。
+待辦事項請使用 A1、A2、A3...，並保留關聯討論與關聯決議欄位。
+若沒有待辦事項，請保留表格並填入一列「A1 | 未提及 | 未提及 | 未提及 | 未提及 | 未提及 | 中」。
 若逐字稿缺漏，請依現有內容保守整理；不可新增不存在的發言。
 
 已知問題：
@@ -958,6 +963,46 @@ def _plain_markdown_cell(value: Any, default: str = "未提及") -> str:
     return text or default
 
 
+def _summary_item_id(item: Any, prefix: str, index: int) -> str:
+    if isinstance(item, dict):
+        raw = item.get("id") or item.get(f"{prefix.lower()}_id") or item.get("number")
+        if raw not in (None, "", []):
+            text = _plain_markdown_cell(raw, "")
+            match = re.search(r"\d+", text)
+            if match:
+                return f"{prefix}{int(match.group(0))}"
+            cleaned = re.sub(r"[^A-Za-z0-9_-]", "", text).upper()
+            if cleaned:
+                return cleaned
+    return f"{prefix}{index}"
+
+
+def _summary_reference_ids(value: Any, prefix: str, default: str = "未提及") -> str:
+    if value in (None, "", []):
+        return default
+    if isinstance(value, str):
+        candidates = re.split(r"[,，、;/\s]+", value.strip())
+    elif isinstance(value, list):
+        candidates = value
+    else:
+        candidates = [value]
+
+    refs: list[str] = []
+    for candidate in candidates:
+        text = _plain_markdown_cell(candidate, "")
+        if not text:
+            continue
+        for match in re.finditer(r"[A-Za-z]*\s*(\d+)", text):
+            ref = f"{prefix}{int(match.group(1))}"
+            if ref not in refs:
+                refs.append(ref)
+        if not re.search(r"\d+", text):
+            cleaned = re.sub(r"[^A-Za-z0-9_-]", "", text).upper()
+            if cleaned and cleaned not in refs:
+                refs.append(cleaned)
+    return "、".join(refs) if refs else default
+
+
 def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
     cleaned = (text or "").strip()
     if not cleaned:
@@ -984,35 +1029,64 @@ def _summary_json_to_markdown(payload: dict[str, Any]) -> str:
 
     lines: list[str] = ["## 一、討論摘要 (Discussion Summary)", ""]
     if discussion_items:
-        for item in discussion_items:
+        for index, item in enumerate(discussion_items, start=1):
+            discussion_id = _summary_item_id(item, "D", index)
             if isinstance(item, dict):
                 topic = _plain_markdown_cell(item.get("topic") or item.get("title"), "")
+                heading = topic or f"討論項目 {index}"
                 summary = _plain_markdown_cell(item.get("summary") or item.get("content") or item, "")
+                context = _plain_markdown_cell(item.get("context") or item.get("background"), "")
+                key_points = _plain_markdown_cell(item.get("key_points") or item.get("points"), "")
+                impact = _plain_markdown_cell(item.get("impact") or item.get("risk") or item.get("risks"), "")
+                open_questions = _plain_markdown_cell(item.get("open_questions") or item.get("pending_questions"), "")
                 evidence = _plain_markdown_cell(
                     item.get("evidence_timecodes") or item.get("timecodes") or item.get("source_timecodes"),
                     "",
                 )
-                prefix = f"{topic}：" if topic else ""
-                suffix = f"（佐證：{evidence}）" if evidence else ""
-                lines.append(f"- {prefix}{summary}{suffix}")
+                lines.append(f"### {discussion_id}. {heading}")
+                lines.append(f"- 摘要：{summary}")
+                if context:
+                    lines.append(f"- 背景：{context}")
+                if key_points:
+                    lines.append(f"- 重點：{key_points}")
+                if impact:
+                    lines.append(f"- 影響/風險：{impact}")
+                if open_questions:
+                    lines.append(f"- 待釐清：{open_questions}")
+                if evidence:
+                    lines.append(f"- 佐證時間：{evidence}")
+                lines.append("")
             else:
-                lines.append(f"- {_plain_markdown_cell(item)}")
+                lines.append(f"### {discussion_id}. 討論項目 {index}")
+                lines.append(f"- 摘要：{_plain_markdown_cell(item)}")
+                lines.append("")
     else:
         lines.append("- 未提及")
 
     lines.extend(["", "---", "", "## 二、最終決議 (Final Decisions)", ""])
+    lines.extend([
+        "| # | 關聯討論 | 決議 | 依據 | 狀態 |",
+        "|---|---------|------|------|------|",
+    ])
     if decision_items:
-        for item in decision_items:
+        for index, item in enumerate(decision_items, start=1):
+            decision_id = _summary_item_id(item, "R", index)
             if isinstance(item, dict):
+                related_discussions = _summary_reference_ids(
+                    item.get("related_discussions") or item.get("discussion_ids") or item.get("related_discussion"),
+                    "D",
+                )
                 decision = _plain_markdown_cell(item.get("decision") or item.get("content") or item, "")
-                basis = _plain_markdown_cell(item.get("basis") or item.get("reason"), "")
-                status = _plain_markdown_cell(item.get("status"), "")
-                detail = "；".join(part for part in (basis and f"依據：{basis}", status and f"狀態：{status}") if part)
-                lines.append(f"- {decision}" + (f"（{detail}）" if detail else ""))
+                basis = _plain_markdown_cell(item.get("basis") or item.get("reason"))
+                status = _plain_markdown_cell(item.get("status"), "pending")
             else:
-                lines.append(f"- {_plain_markdown_cell(item)}")
+                related_discussions = "未提及"
+                decision = _plain_markdown_cell(item)
+                basis = "未提及"
+                status = "pending"
+            lines.append(f"| {decision_id} | {related_discussions} | {decision} | {basis} | {status} |")
     else:
-        lines.append("- 未提及")
+        lines.append("| R1 | 未提及 | 未提及 | 未提及 | pending |")
 
     lines.extend([
         "",
@@ -1020,23 +1094,35 @@ def _summary_json_to_markdown(payload: dict[str, Any]) -> str:
         "",
         "## 三、待辦事項 (Action Items)",
         "",
-        "| # | 任務描述 | 負責人 | 期限 | 優先級 |",
-        "|---|---------|--------|------|--------|",
+        "| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |",
+        "|---|---------|---------|---------|--------|------|--------|",
     ])
     if action_items:
         for index, item in enumerate(action_items, start=1):
+            action_id = _summary_item_id(item, "A", index)
             if isinstance(item, dict):
+                related_discussions = _summary_reference_ids(
+                    item.get("related_discussions") or item.get("discussion_ids") or item.get("related_discussion"),
+                    "D",
+                )
+                related_decisions = _summary_reference_ids(
+                    item.get("related_decisions") or item.get("decision_ids") or item.get("related_decision"),
+                    "R",
+                )
                 task = _plain_markdown_cell(item.get("task") or item.get("description") or item.get("content"))
                 owner = _plain_markdown_cell(item.get("owner") or item.get("assignee"))
                 due = _plain_markdown_cell(item.get("due") or item.get("deadline"))
                 priority = _plain_markdown_cell(item.get("priority"), "中")
             else:
+                related_discussions = related_decisions = "未提及"
                 task = _plain_markdown_cell(item)
                 owner = due = "未提及"
                 priority = "中"
-            lines.append(f"| {index} | {task} | {owner} | {due} | {priority} |")
+            lines.append(
+                f"| {action_id} | {related_discussions} | {related_decisions} | {task} | {owner} | {due} | {priority} |"
+            )
     else:
-        lines.append("| 1 | 未提及 | 未提及 | 未提及 | 中 |")
+        lines.append("| A1 | 未提及 | 未提及 | 未提及 | 未提及 | 未提及 | 中 |")
 
     return _normalize_domain_terms("\n".join(lines).strip())
 
@@ -1074,21 +1160,23 @@ def _build_summary_prompt(full_transcript: str) -> str:
 
 ## 📋 一、討論摘要 (Discussion Summary)
 請依專案或議題分組，整理各方提出的關鍵意見、時程、卡點、風險與下一步，幫助讀者快速掌握會議脈絡。
+若會議中有多個討論項目，請分成 D1、D2、D3...，每個討論項目只描述一個主要議題。
 
 ---
 
 ## ✅ 二、最終決議 (Final Decisions)
 請清楚寫下經過討論後已確認的共識或結論；不要把追蹤目標、背景說明或教學內容列為決議。
 如果某個議題沒有結論，也應明確註記「尚未決定」或「需延至下次討論」。
+每一項決議請標為 R1、R2、R3...，並標明關聯的 D 編號。
 
 ---
 
 ## 📌 三、待辦事項 (Action Items)
 請以表格呈現所有被提及的任務、負責人與期限：
 
-| # | 任務描述 | 負責人 | 期限 | 優先級 |
-|---|---------|--------|------|--------|
-| 1 | [可驗收的任務內容] | [姓名/部門] | [日期或「未定」] | 高/中/低 |
+| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |
+|---|---------|---------|---------|--------|------|--------|
+| A1 | D1 | R1 | [可驗收的任務內容] | [姓名/部門] | [日期或「未定」] | 高/中/低 |
 
 若負責人只能從逐字稿辨識為匿名發言者，請保留「發言者 A/B/C」標籤，不要自行推測姓名。
 若任務過大，請拆成可驗收的文件、測試、追蹤或會議安排項目。
@@ -1104,18 +1192,45 @@ Return JSON only. Do not wrap it in Markdown fences.
 Schema:
 {
   "discussion_summary": [
-    {"topic": "主題", "summary": "用會議中的事實整理，不要新增逐字稿沒有的內容", "evidence_timecodes": ["00:00"]}
+    {
+      "id": "D1",
+      "topic": "主題",
+      "context": "討論背景或問題來源",
+      "summary": "用會議中的事實整理，不要新增逐字稿沒有的內容",
+      "key_points": ["關鍵意見或資訊"],
+      "impact": "影響、風險或對後續工作的意義；沒有就寫未提及",
+      "open_questions": ["尚未釐清事項；沒有就寫未提及"],
+      "evidence_timecodes": ["00:00"]
+    }
   ],
   "final_decisions": [
-    {"decision": "已確認的決議；若只是討論中請寫成待確認", "basis": "逐字稿依據", "status": "confirmed|pending"}
+    {
+      "id": "R1",
+      "related_discussions": ["D1"],
+      "decision": "已確認的決議；若只是討論中請寫成待確認",
+      "basis": "逐字稿依據",
+      "status": "confirmed|pending"
+    }
   ],
   "action_items": [
-    {"task": "待辦事項", "owner": "負責人或未提及", "due": "期限或未提及", "priority": "高|中|低", "source_timecodes": ["00:00"]}
+    {
+      "id": "A1",
+      "related_discussions": ["D1"],
+      "related_decisions": ["R1"],
+      "task": "待辦事項",
+      "owner": "負責人或未提及",
+      "due": "期限或未提及",
+      "priority": "高|中|低",
+      "source_timecodes": ["00:00"]
+    }
   ]
 }
 Rules:
 - Use Traditional Chinese.
 - Keep Qisda as 佳世達.
+- If there are multiple discussion topics, split them into D1, D2, D3... instead of merging unrelated topics.
+- Every final decision must reference related_discussions when traceable.
+- Every action item must reference related_discussions and related_decisions when traceable.
 - If owner, due date, or decision is not explicit, write 未提及 or pending instead of guessing.
 - Do not use **bold** markers in JSON values.
 """.strip()

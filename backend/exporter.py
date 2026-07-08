@@ -14,7 +14,9 @@ logger = logging.getLogger("MeetingAssistant.Exporter")
 
 TEMPLATE_PATH = Path(os.getenv("MEETING_DOCX_TEMPLATE_PATH", "4-QA-005 V01 會議紀錄.docx"))
 ACTION_TABLE_HEADERS = {"#", "任務描述", "負責人", "期限", "優先級"}
+ACTION_LINKED_TABLE_HEADERS = {"#", "關聯討論", "關聯決議", "任務描述", "負責人", "期限", "優先級"}
 ACTION_TABLE_WIDTHS_DXA = [550, 5450, 1550, 1450, 850]
+ACTION_LINKED_TABLE_WIDTHS_DXA = [500, 850, 850, 4000, 1250, 1300, 750]
 DEFAULT_TABLE_WIDTH_DXA = sum(ACTION_TABLE_WIDTHS_DXA)
 BODY_FONT = "Microsoft JhengHei"
 
@@ -312,6 +314,8 @@ def _add_word_table(cell, rows: list[list[str]]) -> None:
 
 def _column_widths_for_table(header: list[str]) -> list[int]:
     normalized = {cell.strip() for cell in header}
+    if normalized == ACTION_LINKED_TABLE_HEADERS:
+        return ACTION_LINKED_TABLE_WIDTHS_DXA
     if normalized == ACTION_TABLE_HEADERS:
         return ACTION_TABLE_WIDTHS_DXA
 

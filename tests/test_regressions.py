@@ -490,13 +490,25 @@ class TaskRegressionTests(unittest.TestCase):
             {
                 "discussion_summary": [
                     {
+                        "id": "D1",
                         "topic": "佳世達測試",
+                        "context": "會議討論 SRS 與 SDS 文件缺口。",
                         "summary": "**確認** SRS 與 SDS traceability matrix 需要補齊。",
+                        "key_points": ["SRS 需求未完整對應", "SDS 設計文件需同步更新"],
+                        "impact": "影響後續驗證追蹤。",
                         "evidence_timecodes": ["12:30"],
-                    }
+                    },
+                    {
+                        "id": "D2",
+                        "topic": "驗證時程",
+                        "summary": "測試排程需等缺口清單完成後再確認。",
+                        "evidence_timecodes": ["18:20"],
+                    },
                 ],
                 "final_decisions": [
                     {
+                        "id": "R1",
+                        "related_discussions": ["D1"],
                         "decision": "下次會議前先整理缺口清單。",
                         "basis": "逐字稿提到先做清單再回來討論。",
                         "status": "confirmed",
@@ -504,6 +516,9 @@ class TaskRegressionTests(unittest.TestCase):
                 ],
                 "action_items": [
                     {
+                        "id": "A1",
+                        "related_discussions": ["D1"],
+                        "related_decisions": ["R1"],
                         "task": "整理佳世達需求缺口",
                         "owner": "QA",
                         "due": "2026/07/10",
@@ -519,8 +534,12 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertIn("## 一、討論摘要 (Discussion Summary)", markdown)
         self.assertIn("## 二、最終決議 (Final Decisions)", markdown)
         self.assertIn("## 三、待辦事項 (Action Items)", markdown)
-        self.assertIn("| # | 任務描述 | 負責人 | 期限 | 優先級 |", markdown)
-        self.assertIn("| 1 | 整理佳世達需求缺口 | QA | 2026/07/10 | 高 |", markdown)
+        self.assertIn("### D1. 佳世達測試", markdown)
+        self.assertIn("### D2. 驗證時程", markdown)
+        self.assertIn("| # | 關聯討論 | 決議 | 依據 | 狀態 |", markdown)
+        self.assertIn("| R1 | D1 | 下次會議前先整理缺口清單。 | 逐字稿提到先做清單再回來討論。 | confirmed |", markdown)
+        self.assertIn("| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |", markdown)
+        self.assertIn("| A1 | D1 | R1 | 整理佳世達需求缺口 | QA | 2026/07/10 | 高 |", markdown)
         self.assertNotIn("**", markdown)
 
     def test_segment_transcript_timestamps_are_offset_to_global_time(self):
@@ -1600,10 +1619,10 @@ title: 會議記錄 - 測試會議
 
 ## 📌 三、待辦事項 (Action Items)
 
-| # | 任務描述 | 負責人 | 期限 | 優先級 |
-|---|---------|--------|------|--------|
-| 1 | **追蹤** 供應商報價與回覆 | 王經理 | 7月底 | 高 |
-| 2 | 整理測試資料 | QA | 未定 | 中 |
+| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |
+|---|---------|---------|---------|--------|------|--------|
+| A1 | D1 | R1 | **追蹤** 供應商報價與回覆 | 王經理 | 7月底 | 高 |
+| A2 | D2 | 未提及 | 整理測試資料 | QA | 未定 | 中 |
 """
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1630,9 +1649,11 @@ title: 會議記錄 - 測試會議
             self.assertEqual(len(content_cell.tables), 1)
 
             action_table = content_cell.tables[0]
-            self.assertEqual(action_table.cell(0, 1).text, "任務描述")
-            self.assertEqual(action_table.cell(1, 1).text, "追蹤 供應商報價與回覆")
-            self.assertTrue(action_table.cell(1, 1).paragraphs[0].runs[0].bold)
+            self.assertEqual(action_table.cell(0, 3).text, "任務描述")
+            self.assertEqual(action_table.cell(1, 1).text, "D1")
+            self.assertEqual(action_table.cell(1, 2).text, "R1")
+            self.assertEqual(action_table.cell(1, 3).text, "追蹤 供應商報價與回覆")
+            self.assertTrue(action_table.cell(1, 3).paragraphs[0].runs[0].bold)
             self.assertNotIn("**", content_cell.text)
             self.assertNotIn("|---", content_cell.text)
 
