@@ -1182,6 +1182,66 @@ class UploadQueueRegressionTests(unittest.TestCase):
             self.assertEqual(captured["output_dir"], output_dir)
             self.assertTrue(saved_audio[0].read_bytes().startswith(b"ID3"))
 
+    def test_upload_route_reuses_existing_audio_with_same_sha256(self):
+        import backend.main as main
+
+        captured = {}
+        media_bytes = b"ID3" + b"\0" * 32
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            source_audio_dir = tmpdir_path / "source_audio"
+            output_dir = tmpdir_path / "output"
+            source_audio_dir.mkdir()
+            output_dir.mkdir()
+            existing_audio = source_audio_dir / "existing-source.mp3"
+            existing_audio.write_bytes(media_bytes)
+
+            def fake_enqueue_audio_job(**kwargs):
+                captured.update(kwargs)
+
+            with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_audio_dir), \
+                 mock.patch.object(main, "OUTPUT_DIR", output_dir), \
+                 mock.patch.object(main, "enqueue_audio_job", side_effect=fake_enqueue_audio_job):
+                response = asgi_request(
+                    main.app,
+                    "POST",
+                    "/upload-audio",
+                    files={"file": ("meeting.mp3", BytesIO(media_bytes), "audio/mpeg")},
+                )
+
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(captured["audio_path"], existing_audio)
+            self.assertEqual(list(source_audio_dir.glob("*.mp3")), [existing_audio])
+            self.assertFalse(list(source_audio_dir.glob(".upload_*")))
+
+    def test_upload_route_keeps_reused_audio_when_enqueue_fails(self):
+        import backend.main as main
+
+        media_bytes = b"ID3" + b"\0" * 32
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            source_audio_dir = tmpdir_path / "source_audio"
+            output_dir = tmpdir_path / "output"
+            source_audio_dir.mkdir()
+            output_dir.mkdir()
+            existing_audio = source_audio_dir / "existing-source.mp3"
+            existing_audio.write_bytes(media_bytes)
+
+            with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_audio_dir), \
+                 mock.patch.object(main, "OUTPUT_DIR", output_dir), \
+                 mock.patch.object(main, "enqueue_audio_job", side_effect=RuntimeError("queue down")):
+                response = asgi_request(
+                    main.app,
+                    "POST",
+                    "/upload-audio",
+                    files={"file": ("meeting.mp3", BytesIO(media_bytes), "audio/mpeg")},
+                )
+
+            self.assertEqual(response.status_code, 500)
+            self.assertTrue(existing_audio.exists())
+            self.assertEqual(list(source_audio_dir.glob("*.mp3")), [existing_audio])
+            self.assertFalse(list(source_audio_dir.glob(".upload_*")))
+
 
 class TempCleanupRegressionTests(unittest.TestCase):
     def test_stale_temp_cleanup_preserves_active_and_fresh_files(self):
@@ -1968,6 +2028,42 @@ class LineRegressionTests(unittest.TestCase):
 
                 self.assertIsNotNone(database.get_job(job_id))
                 self.assertTrue(any("會議記錄內容" in msg for msg in pushed_messages))
+
+                with database.get_db() as conn:
+                    conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
+
+    def test_line_audio_flow_reuses_existing_audio_with_same_sha256(self):
+        import backend.database as database
+        import backend.line_handler as line_handler
+
+        job_id = "line-dedup-job"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_path = tmpdir_path / "meeting_notes_line.md"
+            output_path.write_text("line result", encoding="utf-8")
+            existing_audio = tmpdir_path / "existing-source.m4a"
+            existing_audio.write_bytes(b"audio")
+
+            with mock.patch.object(database, "DB_PATH", tmpdir_path / "meetings.db"):
+                database.init_db()
+                with database.get_db() as conn:
+                    conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
+
+                with mock.patch.object(line_handler, "get_line_api", return_value=object()), \
+                     mock.patch.object(line_handler, "download_line_audio", return_value=b"audio"), \
+                     mock.patch.object(line_handler, "SOURCE_AUDIO_DIR", tmpdir_path), \
+                     mock.patch.object(line_handler, "process_audio_task", return_value=output_path) as process_mock, \
+                     mock.patch.object(line_handler, "push_text"):
+                    line_handler.process_line_audio_in_background(
+                        job_id=job_id,
+                        message_id="message-id",
+                        user_id="user-id",
+                        model="gemini-3.1-flash-lite",
+                    )
+
+                self.assertEqual(process_mock.call_args.kwargs["audio_path"], existing_audio)
+                self.assertEqual(list(tmpdir_path.glob("*.m4a")), [existing_audio])
+                self.assertFalse(list(tmpdir_path.glob(".upload_*")))
 
                 with database.get_db() as conn:
                     conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))

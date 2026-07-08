@@ -13,6 +13,8 @@ ReDoc：
 =============================================================================
 """
 
+import asyncio
+import hashlib
 import os
 import uuid
 import logging
@@ -75,6 +77,7 @@ from backend.cleanup import cleanup_stale_temp_files_for_jobs, cleanup_terminal_
 from backend.maintenance import run_startup_health_checks, run_startup_maintenance
 from backend.media_validation import validate_media_magic
 from backend.ngrok_status import get_ngrok_status
+from backend.source_audio import finalize_source_audio_upload
 from backend.tasks import GEMINI_MODEL, SUMMARY_FALLBACK_MODEL, SUMMARY_MODEL, SUPPORTED_MEDIA_FORMATS
 from backend.logging_utils import configure_utf8_logging
 
@@ -412,9 +415,12 @@ async def upload_audio(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_filename = f"{job_id[:8]}_{timestamp}{suffix}"
     source_audio_path = SOURCE_AUDIO_DIR / safe_filename
+    temp_source_audio_path = SOURCE_AUDIO_DIR / f".upload_{job_id[:8]}_{timestamp}{suffix}.tmp"
+    created_new_source_audio = False
 
     try:
         bytes_written = 0
+        upload_hasher = hashlib.sha256()
         first_chunk = await file.read(4096)
         if len(first_chunk) > MAX_UPLOAD_BYTES:
             raise HTTPException(
@@ -422,12 +428,13 @@ async def upload_audio(
                 detail=f"檔案過大，請上傳 {MAX_UPLOAD_MB}MB 以內的媒體檔。"
             )
 
-        async with aiofiles.open(source_audio_path, "wb") as f:
+        async with aiofiles.open(temp_source_audio_path, "wb") as f:
             if first_chunk:
                 bytes_written += len(first_chunk)
                 magic_error = validate_media_magic(suffix, first_chunk)
                 if magic_error:
                     raise HTTPException(status_code=415, detail=magic_error)
+                upload_hasher.update(first_chunk)
                 await f.write(first_chunk)
 
             while chunk := await file.read(1024 * 1024):  # 每次讀 1MB
@@ -437,12 +444,24 @@ async def upload_audio(
                         status_code=413,
                         detail=f"檔案過大，請上傳 {MAX_UPLOAD_MB}MB 以內的媒體檔。"
                 )
+                upload_hasher.update(chunk)
                 await f.write(chunk)
+        upload_sha256 = upload_hasher.hexdigest()
+        source_audio_path, created_new_source_audio = await asyncio.to_thread(
+            finalize_source_audio_upload,
+            temp_source_audio_path,
+            source_audio_path,
+            upload_sha256,
+            bytes_written,
+            SUPPORTED_MEDIA_FORMATS.keys(),
+        )
     except HTTPException:
-        if source_audio_path.exists():
-            source_audio_path.unlink()
+        if temp_source_audio_path.exists():
+            temp_source_audio_path.unlink()
         raise
     except Exception as e:
+        if temp_source_audio_path.exists():
+            temp_source_audio_path.unlink()
         raise HTTPException(status_code=500, detail=f"檔案儲存失敗：{e}")
 
     # --- 寫入持久化任務佇列 ---
@@ -456,7 +475,7 @@ async def upload_audio(
             meeting_title=title,
         )
     except Exception as e:
-        if source_audio_path.exists():
+        if created_new_source_audio and source_audio_path.exists():
             source_audio_path.unlink()
         raise HTTPException(status_code=500, detail=f"任務排入佇列失敗：{e}")
 

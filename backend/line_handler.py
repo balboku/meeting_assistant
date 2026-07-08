@@ -11,6 +11,7 @@ backend/line_handler.py — LINE Bot Webhook 訊息處理邏輯 (Phase 3)
 =============================================================================
 """
 
+import hashlib
 import os
 import logging
 import time
@@ -41,6 +42,7 @@ from linebot.v3.webhooks import (
 
 from backend.tasks import process_audio_task, SUPPORTED_MEDIA_FORMATS
 from backend.database import create_job, get_job, list_line_jobs_for_user, update_job_status
+from backend.source_audio import finalize_source_audio_upload
 
 logger = logging.getLogger("MeetingAssistant.LINE")
 
@@ -369,9 +371,19 @@ def process_line_audio_in_background(
     # 檔名保留 job_id 前綴，讓下方的 glob 搜尋 `meeting_notes_{job_id[:8]}*.md` 正確命中。
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     audio_path = SOURCE_AUDIO_DIR / f"{job_id[:8]}_{timestamp}{suffix}"
+    temp_audio_path = SOURCE_AUDIO_DIR / f".upload_{job_id[:8]}_{timestamp}{suffix}.tmp"
     try:
-        audio_path.write_bytes(audio_bytes)
+        temp_audio_path.write_bytes(audio_bytes)
+        audio_path, _ = finalize_source_audio_upload(
+            temp_audio_path,
+            audio_path,
+            hashlib.sha256(audio_bytes).hexdigest(),
+            len(audio_bytes),
+            SUPPORTED_MEDIA_FORMATS.keys(),
+        )
     except OSError as e:
+        if temp_audio_path.exists():
+            temp_audio_path.unlink()
         logger.error(f"[{job_id}] ❌ 原始音檔保存失敗：{e}")
         update_job_status(
             job_id,
