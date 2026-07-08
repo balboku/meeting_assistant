@@ -705,6 +705,7 @@ class TaskRegressionTests(unittest.TestCase):
                  mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
                  mock.patch.object(tasks, "_split_audio_to_segments", return_value=[seg1, seg2]), \
                  mock.patch.object(tasks, "_transcribe_segment", return_value="[00:00] **[發言者 B]**：新轉錄第二段。") as transcribe_mock, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
                  mock.patch.object(tasks, "update_job_status"), \
                  mock.patch.object(tasks, "save_meeting"):
                 output_path = tasks.process_audio_task(
@@ -761,6 +762,7 @@ class TaskRegressionTests(unittest.TestCase):
                  mock.patch.object(tasks.genai, "Client", return_value=fake_client), \
                  mock.patch.object(tasks, "_split_audio_to_segments", return_value=[audio_path]), \
                  mock.patch.object(tasks, "_transcribe_segment", return_value="[00:00] **[發言者 A]**：逐字稿內容。") as transcribe_mock, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
                  mock.patch.object(tasks, "update_job_status"), \
                  mock.patch.object(tasks, "save_meeting"):
                 output_path = tasks.process_audio_task(
@@ -849,6 +851,7 @@ class TaskRegressionTests(unittest.TestCase):
                  mock.patch.object(tasks.genai, "Client", return_value=fake_client), \
                  mock.patch.object(tasks, "_split_audio_to_segments", return_value=[seg1, seg2]), \
                  mock.patch.object(tasks, "_transcribe_segment") as transcribe_mock, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
                  mock.patch.object(tasks, "update_job_status"), \
                  mock.patch.object(tasks, "save_meeting"):
                 output_path = tasks.process_audio_task(
@@ -903,6 +906,7 @@ class TaskRegressionTests(unittest.TestCase):
                  mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
                  mock.patch.object(tasks, "_split_audio_to_segments", return_value=[seg1, seg2]), \
                  mock.patch.object(tasks, "_transcribe_segment", return_value=incomplete), \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
                  mock.patch.object(tasks, "update_job_status"), \
                  mock.patch.object(tasks, "save_meeting") as save_mock:
                 output_path = tasks.process_audio_task(
@@ -1929,13 +1933,10 @@ class LineRegressionTests(unittest.TestCase):
         self.assertTrue(any("1/2" in reply for reply in replies))
 
     def test_line_audio_flow_creates_job_and_pushes_returned_output_path(self):
-        from backend.database import get_db, get_job
+        import backend.database as database
         import backend.line_handler as line_handler
 
         job_id = "line-regression-job"
-        with get_db() as conn:
-            conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
-
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             output_path = tmpdir_path / "meeting_notes_line.md"
@@ -1943,28 +1944,33 @@ class LineRegressionTests(unittest.TestCase):
 
             pushed_messages = []
 
-            with mock.patch.object(line_handler, "get_line_api", return_value=object()), \
-                 mock.patch.object(line_handler, "download_line_audio", return_value=b"audio"), \
-                 mock.patch.object(line_handler, "SOURCE_AUDIO_DIR", tmpdir_path), \
-                 mock.patch.object(line_handler, "process_audio_task", return_value=output_path) as process_mock, \
-                 mock.patch.object(line_handler, "push_text", side_effect=lambda api, user_id, text: pushed_messages.append(text)):
-                line_handler.process_line_audio_in_background(
-                    job_id=job_id,
-                    message_id="message-id",
-                    user_id="user-id",
-                    model="gemini-3.1-flash-lite",
-                )
+            with mock.patch.object(database, "DB_PATH", tmpdir_path / "meetings.db"):
+                database.init_db()
+                with database.get_db() as conn:
+                    conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
 
-            saved_audio = list(tmpdir_path.glob("line-reg_*.m4a"))
-            self.assertEqual(len(saved_audio), 1)
-            self.assertEqual(saved_audio[0].read_bytes(), b"audio")
-            self.assertFalse(process_mock.call_args.kwargs["cleanup_source_audio"])
+                with mock.patch.object(line_handler, "get_line_api", return_value=object()), \
+                     mock.patch.object(line_handler, "download_line_audio", return_value=b"audio"), \
+                     mock.patch.object(line_handler, "SOURCE_AUDIO_DIR", tmpdir_path), \
+                     mock.patch.object(line_handler, "process_audio_task", return_value=output_path) as process_mock, \
+                     mock.patch.object(line_handler, "push_text", side_effect=lambda api, user_id, text: pushed_messages.append(text)):
+                    line_handler.process_line_audio_in_background(
+                        job_id=job_id,
+                        message_id="message-id",
+                        user_id="user-id",
+                        model="gemini-3.1-flash-lite",
+                    )
 
-        self.assertIsNotNone(get_job(job_id))
-        self.assertTrue(any("會議記錄內容" in msg for msg in pushed_messages))
+                saved_audio = list(tmpdir_path.glob("line-reg_*.m4a"))
+                self.assertEqual(len(saved_audio), 1)
+                self.assertEqual(saved_audio[0].read_bytes(), b"audio")
+                self.assertFalse(process_mock.call_args.kwargs["cleanup_source_audio"])
 
-        with get_db() as conn:
-            conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
+                self.assertIsNotNone(database.get_job(job_id))
+                self.assertTrue(any("會議記錄內容" in msg for msg in pushed_messages))
+
+                with database.get_db() as conn:
+                    conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
 
     def test_line_delivery_message_excludes_full_transcript_and_points_to_output_path(self):
         import backend.line_handler as line_handler
