@@ -2080,6 +2080,19 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("/meetings/${id}/evidence", html)
         self.assertIn("補充資料", html)
 
+    def test_web_ui_can_record_screen_with_microphone(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('id="tab-screen"', html)
+        self.assertIn("switchRecMode('screen')", html)
+        self.assertIn("getDisplayMedia", html)
+        self.assertIn("audio: true", html)
+        self.assertIn("getUserMedia({ audio: true })", html)
+        self.assertIn("...displayStream.getVideoTracks()", html)
+        self.assertIn("displayStream.getAudioTracks()", html)
+        self.assertIn("...micStream.getAudioTracks()", html)
+        self.assertIn("createMediaStreamDestination", html)
+
     def test_frontend_smoke_script_checks_static_ui_and_upload_guard(self):
         smoke_script = ROOT / "scripts" / "smoke_e2e.sh"
 

@@ -679,6 +679,7 @@
     <div class="rec-mode-tabs">
       <button class="rec-tab active" id="tab-audio" onclick="switchRecMode('audio')">🎙 僅錄音</button>
       <button class="rec-tab" id="tab-video" onclick="switchRecMode('video')">🎥 錄音 + 視訊</button>
+      <button class="rec-tab" id="tab-screen" onclick="switchRecMode('screen')">🖥 螢幕 + 麥克風</button>
     </div>
 
     <!-- 視訊預覽（錄影模式才顯示） -->
@@ -1431,8 +1432,11 @@ let mediaRecorder = null;
 let recordedChunks = [];
 let recTimerInterval = null;
 let recSeconds = 0;
-let recMode = 'audio';   // 'audio' | 'video'
+let recMode = 'audio';   // 'audio' | 'video' | 'screen'
 let recStream = null;
+let recSourceStreams = [];
+let recMixAudioCtx = null;
+let recScreenAudioCaptured = false;
 let recAnimFrame = null;
 let audioCtx = null;
 let analyser = null;
@@ -1464,10 +1468,7 @@ function closeRecordModal() {
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     mediaRecorder.stop();
   }
-  if (recStream) {
-    recStream.getTracks().forEach(t => t.stop());
-    recStream = null;
-  }
+  releaseRecordingStreams();
   if (recTimerInterval) clearInterval(recTimerInterval);
   if (recAnimFrame) cancelAnimationFrame(recAnimFrame);
   if (audioCtx) { audioCtx.close(); audioCtx = null; }
@@ -1507,6 +1508,7 @@ function resetRecorder() {
   activeRecordingJobId = null;
   mediaRecorder = null;
   recordedChunks = [];
+  recScreenAudioCaptured = false;
   recSeconds = 0;
   recTimerEl.textContent = '00:00';
   recStatusEl.textContent = '準備就緒，按下開始錄製';
@@ -1515,6 +1517,7 @@ function resetRecorder() {
   recResult.classList.remove('show');
   recProg.classList.remove('show');
   recPreview.classList.remove('show');
+  recPreview.srcObject = null;
   document.getElementById('rec-title').value = '';
   // 清空 canvas
   const ctx = recVis.getContext('2d');
@@ -1525,18 +1528,96 @@ function switchRecMode(mode) {
   recMode = mode;
   document.getElementById('tab-audio').classList.toggle('active', mode === 'audio');
   document.getElementById('tab-video').classList.toggle('active', mode === 'video');
+  document.getElementById('tab-screen').classList.toggle('active', mode === 'screen');
+}
+
+function stopStreamTracks(stream) {
+  if (!stream) return;
+  stream.getTracks().forEach(t => t.stop());
+}
+
+function releaseRecordingStreams() {
+  stopStreamTracks(recStream);
+  recStream = null;
+  recSourceStreams.forEach(stopStreamTracks);
+  recSourceStreams = [];
+  if (recMixAudioCtx) {
+    recMixAudioCtx.close();
+    recMixAudioCtx = null;
+  }
+}
+
+async function mixAudioTracks(audioTracks) {
+  if (audioTracks.length <= 1 || !(window.AudioContext || window.webkitAudioContext)) {
+    return audioTracks;
+  }
+
+  recMixAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const destination = recMixAudioCtx.createMediaStreamDestination();
+  audioTracks.forEach(track => {
+    const source = recMixAudioCtx.createMediaStreamSource(new MediaStream([track]));
+    source.connect(destination);
+  });
+  if (recMixAudioCtx.state === 'suspended') {
+    await recMixAudioCtx.resume();
+  }
+  return destination.stream.getAudioTracks();
+}
+
+async function createRecordingStream() {
+  if (recMode === 'screen') {
+    if (!navigator.mediaDevices.getDisplayMedia) {
+      throw new Error('此瀏覽器不支援螢幕錄製，請改用 Chrome 或 Edge。');
+    }
+
+    recStatusEl.textContent = '請選擇要分享的螢幕、視窗或分頁...';
+    const displayStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: 30 },
+      audio: true,
+    });
+    recSourceStreams.push(displayStream);
+
+    try {
+      const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recSourceStreams.push(micStream);
+      const displayAudioTracks = displayStream.getAudioTracks();
+      recScreenAudioCaptured = displayAudioTracks.length > 0;
+      const mixedAudioTracks = await mixAudioTracks([
+        ...displayAudioTracks,
+        ...micStream.getAudioTracks(),
+      ]);
+      const combinedStream = new MediaStream([
+        ...displayStream.getVideoTracks(),
+        ...mixedAudioTracks,
+      ]);
+      const screenTrack = displayStream.getVideoTracks()[0];
+      if (screenTrack) {
+        screenTrack.addEventListener('ended', () => {
+          if (mediaRecorder && mediaRecorder.state === 'recording') {
+            stopRecording();
+          }
+        });
+      }
+      return combinedStream;
+    } catch (err) {
+      releaseRecordingStreams();
+      throw err;
+    }
+  }
+
+  const constraints = recMode === 'video'
+    ? { audio: true, video: { width: 1280, height: 720 } }
+    : { audio: true };
+  return navigator.mediaDevices.getUserMedia(constraints);
 }
 
 async function startRecording() {
   try {
-    const constraints = recMode === 'video'
-      ? { audio: true, video: { width: 1280, height: 720 } }
-      : { audio: true };
-
-    recStream = await navigator.mediaDevices.getUserMedia(constraints);
+    recordedChunks = [];
+    recStream = await createRecordingStream();
 
     // 視訊預覽
-    if (recMode === 'video') {
+    if (recMode === 'video' || recMode === 'screen') {
       recPreview.srcObject = recStream;
       recPreview.classList.add('show');
     }
@@ -1550,7 +1631,7 @@ async function startRecording() {
     drawVisualizer();
 
     // 選擇容器格式
-    const mimeTypes = recMode === 'video'
+    const mimeTypes = (recMode === 'video' || recMode === 'screen')
       ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
       : ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
     const mimeType = mimeTypes.find(t => MediaRecorder.isTypeSupported(t)) || '';
@@ -1571,11 +1652,14 @@ async function startRecording() {
     // UI 更新
     btnRecStart.style.display = 'none';
     btnRecStop.classList.add('show');
-    recStatusEl.textContent = '🔴 錄製中...';
+    recStatusEl.textContent = recMode === 'screen' && !recScreenAudioCaptured
+      ? '🔴 錄製中（目前未收到螢幕/分頁音訊）'
+      : '🔴 錄製中...';
     recTimerEl.style.color = 'var(--red)';
 
   } catch (err) {
-    alert(`無法存取錄音裝置：${err.message}\n\n請確認瀏覽器已授予麥克風/攝影機權限。`);
+    releaseRecordingStreams();
+    alert(`無法開始錄製：${err.message}\n\n請確認瀏覽器已授予麥克風、攝影機或螢幕分享權限。`);
   }
 }
 
@@ -1583,9 +1667,8 @@ function stopRecording() {
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     mediaRecorder.stop();
   }
-  if (recStream) {
-    recStream.getTracks().forEach(t => t.stop());
-  }
+  releaseRecordingStreams();
+  recPreview.srcObject = null;
   clearInterval(recTimerInterval);
   cancelAnimationFrame(recAnimFrame);
   recStatusEl.textContent = '✅ 錄製完成，正在送出 AI 分析...';
@@ -1594,7 +1677,7 @@ function stopRecording() {
 
 async function onRecordingStopped() {
   // 決定副檔名
-  const ext = recMode === 'video' ? 'webm' : 'webm';
+  const ext = (recMode === 'video' || recMode === 'screen') ? 'webm' : 'webm';
   const title = document.getElementById('rec-title').value.trim()
     || `現場錄製_${new Date().toLocaleString('zh-TW').replace(/[/:]/g, '-')}`;
 
