@@ -2638,17 +2638,40 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("/meetings/${id}/rerun", html)
         self.assertIn("重跑", html)
 
-    def test_web_ui_can_record_screen_with_microphone(self):
+    def test_web_ui_has_wide_reading_mode_for_meeting_detail(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('id="reading-mode-button"', html)
+        self.assertIn("function toggleReadingMode", html)
+        self.assertIn("function syncReadingModeButton", html)
+        self.assertIn("reading-mode", html)
+        self.assertIn("document-view", html)
+        self.assertIn("@media (max-width: 1100px)", html)
+
+    def test_web_ui_can_record_screen_audio_with_toggleable_microphone(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn('id="tab-screen"', html)
+        self.assertIn('id="rec-screen-options"', html)
+        self.assertIn('id="rec-include-mic" checked', html)
+        self.assertIn('id="btn-rec-mic"', html)
         self.assertIn("switchRecMode('screen')", html)
+        self.assertIn("function updateRecordingModeOptions", html)
+        self.assertIn("function toggleRecordingMic", html)
+        self.assertIn("function updateRecordingMicToggle", html)
         self.assertIn("getDisplayMedia", html)
         self.assertIn("audio: true", html)
+        self.assertIn("const includeMic = Boolean(recIncludeMic?.checked)", html)
+        self.assertIn("if (includeMic)", html)
         self.assertIn("getUserMedia({ audio: true })", html)
+        self.assertIn("recMicAudioTracks = micAudioTracks", html)
+        self.assertIn("track.enabled = !recMicMuted", html)
+        self.assertIn("麥克風已關閉", html)
+        self.assertIn("Optional microphone capture failed; continuing with screen audio.", html)
+        self.assertIn("目前沒有可錄製的聲音", html)
         self.assertIn("...displayStream.getVideoTracks()", html)
         self.assertIn("displayStream.getAudioTracks()", html)
-        self.assertIn("...micStream.getAudioTracks()", html)
+        self.assertIn("...micAudioTracks", html)
         self.assertIn("createMediaStreamDestination", html)
 
     def test_frontend_smoke_script_checks_static_ui_and_upload_guard(self):

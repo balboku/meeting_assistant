@@ -248,12 +248,19 @@
     }
 
     /* ── Content Area ── */
-    .content { display: flex; flex: 1; overflow: hidden; }
+    .content {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
 
     /* ── List Panel ── */
     .list-panel {
-      width: 400px; flex-shrink: 0;
-      overflow-y: auto; padding: 20px;
+      width: clamp(300px, 26vw, 380px);
+      flex-shrink: 0;
+      overflow-y: auto;
+      padding: 16px;
       border-right: 1px solid var(--border);
       display: flex; flex-direction: column; gap: 12px;
     }
@@ -309,7 +316,10 @@
 
     /* ── Detail Panel ── */
     .detail-panel {
-      flex: 1; overflow-y: auto; padding: 32px 40px;
+      flex: 1;
+      min-width: 0;
+      overflow-y: auto;
+      padding: clamp(18px, 3vw, 32px);
       display: flex; flex-direction: column; gap: 0;
     }
     .detail-placeholder {
@@ -321,13 +331,18 @@
     .detail-placeholder p { font-size: 15px; }
 
     .detail-header {
-      padding-bottom: 24px;
+      padding-bottom: 18px;
       border-bottom: 1px solid var(--border);
-      margin-bottom: 32px;
+      margin-bottom: 22px;
+      flex-shrink: 0;
     }
     .detail-title {
-      font-size: 26px; font-weight: 700; color: var(--text);
+      min-width: 0;
+      font-size: clamp(20px, 2vw, 26px); font-weight: 700; color: var(--text);
       line-height: 1.3; margin-bottom: 14px;
+    }
+    .detail-topline {
+      display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;
     }
     .detail-meta-row {
       display: flex; flex-wrap: wrap; gap: 12px;
@@ -342,9 +357,28 @@
       display: flex; align-items: center; justify-content: flex-end;
       gap: 10px; flex-wrap: wrap; flex-shrink: 0;
     }
+    .document-view {
+      width: 100%;
+      max-width: 1280px;
+      margin: 0 auto;
+      flex: 1;
+      min-height: 0;
+    }
+    .app.reading-mode .list-panel { display: none; }
+    .app.reading-mode .detail-panel {
+      padding-left: clamp(20px, 5vw, 72px);
+      padding-right: clamp(20px, 5vw, 72px);
+    }
+    .app.reading-mode .document-view { max-width: 1500px; }
 
     /* ── Markdown Content ── */
-    .md-content { line-height: 1.8; color: var(--text-mid); font-size: 15px; }
+    .md-content {
+      width: 100%;
+      line-height: 1.75;
+      color: var(--text-mid);
+      font-size: 15px;
+      overflow-wrap: anywhere;
+    }
     .md-content h1, .md-content h2 {
       color: var(--text); margin: 28px 0 12px;
       padding-bottom: 8px; border-bottom: 1px solid var(--border);
@@ -370,7 +404,13 @@
       color: var(--text-dim); margin: 16px 0;
     }
     .md-content table {
-      width: 100%; border-collapse: collapse; margin: 16px 0;
+      display: block;
+      width: 100%;
+      max-width: 100%;
+      overflow-x: auto;
+      border-collapse: collapse;
+      margin: 16px 0;
+      white-space: nowrap;
     }
     .md-content th {
       background: var(--bg-card2); color: var(--blue);
@@ -379,9 +419,50 @@
     .md-content td {
       padding: 10px 14px; border-bottom: 1px solid var(--border);
       font-size: 14px;
+      vertical-align: top;
     }
+    .md-content td:nth-child(n+3) { white-space: normal; min-width: 180px; }
     .md-content tr:hover td { background: var(--bg-hover); }
     .md-content hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+
+    @media (max-width: 1100px) {
+      .content {
+        flex-direction: column;
+        overflow-y: auto;
+      }
+      .list-panel {
+        width: 100%;
+        max-height: 32vh;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+      }
+      .detail-panel {
+        min-height: 68vh;
+        overflow: visible;
+      }
+      .detail-topline {
+        flex-direction: column;
+      }
+      .detail-actions {
+        justify-content: flex-start;
+      }
+      .app.reading-mode .list-panel { display: none; }
+    }
+
+    @media (max-width: 700px) {
+      header, .search-bar, .job-dashboard, .ops-dashboard {
+        padding-left: 16px;
+        padding-right: 16px;
+      }
+      .stats { display: none; }
+      .detail-panel { padding: 16px; }
+      .detail-actions { width: 100%; }
+      .detail-actions .btn-primary,
+      .detail-actions .btn-secondary {
+        flex: 1 1 160px;
+        justify-content: center;
+      }
+    }
 
     /* ── Loading ── */
     .loading-spinner {
@@ -485,6 +566,24 @@
     .rec-tab.active {
       border-color: var(--blue); background: rgba(122,162,247,0.1); color: var(--blue); font-weight: 600;
     }
+    .rec-screen-options {
+      display: none;
+      margin: -12px 0 18px;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg-card2);
+    }
+    .rec-screen-options.show { display: block; }
+    .rec-check {
+      display: flex; align-items: center; gap: 10px;
+      color: var(--text); font-size: 14px; cursor: pointer;
+      user-select: none;
+    }
+    .rec-check input {
+      width: 16px; height: 16px; accent-color: var(--blue);
+      flex-shrink: 0;
+    }
     .rec-preview {
       width: 100%; border-radius: 10px; background: var(--bg);
       margin-bottom: 16px; display: none;
@@ -517,6 +616,17 @@
       padding: 12px 28px; border-radius: 99px; font-size: 15px; font-weight: 700;
       font-family: inherit; cursor: pointer; display: none;
       align-items: center; gap: 8px;
+    }
+    .btn-rec-mic {
+      background: transparent; color: var(--blue); border: 1.5px solid var(--blue);
+      padding: 12px 22px; border-radius: 99px; font-size: 15px; font-weight: 700;
+      font-family: inherit; cursor: pointer; display: none;
+      align-items: center; gap: 8px;
+    }
+    .btn-rec-mic.show { display: flex; }
+    .btn-rec-mic[aria-pressed="true"] {
+      color: var(--red); border-color: var(--red);
+      background: rgba(247,118,142,0.08);
     }
     .btn-rec-stop.show { display: flex; }
     .rec-dot {
@@ -679,7 +789,13 @@
     <div class="rec-mode-tabs">
       <button class="rec-tab active" id="tab-audio" onclick="switchRecMode('audio')">🎙 僅錄音</button>
       <button class="rec-tab" id="tab-video" onclick="switchRecMode('video')">🎥 錄音 + 視訊</button>
-      <button class="rec-tab" id="tab-screen" onclick="switchRecMode('screen')">🖥 螢幕 + 麥克風</button>
+      <button class="rec-tab" id="tab-screen" onclick="switchRecMode('screen')">🖥 螢幕/分頁音訊</button>
+    </div>
+    <div class="rec-screen-options" id="rec-screen-options">
+      <label class="rec-check">
+        <input type="checkbox" id="rec-include-mic" checked />
+        <span>同時錄麥克風，錄製中可關閉</span>
+      </label>
     </div>
 
     <!-- 視訊預覽（錄影模式才顯示） -->
@@ -702,6 +818,9 @@
     <div class="rec-controls">
       <button class="btn-rec-start" id="btn-rec-start" onclick="startRecording()">
         <div class="rec-dot"></div> 開始錄製
+      </button>
+      <button class="btn-rec-mic" id="btn-rec-mic" onclick="toggleRecordingMic()" aria-pressed="false">
+        🎙 關閉麥克風
       </button>
       <button class="btn-rec-stop" id="btn-rec-stop" onclick="stopRecording()">
         ⏹ 停止並送出
@@ -969,6 +1088,18 @@ function normalizeMeetingMarkdown(markdown = '') {
   return text.replace(/\n{4,}/g, '\n\n\n').trim();
 }
 
+function syncReadingModeButton() {
+  const button = document.getElementById('reading-mode-button');
+  if (!button) return;
+  const isReadingMode = document.querySelector('.app')?.classList.contains('reading-mode');
+  button.textContent = isReadingMode ? '↩ 顯示清單' : '⛶ 閱讀模式';
+}
+
+function toggleReadingMode() {
+  document.querySelector('.app')?.classList.toggle('reading-mode');
+  syncReadingModeButton();
+}
+
 async function openDetail(id) {
   currentId = id;
 
@@ -995,9 +1126,10 @@ async function openDetail(id) {
 
     detail.innerHTML = `
       <div class="detail-header">
-        <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;">
+        <div class="detail-topline">
           <div class="detail-title">${escapeHtml(r.title)}</div>
           <div class="detail-actions">
+            <button id="reading-mode-button" class="btn-secondary" onclick="toggleReadingMode()">⛶ 閱讀模式</button>
             <button id="rerun-meeting-button" class="btn-secondary" onclick="rerunMeeting(${id})">🔁 重跑</button>
             <button id="evidence-upload-button" class="btn-secondary" onclick="document.getElementById('evidence-file-input').click()">📎 補充資料</button>
             <input id="evidence-file-input"
@@ -1013,8 +1145,11 @@ async function openDetail(id) {
           <div class="meta-chip"><span class="icon">⏰</span>${formatDate(r.created_at)}</div>
         </div>
       </div>
-      <div class="md-content">${html}</div>
+      <div class="document-view">
+        <div class="md-content">${html}</div>
+      </div>
     `;
+    syncReadingModeButton();
   } catch (err) {
     detail.innerHTML = `
       <div class="detail-placeholder">
@@ -1469,6 +1604,9 @@ let recStream = null;
 let recSourceStreams = [];
 let recMixAudioCtx = null;
 let recScreenAudioCaptured = false;
+let recScreenMicCaptured = false;
+let recMicAudioTracks = [];
+let recMicMuted = false;
 let recAnimFrame = null;
 let audioCtx = null;
 let analyser = null;
@@ -1482,9 +1620,12 @@ const recTimerEl  = document.getElementById('rec-timer');
 const recStatusEl = document.getElementById('rec-status');
 const btnRecStart = document.getElementById('btn-rec-start');
 const btnRecStop  = document.getElementById('btn-rec-stop');
+const btnRecMic   = document.getElementById('btn-rec-mic');
 const recResult   = document.getElementById('rec-result');
 const recProg     = document.getElementById('rec-progress-box');
 const recProgMsg  = document.getElementById('rec-progress-msg');
+const recScreenOptions = document.getElementById('rec-screen-options');
+const recIncludeMic = document.getElementById('rec-include-mic');
 
 function openRecordModal() {
   resetRecorder();
@@ -1541,19 +1682,31 @@ function resetRecorder() {
   mediaRecorder = null;
   recordedChunks = [];
   recScreenAudioCaptured = false;
+  recScreenMicCaptured = false;
+  recMicAudioTracks = [];
+  recMicMuted = false;
   recSeconds = 0;
   recTimerEl.textContent = '00:00';
   recStatusEl.textContent = '準備就緒，按下開始錄製';
   btnRecStart.style.display = 'flex';
   btnRecStop.classList.remove('show');
+  btnRecMic.classList.remove('show');
+  btnRecMic.setAttribute('aria-pressed', 'false');
+  btnRecMic.textContent = '🎙 關閉麥克風';
   recResult.classList.remove('show');
   recProg.classList.remove('show');
   recPreview.classList.remove('show');
   recPreview.srcObject = null;
+  if (recIncludeMic) recIncludeMic.checked = true;
+  updateRecordingModeOptions();
   document.getElementById('rec-title').value = '';
   // 清空 canvas
   const ctx = recVis.getContext('2d');
   ctx.clearRect(0, 0, recVis.width, recVis.height);
+}
+
+function updateRecordingModeOptions() {
+  recScreenOptions?.classList.toggle('show', recMode === 'screen');
 }
 
 function switchRecMode(mode) {
@@ -1561,6 +1714,7 @@ function switchRecMode(mode) {
   document.getElementById('tab-audio').classList.toggle('active', mode === 'audio');
   document.getElementById('tab-video').classList.toggle('active', mode === 'video');
   document.getElementById('tab-screen').classList.toggle('active', mode === 'screen');
+  updateRecordingModeOptions();
 }
 
 function stopStreamTracks(stream) {
@@ -1577,6 +1731,8 @@ function releaseRecordingStreams() {
     recMixAudioCtx.close();
     recMixAudioCtx = null;
   }
+  recMicAudioTracks = [];
+  recMicMuted = false;
 }
 
 async function mixAudioTracks(audioTracks) {
@@ -1596,6 +1752,70 @@ async function mixAudioTracks(audioTracks) {
   return destination.stream.getAudioTracks();
 }
 
+function attachScreenStopHandler(displayStream) {
+  const screenTrack = displayStream.getVideoTracks()[0];
+  if (!screenTrack) return;
+  screenTrack.addEventListener('ended', () => {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      stopRecording();
+    }
+  });
+}
+
+function screenRecordingStatusText() {
+  if (recScreenAudioCaptured && recScreenMicCaptured && recMicMuted) {
+    return '🔴 錄製中（螢幕/分頁音訊；麥克風已關閉）';
+  }
+  if (recScreenAudioCaptured && recScreenMicCaptured) {
+    return '🔴 錄製中（螢幕/分頁音訊 + 麥克風）';
+  }
+  if (recScreenAudioCaptured) {
+    return '🔴 錄製中（螢幕/分頁音訊）';
+  }
+  if (recScreenMicCaptured) {
+    return '🔴 錄製中（僅麥克風音訊）';
+  }
+  return '🔴 錄製中（未偵測到音訊）';
+}
+
+function updateRecordingMicToggle() {
+  const hasLiveMic = recMicAudioTracks.some(track => track.readyState === 'live');
+  btnRecMic.classList.toggle(
+    'show',
+    recMode === 'screen' && mediaRecorder?.state === 'recording' && hasLiveMic
+  );
+  btnRecMic.setAttribute('aria-pressed', String(recMicMuted));
+  btnRecMic.textContent = recMicMuted ? '🎙 開啟麥克風' : '🎙 關閉麥克風';
+}
+
+function toggleRecordingMic() {
+  if (!recMicAudioTracks.length) return;
+  recMicMuted = !recMicMuted;
+  recMicAudioTracks.forEach(track => {
+    if (track.readyState === 'live') {
+      track.enabled = !recMicMuted;
+    }
+  });
+  recStatusEl.textContent = screenRecordingStatusText();
+  updateRecordingMicToggle();
+}
+
+function startAudioVisualizer(stream) {
+  const audioTracks = stream.getAudioTracks();
+  if (!audioTracks.length || !(window.AudioContext || window.webkitAudioContext)) {
+    const ctx = recVis.getContext('2d');
+    ctx.clearRect(0, 0, recVis.width, recVis.height);
+    return;
+  }
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  const source = audioCtx.createMediaStreamSource(new MediaStream(audioTracks));
+  source.connect(analyser);
+  drawVisualizer();
+}
+
 async function createRecordingStream() {
   if (recMode === 'screen') {
     if (!navigator.mediaDevices.getDisplayMedia) {
@@ -1610,26 +1830,39 @@ async function createRecordingStream() {
     recSourceStreams.push(displayStream);
 
     try {
-      const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      recSourceStreams.push(micStream);
       const displayAudioTracks = displayStream.getAudioTracks();
       recScreenAudioCaptured = displayAudioTracks.length > 0;
-      const mixedAudioTracks = await mixAudioTracks([
+      const includeMic = Boolean(recIncludeMic?.checked);
+      let micAudioTracks = [];
+
+      if (includeMic) {
+        try {
+          const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          recSourceStreams.push(micStream);
+          micAudioTracks = micStream.getAudioTracks();
+          recMicAudioTracks = micAudioTracks;
+          recScreenMicCaptured = micAudioTracks.length > 0;
+        } catch (err) {
+          recScreenMicCaptured = false;
+          recMicAudioTracks = [];
+          console.warn('Optional microphone capture failed; continuing with screen audio.', err);
+        }
+      }
+
+      const rawAudioTracks = [
         ...displayAudioTracks,
-        ...micStream.getAudioTracks(),
-      ]);
+        ...micAudioTracks,
+      ];
+      if (!rawAudioTracks.length) {
+        throw new Error('目前沒有可錄製的聲音。請改選 Chrome 分頁並勾選「分享分頁音訊」，或勾選「同時錄麥克風」。');
+      }
+
+      const mixedAudioTracks = await mixAudioTracks(rawAudioTracks);
       const combinedStream = new MediaStream([
         ...displayStream.getVideoTracks(),
         ...mixedAudioTracks,
       ]);
-      const screenTrack = displayStream.getVideoTracks()[0];
-      if (screenTrack) {
-        screenTrack.addEventListener('ended', () => {
-          if (mediaRecorder && mediaRecorder.state === 'recording') {
-            stopRecording();
-          }
-        });
-      }
+      attachScreenStopHandler(displayStream);
       return combinedStream;
     } catch (err) {
       releaseRecordingStreams();
@@ -1655,12 +1888,7 @@ async function startRecording() {
     }
 
     // 聲波視覺化
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 256;
-    const source = audioCtx.createMediaStreamSource(recStream);
-    source.connect(analyser);
-    drawVisualizer();
+    startAudioVisualizer(recStream);
 
     // 選擇容器格式
     const mimeTypes = (recMode === 'video' || recMode === 'screen')
@@ -1684,9 +1912,8 @@ async function startRecording() {
     // UI 更新
     btnRecStart.style.display = 'none';
     btnRecStop.classList.add('show');
-    recStatusEl.textContent = recMode === 'screen' && !recScreenAudioCaptured
-      ? '🔴 錄製中（目前未收到螢幕/分頁音訊）'
-      : '🔴 錄製中...';
+    recStatusEl.textContent = recMode === 'screen' ? screenRecordingStatusText() : '🔴 錄製中...';
+    updateRecordingMicToggle();
     recTimerEl.style.color = 'var(--red)';
 
   } catch (err) {
@@ -1705,6 +1932,7 @@ function stopRecording() {
   cancelAnimationFrame(recAnimFrame);
   recStatusEl.textContent = '✅ 錄製完成，正在送出 AI 分析...';
   btnRecStop.classList.remove('show');
+  btnRecMic.classList.remove('show');
 }
 
 async function onRecordingStopped() {
