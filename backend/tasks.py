@@ -60,9 +60,38 @@ TIMESTAMP_PATTERN       = re.compile(r"\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\
 SEGMENT_CACHE_VERSION   = 2
 SEGMENT_CACHE_DIRNAME   = "segment_cache"
 SEGMENT_COMPLETENESS_GRACE_SECONDS = 120
+SEGMENT_RECOVERY_SPLIT_SECONDS = (300, 180, 120, 60, 30, 15, 10, 5)
+TRANSCRIPT_SECTION_HEADING = "## 📝 四、完整逐字稿 (Verbatim Transcript)"
+TRANSCRIPT_SECTION_PATTERN = re.compile(
+    r"^##\s*[^\n]*(?:Verbatim Transcript|完整逐字稿|逐字稿|蝔)[^\n]*\n",
+    re.MULTILINE | re.IGNORECASE,
+)
 SEGMENT_INCOMPLETE_MARKERS = (
     "系統提示：此處音檔包含無意義雜訊",
     "已自動過濾後續重複內容",
+)
+SEGMENT_REPETITION_MIN_LINES = 12
+SEGMENT_REPETITION_RUN_THRESHOLD = 8
+SEGMENT_REPETITION_RATIO_THRESHOLD = 0.5
+SEGMENT_SHORT_TURN_MAX_CHARS = 8
+SEGMENT_SHORT_TURN_RUN_THRESHOLD = 20
+SEGMENT_LONG_TURN_CHARS = 1200
+SEGMENT_MAX_NORMALIZED_TURN_CHARS = 8000
+SEGMENT_REPEATED_NGRAM_CHARS = 18
+SEGMENT_REPEATED_NGRAM_THRESHOLD = 12
+TRANSCRIPT_INTEGRITY_MIN_CHAR_RATIO = 0.95
+TRANSCRIPT_INTEGRITY_MIN_TIMESTAMP_RATIO = 0.95
+TRANSCRIPT_OMISSION_MARKERS = (
+    "為節省篇幅",
+    "以下省略",
+    "已省略",
+    "省略逐字稿",
+    "逐字稿省略",
+    "不逐字列出",
+    "已過濾逐字稿",
+    "omitted for brevity",
+    "transcript omitted",
+    "transcript truncated",
 )
 
 
@@ -119,6 +148,10 @@ def _normalize_domain_terms(text: str) -> str:
         text = re.sub(pattern, target, text)
     for source in ("Qisda", "Jasta", "加斯達"):
         text = text.replace(source, "佳世達")
+    text = re.sub(r"佳世達\s*[（(]\s*佳世達\s*[）)]", "佳世達", text)
+    text = re.sub(r"\$\s*\\?right\s*arrow\s*\$", "→", text, flags=re.IGNORECASE)
+    text = re.sub(r"\$\s*\\?rightarrow\s*\$", "→", text, flags=re.IGNORECASE)
+    text = re.sub(r"\$\s*ightarrow\s*\$", "→", text, flags=re.IGNORECASE)
     return text
 
 
@@ -149,6 +182,107 @@ def _prepend_transcript_quality_notice(meeting_content: str, transcript: str) ->
         + f"\n> ⚠️ {notice}\n"
         + meeting_content[insert_at:]
     )
+
+
+def _replace_transcript_section(meeting_content: str, full_transcript: str) -> str:
+    """Keep the generated summary, but force the transcript section to remain verbatim."""
+    content = meeting_content or ""
+    transcript = (full_transcript or "").strip()
+    match = TRANSCRIPT_SECTION_PATTERN.search(content)
+    if match:
+        prefix = content[:match.start()].rstrip()
+    else:
+        prefix = content.rstrip()
+
+    prefix = re.sub(r"\n-{3,}\s*$", "", prefix).rstrip()
+    separator = "\n\n---\n\n" if prefix else ""
+    return f"{prefix}{separator}{TRANSCRIPT_SECTION_HEADING}\n{transcript}\n"
+
+
+def _canonical_transcript_text(text: str) -> str:
+    return "\n".join(line.rstrip() for line in (text or "").strip().splitlines()).strip()
+
+
+def _extract_transcript_section_body(meeting_content: str) -> Optional[str]:
+    match = TRANSCRIPT_SECTION_PATTERN.search(meeting_content or "")
+    if not match:
+        return None
+    return (meeting_content or "")[match.end():].strip()
+
+
+def _transcript_segment_heading_count(transcript: str) -> int:
+    return len(
+        re.findall(
+            r"(?m)^#{1,6}\s*(?:【第\s*\d+\s*段|\[Segment\s+\d+/\d+)",
+            transcript or "",
+        )
+    )
+
+
+def _timestamp_count(transcript: str) -> int:
+    return len(TIMESTAMP_PATTERN.findall(transcript or ""))
+
+
+def _transcript_integrity_issues(meeting_content: str, full_transcript: str) -> list[str]:
+    """Final guardrail: the saved transcript must match the verified transcript."""
+    issues: list[str] = []
+    expected = _canonical_transcript_text(full_transcript)
+    actual_body = _extract_transcript_section_body(meeting_content)
+    if actual_body is None:
+        return ["缺少完整逐字稿區塊"]
+
+    actual = _canonical_transcript_text(actual_body)
+    if not actual:
+        return ["完整逐字稿區塊內容空白"]
+
+    lowered_actual = actual.lower()
+    if any(marker.lower() in lowered_actual for marker in TRANSCRIPT_OMISSION_MARKERS):
+        issues.append("完整逐字稿區塊疑似含省略或截斷說明")
+
+    if expected and actual != expected:
+        issues.append("完整逐字稿區塊與原始轉錄結果不一致")
+
+    expected_chars = len(expected)
+    if expected_chars and len(actual) < expected_chars * TRANSCRIPT_INTEGRITY_MIN_CHAR_RATIO:
+        issues.append(
+            "完整逐字稿區塊字數低於原始轉錄結果"
+            f"（{len(actual)}/{expected_chars}）"
+        )
+
+    expected_timestamps = _timestamp_count(expected)
+    actual_timestamps = _timestamp_count(actual)
+    if expected_timestamps and actual_timestamps < expected_timestamps * TRANSCRIPT_INTEGRITY_MIN_TIMESTAMP_RATIO:
+        issues.append(
+            "完整逐字稿區塊時間戳數量低於原始轉錄結果"
+            f"（{actual_timestamps}/{expected_timestamps}）"
+        )
+
+    expected_segments = _transcript_segment_heading_count(expected)
+    actual_segments = _transcript_segment_heading_count(actual)
+    if expected_segments and actual_segments < expected_segments:
+        issues.append(
+            "完整逐字稿區塊缺少分段標題"
+            f"（{actual_segments}/{expected_segments}）"
+        )
+
+    repetition_issue = _segment_repetition_quality_issue(actual)
+    if repetition_issue:
+        issues.append(f"完整逐字稿區塊{repetition_issue}")
+
+    return list(dict.fromkeys(issues))
+
+
+def _full_transcript_quality_issues(full_transcript: str) -> list[str]:
+    """Check the assembled transcript before spending summary-model tokens."""
+    probe_content = _replace_transcript_section("", full_transcript)
+    return _transcript_integrity_issues(probe_content, full_transcript)
+
+
+def _raise_if_full_transcript_unsafe(full_transcript: str, job_id: str) -> None:
+    issues = _full_transcript_quality_issues(full_transcript)
+    if issues:
+        raise RuntimeError("完整逐字稿品質檢查失敗：" + "；".join(issues))
+    logger.info("[%s] ✅ 完整逐字稿品質檢查通過", job_id)
 
 
 def _resolve_summary_models(
@@ -233,6 +367,186 @@ def _format_transcript_segment(
     return f"\n\n### [Segment {segment_index + 1}/{total_segments} | {start} - {end}]\n\n{body}"
 
 
+def _sort_transcript_blocks_by_timestamp(transcript: str) -> str:
+    blocks: list[str] = []
+    current_block: list[str] = []
+    for raw_line in (transcript or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if TIMESTAMP_PATTERN.match(line) and current_block:
+            blocks.append("\n".join(current_block).strip())
+            current_block = [line]
+        else:
+            current_block.append(line)
+    if current_block:
+        blocks.append("\n".join(current_block).strip())
+
+    if len(blocks) < 2:
+        return (transcript or "").strip()
+
+    timed_blocks: list[tuple[int, int, str]] = []
+    has_inversion = False
+    previous_seconds = -1
+    carry_seconds = 10**9
+    for order, block in enumerate(blocks):
+        match = TIMESTAMP_PATTERN.search(block)
+        if match:
+            seconds = int(match.group("minutes")) * 60 + int(match.group("seconds"))
+            if seconds < previous_seconds:
+                has_inversion = True
+            previous_seconds = seconds
+            carry_seconds = seconds
+        else:
+            seconds = carry_seconds
+        timed_blocks.append((seconds, order, block))
+
+    if not has_inversion:
+        return "\n\n".join(blocks)
+
+    return "\n\n".join(
+        block
+        for _seconds, _order, block in sorted(timed_blocks, key=lambda item: (item[0], item[1]))
+    )
+
+
+def _normalized_transcript_line_content(raw_line: str) -> str:
+    line = raw_line.strip()
+    line = TIMESTAMP_PATTERN.sub("", line)
+    line = re.sub(r"\*\*\[[^\]]+\]\*\*", "", line)
+    line = re.sub(r"\[[^\]]+\]", "", line)
+    line = re.sub(r"^[\uff1a:,\uff0c\s]+", "", line)
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", line)
+
+
+def _normalized_transcript_turns(transcript: str) -> list[str]:
+    turns: list[str] = []
+    for raw_line in (transcript or "").splitlines():
+        line = _normalized_transcript_line_content(raw_line)
+        if not line:
+            continue
+        if len(line) >= 12:
+            turns.append(line)
+    return turns
+
+
+def _max_repeated_ngram_count(text: str, ngram_chars: int) -> int:
+    if len(text) < ngram_chars * 2:
+        return 1
+
+    counts: dict[str, int] = {}
+    max_count = 1
+    for index in range(0, len(text) - ngram_chars + 1):
+        ngram = text[index:index + ngram_chars]
+        counts[ngram] = counts.get(ngram, 0) + 1
+        if counts[ngram] > max_count:
+            max_count = counts[ngram]
+            if max_count >= SEGMENT_REPEATED_NGRAM_THRESHOLD:
+                return max_count
+    return max_count
+
+
+def _long_turn_repetition_quality_issue(transcript: str) -> Optional[str]:
+    for raw_line in (transcript or "").splitlines():
+        line = _normalized_transcript_line_content(raw_line)
+        line_length = len(line)
+        if line_length < SEGMENT_LONG_TURN_CHARS:
+            continue
+
+        repeated_ngram_count = _max_repeated_ngram_count(
+            line,
+            SEGMENT_REPEATED_NGRAM_CHARS,
+        )
+        if (
+            line_length >= SEGMENT_MAX_NORMALIZED_TURN_CHARS
+            or repeated_ngram_count >= SEGMENT_REPEATED_NGRAM_THRESHOLD
+        ):
+            return (
+                "\u5206\u6bb5\u7591\u4f3c\u55ae\u53e5\u91cd\u8907\u8f49\u9304\u5e7b\u89ba"
+                f"\uff08\u55ae\u53e5\u9577\u5ea6 {line_length} \u5b57\uff0c"
+                f"\u91cd\u8907\u7247\u6bb5 {repeated_ngram_count} \u6b21\uff09"
+            )
+    return None
+
+
+def _short_turn_repetition_quality_issue(transcript: str) -> Optional[str]:
+    longest = 1
+    current = 1
+    longest_turn = ""
+    previous = ""
+    for raw_line in (transcript or "").splitlines():
+        line = _normalized_transcript_line_content(raw_line)
+        if not line:
+            continue
+        if not (2 <= len(line) <= SEGMENT_SHORT_TURN_MAX_CHARS):
+            previous = ""
+            current = 1
+            continue
+
+        if line == previous:
+            current += 1
+        else:
+            current = 1
+            previous = line
+
+        if current > longest:
+            longest = current
+            longest_turn = line
+
+    if longest >= SEGMENT_SHORT_TURN_RUN_THRESHOLD:
+        return (
+            "分段疑似短句重複轉錄幻覺"
+            f"（「{longest_turn}」連續重複 {longest} 次）"
+        )
+    return None
+
+
+def _repetition_run_length(turns: list[str]) -> tuple[int, int]:
+    longest = 1
+    repeated = 0
+    current = 1
+    previous = ""
+    for turn in turns:
+        if previous and (turn == previous or turn in previous or previous in turn):
+            current += 1
+        else:
+            if current >= 2:
+                repeated += current
+            longest = max(longest, current)
+            current = 1
+        previous = turn
+    if current >= 2:
+        repeated += current
+    longest = max(longest, current)
+    return longest, repeated
+
+
+def _segment_repetition_quality_issue(transcript: str) -> Optional[str]:
+    long_turn_issue = _long_turn_repetition_quality_issue(transcript)
+    if long_turn_issue:
+        return long_turn_issue
+
+    short_turn_issue = _short_turn_repetition_quality_issue(transcript)
+    if short_turn_issue:
+        return short_turn_issue
+
+    turns = _normalized_transcript_turns(transcript)
+    if len(turns) < SEGMENT_REPETITION_MIN_LINES:
+        return None
+
+    longest_run, repeated_turns = _repetition_run_length(turns)
+    repeated_ratio = repeated_turns / len(turns)
+    if (
+        longest_run >= SEGMENT_REPETITION_RUN_THRESHOLD
+        or repeated_ratio >= SEGMENT_REPETITION_RATIO_THRESHOLD
+    ):
+        return (
+            "分段疑似重複轉錄幻覺"
+            f"（連續重複 {longest_run} 句，重複比例 {repeated_ratio:.0%}）"
+        )
+    return None
+
+
 def _speaker_context_from_transcripts(transcripts: list[str], max_lines: int = 8) -> str:
     """Build compact prior-speaker context for the next segmented STT call."""
     if not transcripts:
@@ -262,16 +576,23 @@ def _segment_transcript_quality_issues(
     segment_index: int,
     total_segments: int,
     segment_minutes: int = SEGMENT_MINUTES,
+    expected_end_seconds: Optional[int] = None,
+    is_last_segment: Optional[bool] = None,
 ) -> list[str]:
     """Return quality issues that make a segment unsafe to reuse or summarize."""
     issues: list[str] = []
     if not transcript or not transcript.strip():
         return ["轉錄內容為空"]
 
-    is_last_segment = segment_index >= total_segments - 1
+    if is_last_segment is None:
+        is_last_segment = segment_index >= total_segments - 1
     has_incomplete_marker = any(marker in transcript for marker in SEGMENT_INCOMPLETE_MARKERS)
     if has_incomplete_marker and not is_last_segment:
         issues.append("非最後分段含自動過濾/截斷提示")
+
+    repetition_issue = _segment_repetition_quality_issue(transcript)
+    if repetition_issue:
+        issues.append(repetition_issue)
 
     if is_last_segment:
         return issues
@@ -284,7 +605,9 @@ def _segment_transcript_quality_issues(
         issues.append("非最後分段缺少時間戳")
         return issues
 
-    expected_end = (segment_index + 1) * segment_minutes * 60
+    expected_end = expected_end_seconds
+    if expected_end is None:
+        expected_end = (segment_index + 1) * segment_minutes * 60
     latest_timestamp = max(timestamps)
     if latest_timestamp < expected_end - SEGMENT_COMPLETENESS_GRACE_SECONDS:
         issues.append(
@@ -300,12 +623,16 @@ def _raise_if_segment_transcript_incomplete(
     segment_index: int,
     total_segments: int,
     segment_minutes: int = SEGMENT_MINUTES,
+    expected_end_seconds: Optional[int] = None,
+    is_last_segment: Optional[bool] = None,
 ) -> None:
     issues = _segment_transcript_quality_issues(
         transcript=transcript,
         segment_index=segment_index,
         total_segments=total_segments,
         segment_minutes=segment_minutes,
+        expected_end_seconds=expected_end_seconds,
+        is_last_segment=is_last_segment,
     )
     if issues:
         raise RuntimeError(
@@ -733,6 +1060,22 @@ _extract_summary_preview = _extract_summary_preview_v2
 _meeting_content_quality_issues = _meeting_content_quality_issues_v2
 
 
+def _finalize_meeting_content(meeting_content: str, full_transcript: str, job_id: str) -> str:
+    """Apply final transcript preservation and fail closed on unsafe output."""
+    finalized = _replace_transcript_section(meeting_content, full_transcript)
+    finalized = _prepend_transcript_quality_notice(finalized, full_transcript)
+
+    issues = [
+        *_meeting_content_quality_issues(finalized),
+        *_transcript_integrity_issues(finalized, full_transcript),
+    ]
+    if issues:
+        raise RuntimeError("會議記錄最終品質檢查失敗：" + "；".join(dict.fromkeys(issues)))
+
+    logger.info("[%s] ✅ 會議記錄最終品質檢查通過", job_id)
+    return finalized
+
+
 def _repair_meeting_content_if_needed(
     client,
     model: str,
@@ -769,6 +1112,7 @@ def _repair_meeting_content_if_needed(
 待辦事項請使用 A1、A2、A3...，並保留關聯討論與關聯決議欄位。
 若沒有待辦事項，請保留表格並填入一列「A1 | 未提及 | 未提及 | 未提及 | 未提及 | 未提及 | 中」。
 若逐字稿缺漏，請依現有內容保守整理；不可新增不存在的發言。
+完整逐字稿區塊只能原樣保留或補上缺少標題，不可摘要、改寫、刪減、合併或加入「為節省篇幅」等省略說明。
 
 已知問題：
 {chr(10).join(f"- {issue}" for issue in issues)}
@@ -844,6 +1188,158 @@ def _split_audio_to_segments(audio_path: Path, segment_minutes: int = 10) -> lis
     except Exception as e:
         logger.warning(f"⚠️  音訊切割失敗（{e}），改以整體方式送出")
         return [audio_path]
+
+
+def _split_audio_to_subsegments(audio_path: Path, chunk_seconds: int) -> list[tuple[Path, int, int]]:
+    """
+    將已切出的分段再切成更小段，回傳 (路徑, 起始秒, 結束秒)。
+    這個函式用於轉錄補救；切割失敗時讓呼叫端保留原本的完整性錯誤。
+    """
+    _configure_ffmpeg_tools()
+    from pydub import AudioSegment
+
+    ffmpeg_path = os.getenv("FFMPEG_PATH") or os.getenv("FFMPEG_BINARY")
+    if ffmpeg_path and Path(ffmpeg_path).is_file():
+        AudioSegment.converter = ffmpeg_path
+
+    audio = AudioSegment.from_file(str(audio_path))
+    duration_ms = len(audio)
+    chunk_ms = max(1, chunk_seconds) * 1000
+    if duration_ms <= chunk_ms:
+        end_seconds = max(1, (duration_ms + 999) // 1000)
+        return [(audio_path, 0, end_seconds)]
+
+    subsegments: list[tuple[Path, int, int]] = []
+    for i, start_ms in enumerate(range(0, duration_ms, chunk_ms)):
+        end_ms = min(duration_ms, start_ms + chunk_ms)
+        chunk = audio[start_ms:end_ms]
+        sub_path = audio_path.parent / f"_sub_{audio_path.stem}_{chunk_seconds}s_{i:03d}.mp3"
+        chunk.export(str(sub_path), format="mp3", parameters=["-q:a", "3"])
+        subsegments.append((sub_path, start_ms // 1000, max(1, (end_ms + 999) // 1000)))
+
+    logger.info(
+        "🔪 補救切段：%s 已切成 %s 個小段（每段約 %s 秒）",
+        audio_path.name,
+        len(subsegments),
+        chunk_seconds,
+    )
+    return subsegments
+
+
+def _next_recovery_chunk_seconds(duration_seconds: int) -> Optional[int]:
+    for chunk_seconds in SEGMENT_RECOVERY_SPLIT_SECONDS:
+        if chunk_seconds < duration_seconds:
+            return chunk_seconds
+    return None
+
+
+def _transcribe_segment_with_recovery(
+    client,
+    seg_path: Path,
+    seg_index: int,
+    total_segs: int,
+    job_id: str,
+    model: str,
+    *,
+    offset_seconds: int,
+    duration_seconds: int,
+    is_last_segment: bool,
+    speaker_context: str = "",
+    temp_segment_paths: Optional[list[Path]] = None,
+) -> str:
+    transcript = _transcribe_segment(
+        client,
+        seg_path,
+        seg_index,
+        total_segs,
+        job_id,
+        model,
+        speaker_context=speaker_context,
+    )
+    transcript = _offset_transcript_timestamps(transcript, offset_seconds)
+
+    try:
+        _raise_if_segment_transcript_incomplete(
+            transcript=transcript,
+            segment_index=seg_index,
+            total_segments=total_segs,
+            segment_minutes=SEGMENT_MINUTES,
+            expected_end_seconds=offset_seconds + duration_seconds,
+            is_last_segment=is_last_segment,
+        )
+        return transcript
+    except RuntimeError as quality_error:
+        chunk_seconds = _next_recovery_chunk_seconds(duration_seconds)
+        if chunk_seconds is None:
+            raise
+
+        logger.warning(
+            "[%s] ⚠️ 第 %s/%s 段轉錄不完整，改切成約 %s 秒小段補救：%s",
+            job_id,
+            seg_index + 1,
+            total_segs,
+            chunk_seconds,
+            quality_error,
+        )
+        update_job_status(
+            job_id,
+            "processing",
+            f"🔁 第 {seg_index + 1}/{total_segs} 段轉錄不完整，改切成小段重試...",
+            progress_current=seg_index,
+            progress_total=total_segs,
+        )
+
+        try:
+            subsegments = _split_audio_to_subsegments(seg_path, chunk_seconds)
+        except Exception as split_error:
+            logger.warning(
+                "[%s] ⚠️ 第 %s/%s 段補救切段失敗：%s",
+                job_id,
+                seg_index + 1,
+                total_segs,
+                split_error,
+            )
+            raise quality_error
+
+        if len(subsegments) <= 1:
+            raise quality_error
+
+        recovered: list[str] = []
+        for sub_index, (sub_path, start_seconds, end_seconds) in enumerate(subsegments):
+            _raise_if_cancelled(job_id)
+            if (
+                temp_segment_paths is not None
+                and sub_path != seg_path
+                and sub_path not in temp_segment_paths
+            ):
+                temp_segment_paths.append(sub_path)
+
+            update_job_status(
+                job_id,
+                "processing",
+                f"📝 正在補救轉錄第 {seg_index + 1}/{total_segs} 段的小段 {sub_index + 1}/{len(subsegments)}...",
+                progress_current=seg_index,
+                progress_total=total_segs,
+            )
+            child_context = _speaker_context_from_transcripts([speaker_context, *recovered])
+            child_transcript = _transcribe_segment_with_recovery(
+                client,
+                sub_path,
+                seg_index,
+                total_segs,
+                job_id,
+                model,
+                offset_seconds=offset_seconds + start_seconds,
+                duration_seconds=max(1, end_seconds - start_seconds),
+                is_last_segment=is_last_segment and sub_index == len(subsegments) - 1,
+                speaker_context=child_context,
+                temp_segment_paths=temp_segment_paths,
+            )
+            recovered.append(child_transcript)
+
+        return _sort_transcript_blocks_by_timestamp(
+            "\n\n".join(part.strip() for part in recovered if part.strip())
+        )
 
 
 def _transcribe_segment(
@@ -1137,10 +1633,13 @@ def _summary_response_to_markdown(text: str) -> str:
 
 
 def _build_summary_prompt(full_transcript: str) -> str:
+    meeting_date = datetime.now().strftime("%Y/%m/%d")
     prompt = f"""
 # 角色設定
 你是一位擁有 15 年經驗的國際企業專業高階秘書（Executive Secretary），
 精通醫療器材研發會議記錄、法規文件追蹤、商業寫作與多語言溝通。
+
+目前系統日期/會議處理日期：{meeting_date}
 
 以下是一份完整的會議逐字稿（已分段），請根據逐字稿生成摘要、決議與待辦事項：
 
@@ -1180,6 +1679,7 @@ def _build_summary_prompt(full_transcript: str) -> str:
 
 若負責人只能從逐字稿辨識為匿名發言者，請保留「發言者 A/B/C」標籤，不要自行推測姓名。
 若任務過大，請拆成可驗收的文件、測試、追蹤或會議安排項目。
+若逐字稿只提到月/日或「下週二」等相對期限，請以會議處理日期的年份推定，或保留相對期限；不可自行填入過去年份。
 
 > ⚠️ 重要：輸出完三個區塊後立即停止，不要輸出逐字稿，也不要附加任何秘書備註或後記。
 """.strip()
@@ -1232,6 +1732,7 @@ Rules:
 - Every final decision must reference related_discussions when traceable.
 - Every action item must reference related_discussions and related_decisions when traceable.
 - If owner, due date, or decision is not explicit, write 未提及 or pending instead of guessing.
+- If only month/day is spoken, use the meeting processing year above or keep the relative wording; do not invent past years.
 - Do not use **bold** markers in JSON values.
 """.strip()
 
@@ -1272,11 +1773,7 @@ def _generate_meeting_content_from_transcript(
     )
 
     summary_section = _summary_response_to_markdown(response.text or "")
-    meeting_content = (
-        summary_section
-        + "\n\n---\n\n## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
-        + full_transcript
-    )
+    meeting_content = _replace_transcript_section(summary_section, full_transcript)
     meeting_content = _prepend_transcript_quality_notice(meeting_content, full_transcript)
     return meeting_content, summary_model_used
 
@@ -1301,6 +1798,7 @@ def process_audio_task(
     """
     client = None
     segment_paths: list[Path] = []
+    temporary_segment_paths: list[Path] = []
     summary_primary_model, summary_secondary_model = _resolve_summary_models(
         transcription_model=model,
         summary_model=summary_model,
@@ -1381,21 +1879,18 @@ def process_audio_task(
                 )
                 logger.info(f"[{job_id}] 🎙 轉錄分段 {i + 1}/{total_segs}：{seg_path.name}")
                 speaker_context = _speaker_context_from_transcripts(all_transcripts)
-                transcript = _transcribe_segment(
+                transcript = _transcribe_segment_with_recovery(
                     client,
                     seg_path,
                     i,
                     total_segs,
                     job_id,
                     model,
+                    offset_seconds=offset_seconds,
+                    duration_seconds=SEGMENT_MINUTES * 60,
+                    is_last_segment=i >= total_segs - 1,
                     speaker_context=speaker_context,
-                )
-                transcript = _offset_transcript_timestamps(transcript, offset_seconds)
-                _raise_if_segment_transcript_incomplete(
-                    transcript=transcript,
-                    segment_index=i,
-                    total_segments=total_segs,
-                    segment_minutes=SEGMENT_MINUTES,
+                    temp_segment_paths=temporary_segment_paths,
                 )
                 _save_segment_transcript_cache(
                     output_dir=output_dir,
@@ -1414,6 +1909,7 @@ def process_audio_task(
 
             _raise_if_cancelled(job_id)
             full_transcript = "\n".join(all_transcripts)
+            _raise_if_full_transcript_unsafe(full_transcript, job_id)
 
             # ------------------------------------------------------------------
             # 步驟 5：用完整逐字稿生成摘要/決議/待辦
@@ -1466,6 +1962,7 @@ def process_audio_task(
                 None,
                 transcript,
             )
+            _raise_if_full_transcript_unsafe(full_transcript, job_id)
             meeting_content, summary_model_used = _generate_meeting_content_from_transcript(
                 client=client,
                 full_transcript=full_transcript,
@@ -1483,7 +1980,7 @@ def process_audio_task(
             job_id=job_id,
             fallback_model=repair_fallback_model,
         ))
-        meeting_content = _prepend_transcript_quality_notice(meeting_content, meeting_content)
+        meeting_content = _finalize_meeting_content(meeting_content, full_transcript, job_id)
         logger.info(f"[{job_id}] ✅ 會議記錄生成成功")
 
         # ------------------------------------------------------------------
@@ -1561,7 +2058,11 @@ job_id: {job_id}
 
     finally:
         # 清理本地分段暫存音檔
-        for seg_path in segment_paths:
+        seen_temp_paths: set[Path] = set()
+        for seg_path in [*segment_paths, *temporary_segment_paths]:
+            if seg_path in seen_temp_paths:
+                continue
+            seen_temp_paths.add(seg_path)
             if seg_path != audio_path and seg_path.exists():
                 try:
                     seg_path.unlink()

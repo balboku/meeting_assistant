@@ -459,12 +459,16 @@ class TaskRegressionTests(unittest.TestCase):
         normalized = _normalize_domain_terms(
             "加斯達、嘉士達與 Jasta 文件提到 IEC 6304 與 IC6304，"
             "放電字句、平保、平寶、氣械老化、頻率政府與內型固定塊。"
+            "Qisda (佳世達) 需要提升效率 $ ightarrow$ 降低功耗。"
         )
 
         self.assertIn("佳世達", normalized)
         self.assertNotIn("加斯達", normalized)
         self.assertNotIn("嘉士達", normalized)
         self.assertNotIn("Jasta", normalized)
+        self.assertNotIn("佳世達 (佳世達)", normalized)
+        self.assertNotIn("$ ightarrow$", normalized)
+        self.assertIn("→", normalized)
         self.assertIn("佳世達", normalized)
         self.assertNotIn("IEC 6304", normalized)
         self.assertIn("IEC 62304", normalized)
@@ -482,6 +486,101 @@ class TaskRegressionTests(unittest.TestCase):
 
         self.assertIn("逐字稿品質註記", with_notice)
         self.assertIn("可能缺漏", with_notice)
+
+    def test_replace_transcript_section_restores_verbatim_transcript(self):
+        from backend.tasks import _replace_transcript_section
+
+        repaired_by_model = (
+            "## 📋 一、討論摘要 (Discussion Summary)\n摘要\n\n"
+            "---\n\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "*(註：為節省篇幅，已過濾逐字稿中重複內容)*\n"
+            "[38:17] **[發言者 A]**：只保留摘要化片段。\n"
+        )
+        full_transcript = (
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：完整第一句。\n"
+            "[09:56] **[發言者 A]**：完整第一段結尾。\n\n"
+            "### 【第 2 段｜10:00 – 20:00】\n"
+            "[10:00] **[發言者 A]**：不可省略的第二段逐字稿。\n"
+        )
+
+        result = _replace_transcript_section(repaired_by_model, full_transcript)
+
+        self.assertIn(full_transcript, result)
+        self.assertNotIn("為節省篇幅", result)
+        self.assertNotIn("只保留摘要化片段", result)
+        self.assertEqual(result.count("## 📝 四、完整逐字稿 (Verbatim Transcript)"), 1)
+        self.assertNotIn("---\n\n---", result)
+
+    def test_transcript_integrity_rejects_omitted_transcript_section(self):
+        from backend.tasks import _replace_transcript_section, _transcript_integrity_issues
+
+        full_transcript = (
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：完整第一句。\n"
+            "[02:00] **[發言者 B]**：完整第二句。\n"
+            "[09:56] **[發言者 A]**：完整第一段結尾。\n\n"
+            "### 【第 2 段｜10:00 – 20:00】\n"
+            "[10:00] **[發言者 A]**：不可省略的第二段逐字稿。\n"
+            "[19:55] **[發言者 B]**：第二段結尾。"
+        )
+        omitted_transcript = (
+            "*(註：為節省篇幅，已省略逐字稿中重複內容)*\n"
+            "[00:00] **[發言者 A]**：只保留摘要化片段。"
+        )
+        content = _replace_transcript_section(
+            "## 📋 一、討論摘要 (Discussion Summary)\n摘要",
+            omitted_transcript,
+        )
+
+        issues = _transcript_integrity_issues(content, full_transcript)
+
+        self.assertTrue(any("省略" in issue for issue in issues))
+        self.assertTrue(any("不一致" in issue for issue in issues))
+        self.assertTrue(any("時間戳" in issue for issue in issues))
+
+    def test_transcript_integrity_rejects_final_short_loop(self):
+        from backend.tasks import _replace_transcript_section, _transcript_integrity_issues
+
+        looped_transcript = "\n".join(
+            f"[{80 + index // 30:02d}:{(index * 2) % 60:02d}] **[發言者 A]**：這兩段。"
+            for index in range(30)
+        )
+        content = _replace_transcript_section(
+            "## 📋 一、討論摘要 (Discussion Summary)\n摘要",
+            looped_transcript,
+        )
+
+        issues = _transcript_integrity_issues(content, looped_transcript)
+
+        self.assertTrue(any("短句重複轉錄幻覺" in issue for issue in issues))
+
+    def test_finalize_meeting_content_restores_transcript_and_validates(self):
+        from backend.tasks import _finalize_meeting_content, _meeting_content_quality_issues
+
+        summary_with_bad_transcript = (
+            "## 📋 一、討論摘要 (Discussion Summary)\n摘要\n\n"
+            "## ✅ 二、最終決議 (Final Decisions)\n決議\n\n"
+            "## 📌 三、待辦事項 (Action Items)\n\n"
+            "| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---------|---------|---------|--------|------|--------|\n"
+            "| A1 | D1 | R1 | 整理需求 | 發言者 A | 未提及 | 中 |\n\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "*(註：為節省篇幅，已過濾逐字稿中重複內容)*\n"
+            "[00:00] **[發言者 A]**：摘要化片段。"
+        )
+        full_transcript = (
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：完整逐字稿第一句。\n"
+            "[09:56] **[發言者 B]**：完整逐字稿結尾。"
+        )
+
+        finalized = _finalize_meeting_content(summary_with_bad_transcript, full_transcript, "final-gate-job")
+
+        self.assertIn(full_transcript, finalized)
+        self.assertNotIn("為節省篇幅", finalized)
+        self.assertEqual(_meeting_content_quality_issues(finalized), [])
 
     def test_summary_json_response_converts_to_readable_markdown(self):
         from backend.tasks import _summary_response_to_markdown
@@ -553,6 +652,23 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertIn("[19:59] **[發言者 B]**：第二段結束。", adjusted)
         self.assertNotIn("[00:00]", adjusted)
 
+    def test_recovered_transcript_blocks_are_sorted_by_timestamp(self):
+        from backend.tasks import _sort_transcript_blocks_by_timestamp
+
+        transcript = "\n".join(
+            [
+                "[30:00] **[發言者 A]**：第一小段開始。",
+                "[30:33] **[發言者 A]**：第一小段略微越界。",
+                "[30:30] **[發言者 B]**：第二小段開始。",
+                "[30:46] **[發言者 A]**：後續內容。",
+            ]
+        )
+
+        sorted_transcript = _sort_transcript_blocks_by_timestamp(transcript)
+
+        self.assertLess(sorted_transcript.find("[30:30]"), sorted_transcript.find("[30:33]"))
+        self.assertLess(sorted_transcript.find("[30:33]"), sorted_transcript.find("[30:46]"))
+
     def test_segment_transcript_quality_rejects_incomplete_nonterminal_segments(self):
         from backend.tasks import _segment_transcript_quality_issues
 
@@ -583,6 +699,60 @@ class TaskRegressionTests(unittest.TestCase):
             ),
             [],
         )
+
+    def test_segment_transcript_quality_rejects_repeated_hallucinated_turns(self):
+        from backend.tasks import _segment_transcript_quality_issues
+
+        repeated = "\n".join(
+            f"[{20 + index // 12:02d}:{(index * 5) % 60:02d}] **[發言者 A]**："
+            "那如果我們在緊縮一級的情況下，它是不合格的，那分數就歸零。"
+            for index in range(24)
+        )
+
+        issues = _segment_transcript_quality_issues(
+            repeated,
+            segment_index=2,
+            total_segments=5,
+            segment_minutes=10,
+        )
+
+        self.assertTrue(any("重複轉錄幻覺" in issue for issue in issues))
+
+    def test_segment_transcript_quality_rejects_single_line_repetition_hallucination(self):
+        from backend.tasks import _segment_transcript_quality_issues
+
+        repeated_phrase = "那我們在這些範圍內，那我們就可以去對表看，對表看，因為"
+        transcript = (
+            "[30:00] **[發言者 A]**："
+            + repeated_phrase * 80
+            + "\n[39:55] **[發言者 B]**：這段已經接近段尾。"
+        )
+
+        issues = _segment_transcript_quality_issues(
+            transcript,
+            segment_index=3,
+            total_segments=5,
+            segment_minutes=10,
+        )
+
+        self.assertTrue(any("單句重複轉錄幻覺" in issue for issue in issues))
+
+    def test_segment_transcript_quality_rejects_short_repeated_turn_hallucination(self):
+        from backend.tasks import _segment_transcript_quality_issues
+
+        transcript = "\n".join(
+            f"[{80 + index // 30:02d}:{(index * 2) % 60:02d}] **[發言者 A]**：這兩段。"
+            for index in range(30)
+        )
+
+        issues = _segment_transcript_quality_issues(
+            transcript,
+            segment_index=8,
+            total_segments=14,
+            segment_minutes=10,
+        )
+
+        self.assertTrue(any("短句重複轉錄幻覺" in issue for issue in issues))
 
     def test_segment_transcript_cache_round_trips_and_rejects_mismatched_context(self):
         from backend.tasks import (
@@ -722,6 +892,101 @@ class TaskRegressionTests(unittest.TestCase):
             self.assertIn("快取第一段", content)
             self.assertIn("[10:00] **[發言者 B]**：新轉錄第二段。", content)
 
+    def test_segmented_audio_task_recovers_incomplete_segment_by_splitting_chunk(self):
+        import backend.tasks as tasks
+
+        summary_content = (
+            "## 📋 一、討論摘要 (Discussion Summary)\n"
+            "D1：補救後完成逐字稿。\n\n"
+            "---\n\n"
+            "## ✅ 二、最終決議 (Final Decisions)\n"
+            "R1（關聯 D1）：尚未決定。\n\n"
+            "---\n\n"
+            "## 📌 三、待辦事項 (Action Items)\n\n"
+            "| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---------|---------|---------|--------|------|--------|\n"
+            "| A1 | D1 | R1 | 確認後續事項 | 發言者 A | 未提及 | 中 |\n"
+        )
+
+        class FakeModels:
+            def generate_content(self, **kwargs):
+                return type("Response", (), {"text": summary_content})()
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "output"
+            output_dir.mkdir()
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            seg1 = root / "_seg_meeting_000.mp3"
+            seg2 = root / "_seg_meeting_001.mp3"
+            sub1 = root / "_sub__seg_meeting_000_300s_000.mp3"
+            sub2 = root / "_sub__seg_meeting_000_300s_001.mp3"
+            for path in (seg1, seg2, sub1, sub2):
+                path.write_bytes(path.name.encode("utf-8"))
+
+            incomplete = (
+                "[00:00] **[發言者 A]**：只有開頭。\n"
+                "[系統提示：此處音檔包含無意義雜訊，已自動過濾後續重複內容]"
+            )
+            recovered_first_half = (
+                "[00:00] **[發言者 A]**：補救前半段。\n"
+                "[04:30] **[發言者 A]**：前半段結束。"
+            )
+            recovered_second_half = (
+                "[00:00] **[發言者 B]**：補救後半段。\n"
+                "[04:30] **[發言者 B]**：後半段結束。"
+            )
+            second_segment = (
+                "[00:00] **[發言者 C]**：第二段。\n"
+                "[09:30] **[發言者 C]**：第二段結束。"
+            )
+
+            context = tasks._segment_cache_context(
+                audio_path=audio_path,
+                model="gemini-test",
+                total_segments=2,
+                segment_minutes=tasks.SEGMENT_MINUTES,
+            )
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=[seg1, seg2]), \
+                 mock.patch.object(tasks, "_split_audio_to_subsegments", return_value=[(sub1, 0, 300), (sub2, 300, 600)]), \
+                 mock.patch.object(
+                     tasks,
+                     "_transcribe_segment",
+                     side_effect=[incomplete, recovered_first_half, recovered_second_half, second_segment],
+                 ) as transcribe_mock, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting"):
+                output_path = tasks.process_audio_task(
+                    job_id="recover-job",
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    model="gemini-test",
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertEqual(transcribe_mock.call_count, 4)
+            self.assertEqual([call.args[1] for call in transcribe_mock.call_args_list], [seg1, sub1, sub2, seg2])
+
+            content = output_path.read_text(encoding="utf-8")
+            self.assertIn("[00:00] **[發言者 A]**：補救前半段。", content)
+            self.assertIn("[05:00] **[發言者 B]**：補救後半段。", content)
+            self.assertIn("[10:00] **[發言者 C]**：第二段。", content)
+
+            cached = tasks._load_segment_transcript_cache(output_dir, "recover-job", 0, context)
+            self.assertIsNotNone(cached)
+            self.assertIn("[05:00] **[發言者 B]**：補救後半段。", cached)
+            self.assertFalse(sub1.exists())
+            self.assertFalse(sub2.exists())
+
     def test_single_segment_audio_task_uses_dual_model_pipeline(self):
         import backend.tasks as tasks
 
@@ -783,6 +1048,82 @@ class TaskRegressionTests(unittest.TestCase):
             self.assertIn("### [Segment 1/1 | 00:00 - end]", content)
             self.assertIn("transcription_model: gemini-transcribe-test", content)
             self.assertIn("summary_model: gemma-4-31b-it", content)
+
+    def test_audio_task_preserves_verbatim_transcript_after_repair(self):
+        import backend.tasks as tasks
+
+        malformed_summary = (
+            "## 📋 一、討論摘要 (Discussion Summary)\n"
+            "摘要。\n\n"
+            "## ✅ 二、最終決議 (Final Decisions)\n"
+            "R1（關聯 D1）：尚未決定。\n\n"
+            "## 📌 三、待辦事項 (Action Items)\n\n"
+            "| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|\n"
+            "| A1 | D1 | R1 | 整理需求 | 王經理 | 下週三 | 高 |\n"
+        )
+        repaired_with_short_transcript = (
+            "## 📋 一、討論摘要 (Discussion Summary)\n"
+            "摘要。\n\n"
+            "## ✅ 二、最終決議 (Final Decisions)\n"
+            "R1（關聯 D1）：尚未決定。\n\n"
+            "## 📌 三、待辦事項 (Action Items)\n\n"
+            "| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---------|---------|---------|--------|------|--------|\n"
+            "| A1 | D1 | R1 | 整理需求 | 王經理 | 下週三 | 高 |\n\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "*(註：為節省篇幅，已過濾逐字稿中重複內容)*\n"
+            "[00:00] **[發言者 A]**：摘要化片段。\n"
+        )
+        full_transcript = (
+            "[00:00] **[發言者 A]**：完整逐字稿第一句。\n"
+            "[00:30] **[發言者 A]**：不可省略的第二句。"
+        )
+
+        class FakeModels:
+            def __init__(self):
+                self.calls = []
+
+            def generate_content(self, **kwargs):
+                self.calls.append(kwargs)
+                text = malformed_summary if len(self.calls) == 1 else repaired_with_short_transcript
+                return type("Response", (), {"text": text})()
+
+        class FakeClient:
+            def __init__(self):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "output"
+            output_dir.mkdir()
+            audio_path = root / "meeting.mp3"
+            audio_path.write_bytes(b"audio")
+            fake_client = FakeClient()
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", return_value=fake_client), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=[audio_path]), \
+                 mock.patch.object(tasks, "_transcribe_segment", return_value=full_transcript), \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting"):
+                output_path = tasks.process_audio_task(
+                    job_id="preserve-transcript-job",
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    model="gemini-transcribe-test",
+                    summary_model="gemma-4-31b-it",
+                    summary_fallback_model="gemini-transcribe-test",
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertEqual(len(fake_client.models.calls), 2)
+            content = output_path.read_text(encoding="utf-8")
+            self.assertIn("[00:30] **[發言者 A]**：不可省略的第二句。", content)
+            self.assertNotIn("為節省篇幅", content)
+            self.assertNotIn("摘要化片段", content)
+            self.assertEqual(content.count("## 📝 四、完整逐字稿 (Verbatim Transcript)"), 1)
 
     def test_segmented_audio_task_uses_summary_model_with_fallback(self):
         import backend.tasks as tasks
@@ -905,6 +1246,7 @@ class TaskRegressionTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
                  mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
                  mock.patch.object(tasks, "_split_audio_to_segments", return_value=[seg1, seg2]), \
+                 mock.patch.object(tasks, "_split_audio_to_subsegments", side_effect=RuntimeError("split unavailable")), \
                  mock.patch.object(tasks, "_transcribe_segment", return_value=incomplete), \
                  mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
                  mock.patch.object(tasks, "update_job_status"), \
@@ -1508,6 +1850,82 @@ class JobDashboardRegressionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertIsNotNone(database.get_job("job-delete-processing"))
+
+
+class MeetingRerunRegressionTests(unittest.TestCase):
+    def _isolated_database(self):
+        import backend.database as database
+
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        patcher = mock.patch.object(database, "DB_PATH", Path(tmpdir.name) / "meetings.db")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        database.init_db()
+        return database
+
+    def test_meeting_can_be_rerun_from_retained_source_audio(self):
+        database = self._isolated_database()
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_dir = root / "source_audio"
+            output_dir = root / "output"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            audio_path = source_dir / "kept-source.mp3"
+            audio_path.write_bytes(b"ID3\x04\x00\x00\x00\x00\x00\x21audio")
+            output_path = output_dir / "meeting.md"
+            output_path.write_text("# meeting", encoding="utf-8")
+            meeting_id = database.save_meeting(
+                title="重跑測試會議",
+                date="2026/07/08",
+                source_audio=audio_path.name,
+                output_path=str(output_path),
+                summary="摘要",
+            )
+
+            with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
+                 mock.patch.object(main, "OUTPUT_DIR", output_dir):
+                response = asgi_request(main.app, "POST", f"/meetings/{meeting_id}/rerun")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "pending")
+        job = database.get_job(payload["job_id"])
+        self.assertIsNotNone(job)
+        self.assertEqual(job["source"], "meeting_rerun")
+        self.assertEqual(job["payload"]["audio_path"], str(audio_path))
+        self.assertEqual(job["payload"]["output_dir"], str(output_dir))
+        self.assertEqual(job["payload"]["meeting_title"], "重跑測試會議")
+
+    def test_meeting_rerun_rejects_missing_source_audio(self):
+        database = self._isolated_database()
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_dir = root / "source_audio"
+            output_dir = root / "output"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            output_path = output_dir / "meeting.md"
+            output_path.write_text("# meeting", encoding="utf-8")
+            meeting_id = database.save_meeting(
+                title="缺檔會議",
+                date="2026/07/08",
+                source_audio="missing-source.mp3",
+                output_path=str(output_path),
+                summary="摘要",
+            )
+
+            with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
+                 mock.patch.object(main, "OUTPUT_DIR", output_dir):
+                response = asgi_request(main.app, "POST", f"/meetings/{meeting_id}/rerun")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(database.count_jobs(), 0)
 
 
 class MetricsRegressionTests(unittest.TestCase):
@@ -2212,6 +2630,14 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("/meetings/${id}/evidence", html)
         self.assertIn("補充資料", html)
 
+    def test_web_ui_can_rerun_a_meeting_from_detail_view(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('id="rerun-meeting-button"', html)
+        self.assertIn("async function rerunMeeting", html)
+        self.assertIn("/meetings/${id}/rerun", html)
+        self.assertIn("重跑", html)
+
     def test_web_ui_can_record_screen_with_microphone(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
@@ -2385,6 +2811,28 @@ class StartupScriptRegressionTests(unittest.TestCase):
         self.assertIn("--url=https://example.ngrok-free.app", command)
         self.assertIn("--log=stdout", command)
         self.assertEqual(pid_text, "321")
+
+    def test_startup_finds_winget_ngrok_when_not_on_path(self):
+        import start
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_app_data = Path(tmpdir)
+            ngrok_path = (
+                local_app_data
+                / "Microsoft"
+                / "WinGet"
+                / "Packages"
+                / "Ngrok.Ngrok_Microsoft.Winget.Source_8wekyb3d8bbwe"
+                / "ngrok.exe"
+            )
+            ngrok_path.parent.mkdir(parents=True)
+            ngrok_path.write_bytes(b"fake exe")
+
+            with mock.patch.dict(start.os.environ, {"LOCALAPPDATA": str(local_app_data)}, clear=False), \
+                 mock.patch.object(start.shutil, "which", return_value=None):
+                command = start._ngrok_command()
+
+        self.assertEqual(command, str(ngrok_path))
 
 
 if __name__ == "__main__":

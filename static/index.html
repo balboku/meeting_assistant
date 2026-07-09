@@ -870,6 +870,37 @@ async function deleteMeeting(event, id) {
   }
 }
 
+// ── 重跑會議紀錄 ────────────────────────────────────────────────────
+async function rerunMeeting(id) {
+  if (!id) return;
+  if (!confirm('確定要用原始音檔重跑這份會議紀錄嗎？\n完成後會產生一筆新的會議紀錄，原本這筆會保留。')) {
+    return;
+  }
+
+  const button = document.getElementById('rerun-meeting-button');
+  const originalButtonText = button?.innerHTML;
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = '<span class="loading-spinner"></span> 重跑中';
+  }
+
+  try {
+    const res = await fetch(`${API}/meetings/${id}/rerun`, { method: 'POST' });
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    const data = await res.json();
+    await loadJobs();
+    await loadMetrics();
+    alert(`已建立重跑任務：${data.job_id}\n可在「任務狀態」查看進度。`);
+  } catch (err) {
+    alert(`重跑失敗：${err.message}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = originalButtonText;
+    }
+  }
+}
+
 // ── 上傳補充資料 ────────────────────────────────────────────────────
 async function uploadEvidence(id, file) {
   if (!file) return;
@@ -967,6 +998,7 @@ async function openDetail(id) {
         <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;">
           <div class="detail-title">${escapeHtml(r.title)}</div>
           <div class="detail-actions">
+            <button id="rerun-meeting-button" class="btn-secondary" onclick="rerunMeeting(${id})">🔁 重跑</button>
             <button id="evidence-upload-button" class="btn-secondary" onclick="document.getElementById('evidence-file-input').click()">📎 補充資料</button>
             <input id="evidence-file-input"
                    type="file"

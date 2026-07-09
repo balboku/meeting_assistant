@@ -508,6 +508,43 @@ def _build_job_status_response(job: dict) -> JobStatusResponse:
     )
 
 
+def _resolve_meeting_source_audio(record: dict) -> Path:
+    """Find the retained source audio file for an existing meeting record."""
+    source_audio = str(record.get("source_audio") or "").strip()
+    if not source_audio:
+        raise HTTPException(status_code=409, detail="此會議紀錄沒有原始音檔資訊，無法重跑。")
+
+    source_name = Path(source_audio).name
+    candidates: list[Path] = []
+    raw_path = Path(source_audio)
+    if raw_path.is_absolute():
+        candidates.append(raw_path)
+    if source_name:
+        candidates.append(SOURCE_AUDIO_DIR / source_name)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        if not candidate.is_file():
+            continue
+        if candidate.suffix.lower() not in SUPPORTED_MEDIA_FORMATS:
+            supported = ", ".join(sorted(SUPPORTED_MEDIA_FORMATS))
+            raise HTTPException(
+                status_code=415,
+                detail=f"原始音檔格式不支援：{candidate.suffix or '無副檔名'}。支援格式：{supported}",
+            )
+        return candidate
+
+    raise HTTPException(
+        status_code=409,
+        detail=f"找不到保留的原始音檔：{source_name or source_audio}，請重新上傳音檔。",
+    )
+
+
 @app.get(
     "/status/{job_id}",
     response_model=JobStatusResponse,
@@ -711,6 +748,46 @@ async def export_meeting_docx(meeting_id: int):
         path=output_filepath,
         filename=output_filename,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+
+
+@app.post(
+    "/meetings/{meeting_id}/rerun",
+    response_model=JobResponse,
+    summary="使用原始音檔重跑會議紀錄",
+    tags=["會議記錄"],
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
+async def rerun_meeting_record(meeting_id: int):
+    """用已保留的原始音檔建立新的背景任務，重新產生一筆會議紀錄。"""
+    record = get_meeting(meeting_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
+
+    audio_path = _resolve_meeting_source_audio(record)
+    job_id = str(uuid.uuid4())
+    try:
+        enqueue_audio_job(
+            job_id=job_id,
+            audio_path=audio_path,
+            output_dir=OUTPUT_DIR,
+            model=GEMINI_MODEL,
+            meeting_title=record["title"],
+            source="meeting_rerun",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"重跑任務排入佇列失敗：{exc}") from exc
+
+    logger.info(
+        "🔁 已建立會議紀錄重跑任務：meeting_id=%s job_id=%s source_audio=%s",
+        meeting_id,
+        job_id,
+        audio_path,
+    )
+    return JobResponse(
+        job_id=job_id,
+        status=JobStatus.PENDING,
+        message="已用原始音檔建立重跑任務，完成後會產生新的會議紀錄。",
     )
 
 

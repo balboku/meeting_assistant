@@ -296,6 +296,27 @@ def terminate_existing_ngrok():
     NGROK_PID_FILE.unlink(missing_ok=True)
 
 
+def _ngrok_command() -> Optional[str]:
+    explicit = (os.getenv("NGROK_BINARY") or os.getenv("NGROK_PATH") or "").strip().strip('"')
+    if explicit and Path(explicit).is_file():
+        return explicit
+
+    if shutil.which("ngrok"):
+        return "ngrok"
+
+    winget_root = Path(os.getenv("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages"
+    if winget_root.exists():
+        candidates = sorted(
+            winget_root.glob("Ngrok.Ngrok_*/*ngrok.exe"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        if candidates:
+            return str(candidates[0])
+
+    return None
+
+
 def wait_for_ngrok_status(port, timeout_seconds=10):
     deadline = time.monotonic() + timeout_seconds
     status = None
@@ -319,14 +340,15 @@ def start_ngrok_tunnel(port, wait_for_status=True):
         print("ℹ️  MEETING_ASSISTANT_NGROK=0，略過 ngrok 自動啟動。")
         return None
 
-    if not shutil.which("ngrok"):
+    ngrok_command = _ngrok_command()
+    if not ngrok_command:
         print("⚠️  找不到 ngrok 指令；LINE Webhook 需要公開 HTTPS，請先安裝 ngrok。")
         return None
 
     terminate_existing_ngrok()
 
     public_url = resolve_ngrok_public_url()
-    command = ["ngrok", "http", str(port)]
+    command = [ngrok_command, "http", str(port)]
     if public_url:
         command.append(f"--url={public_url}")
     command.extend(["--log=stdout", "--log-format=logfmt"])
