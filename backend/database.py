@@ -1211,9 +1211,45 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
     return record
 
 
-def list_meetings(limit: int = 50, offset: int = 0) -> list[dict]:
+def _meeting_record_needs_review(record: dict[str, Any]) -> bool:
+    warning_count = int(record.get("quality_warning_count") or 0)
+    if warning_count > 0:
+        return True
+
+    score = record.get("quality_score")
+    if score is not None:
+        try:
+            if int(score) < 85:
+                return True
+        except (TypeError, ValueError):
+            pass
+
+    label = str(record.get("quality_label") or "").strip()
+    return any(token in label for token in ("需", "警", "低", "不"))
+
+
+def list_meetings(limit: int = 50, offset: int = 0, needs_review: bool = False) -> list[dict]:
     """列出所有會議記錄（依建立時間倒序）"""
+    limit = min(max(int(limit), 1), 500)
+    offset = max(int(offset), 0)
     with get_db() as conn:
+        if needs_review:
+            rows = conn.execute(
+                """SELECT id, title, date, source_audio, output_path,
+                          substr(summary, 1, 200) as summary_preview,
+                          job_id, quality_score, quality_label,
+                          quality_report_json,
+                          created_at
+                   FROM meetings
+                   ORDER BY created_at DESC"""
+            ).fetchall()
+            records = [
+                record
+                for record in (_meeting_row_with_quality_preview(r) for r in rows)
+                if _meeting_record_needs_review(record)
+            ]
+            return records[offset:offset + limit]
+
         rows = conn.execute(
             """SELECT id, title, date, source_audio, output_path,
                       substr(summary, 1, 200) as summary_preview,
@@ -1228,9 +1264,23 @@ def list_meetings(limit: int = 50, offset: int = 0) -> list[dict]:
         return [_meeting_row_with_quality_preview(r) for r in rows]
 
 
-def count_meetings() -> int:
+def count_meetings(needs_review: bool = False) -> int:
     """統計會議記錄總數"""
     with get_db() as conn:
+        if needs_review:
+            rows = conn.execute(
+                """SELECT id, title, date, source_audio, output_path,
+                          substr(summary, 1, 200) as summary_preview,
+                          job_id, quality_score, quality_label,
+                          quality_report_json,
+                          created_at
+                   FROM meetings"""
+            ).fetchall()
+            return sum(
+                1
+                for record in (_meeting_row_with_quality_preview(r) for r in rows)
+                if _meeting_record_needs_review(record)
+            )
         return conn.execute("SELECT COUNT(*) FROM meetings").fetchone()[0]
 
 
@@ -1434,7 +1484,7 @@ def list_audit_logs(limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
     return records
 
 
-def search_meetings(query: str, limit: int = 50) -> list[dict]:
+def search_meetings(query: str, limit: int = 50, needs_review: bool = False) -> list[dict]:
     """
     搜尋會議記錄的標題、音檔名稱、摘要與完整 Markdown 內容。
 
@@ -1453,6 +1503,7 @@ def search_meetings(query: str, limit: int = 50) -> list[dict]:
         return []
 
     limit = min(max(int(limit), 1), 100)
+    query_limit = 500 if needs_review else limit
     fts_query = _build_fts_query(query)
     pattern = _build_like_pattern(query)
     records_by_id: dict[int, dict] = {}
@@ -1474,7 +1525,7 @@ def search_meetings(query: str, limit: int = 50) -> list[dict]:
                     WHERE meeting_fts MATCH ?
                     ORDER BY bm25(meeting_fts), m.created_at DESC
                     LIMIT ?""",
-                (fts_query, limit),
+                (fts_query, query_limit),
             ).fetchall()
             add_rows(rows)
         except sqlite3.OperationalError as exc:
@@ -1492,7 +1543,7 @@ def search_meetings(query: str, limit: int = 50) -> list[dict]:
                     WHERE meeting_content_fts MATCH ?
                     ORDER BY bm25(meeting_content_fts), m.created_at DESC
                     LIMIT ?""",
-                (fts_query, limit),
+                (fts_query, query_limit),
             ).fetchall()
             add_rows(rows)
         except sqlite3.OperationalError as exc:
@@ -1514,7 +1565,7 @@ def search_meetings(query: str, limit: int = 50) -> list[dict]:
                        OR COALESCE(c.content, '') LIKE ? ESCAPE '\\'
                     ORDER BY m.created_at DESC
                     LIMIT ?""",
-                (pattern, pattern, pattern, pattern, pattern, limit),
+                (pattern, pattern, pattern, pattern, pattern, query_limit),
             ).fetchall()
             add_rows(rows)
         except sqlite3.OperationalError as exc:
@@ -1532,11 +1583,14 @@ def search_meetings(query: str, limit: int = 50) -> list[dict]:
                       OR output_path LIKE ? ESCAPE '\\'
                    ORDER BY created_at DESC
                    LIMIT ?""",
-                (pattern, pattern, pattern, pattern, limit),
+                (pattern, pattern, pattern, pattern, query_limit),
             ).fetchall()
             add_rows(rows)
 
-    return list(records_by_id.values())[:limit]
+    records = list(records_by_id.values())
+    if needs_review:
+        records = [record for record in records if _meeting_record_needs_review(record)]
+    return records[:limit]
 
 
 def delete_meeting(meeting_id: int) -> bool:

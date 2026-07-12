@@ -1310,9 +1310,10 @@ async function loadMeetings(query = '') {
   statusEl.textContent = query ? '搜尋中…' : '載入會議記錄中…';
 
   try {
+    const reviewParam = reviewOnly ? '&needs_review=true' : '';
     let url = query
-      ? `${API}/meetings/search?q=${encodeURIComponent(query)}`
-      : `${API}/meetings?limit=50`;
+      ? `${API}/meetings/search?q=${encodeURIComponent(query)}&limit=100${reviewParam}`
+      : `${API}/meetings?limit=50${reviewParam}`;
     const res = await fetch(url, { signal: requestController.signal });
     if (!res.ok) throw new Error(await apiErrorMessage(res));
     const data = await res.json();
@@ -1320,16 +1321,14 @@ async function loadMeetings(query = '') {
     if (requestController.signal.aborted) return;
 
     const fetchedRecords = data.records ?? data;  // search 回傳陣列；list 回傳物件
-    const records = reviewOnly ? fetchedRecords.filter(isNeedsReviewRecord) : fetchedRecords;
+    const records = fetchedRecords;
     const total = data.total ?? fetchedRecords.length;
     const statusPrefix = query
-      ? `找到 ${fetchedRecords.length} 筆相關會議記錄`
-      : `共 ${total} 筆會議記錄`;
+      ? `找到 ${fetchedRecords.length} 筆${reviewOnly ? '需複核且相關' : '相關'}會議記錄`
+      : `共 ${total} 筆${reviewOnly ? '需複核' : ''}會議記錄`;
 
-    document.getElementById('total-count').textContent = reviewOnly ? records.length : total;
-    statusEl.textContent = reviewOnly
-      ? `${statusPrefix}，顯示 ${records.length} 筆需複核`
-      : statusPrefix;
+    document.getElementById('total-count').textContent = total;
+    statusEl.textContent = statusPrefix;
 
     if (!records.length) {
       const safeQuery = escapeHtml(query);

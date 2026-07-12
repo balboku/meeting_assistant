@@ -842,11 +842,12 @@ def _detail_summary_quality_issues(full_content: str) -> list[str]:
 )
 async def list_all_meetings(
     limit: int = 20,
-    offset: int = 0
+    offset: int = 0,
+    needs_review: bool = False
 ):
     """取得所有歷史會議記錄清單（依時間倒序，支援分頁）"""
-    records = list_meetings(limit=limit, offset=offset)
-    total = count_meetings()
+    records = list_meetings(limit=limit, offset=offset, needs_review=needs_review)
+    total = count_meetings(needs_review=needs_review)
     return MeetingListResponse(total=total, records=records)
 
 
@@ -856,9 +857,9 @@ async def list_all_meetings(
     summary="全文搜尋會議記錄",
     tags=["會議記錄"]
 )
-async def api_search_meetings(q: str):
+async def api_search_meetings(q: str, needs_review: bool = False, limit: int = 50):
     """搜尋標題、音檔、摘要與完整 Markdown 逐字稿內容"""
-    records = search_meetings(q)
+    records = search_meetings(q, limit=limit, needs_review=needs_review)
     return records
 
 

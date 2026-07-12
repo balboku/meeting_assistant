@@ -2330,6 +2330,88 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertGreaterEqual(listed["quality_warning_count"], 5)
         self.assertEqual(searched["quality_warning_count"], listed["quality_warning_count"])
 
+    def test_needs_review_filter_scans_beyond_regular_list_limit(self):
+        database, tmp_path = self._isolated_database()
+        review_output = tmp_path / "older-review.md"
+        normal_output = tmp_path / "newer-normal.md"
+        review_output.write_text("shared-needs-review", encoding="utf-8")
+        normal_output.write_text("shared-needs-review", encoding="utf-8")
+
+        review_id = database.save_meeting(
+            title="Older Review",
+            date="2026/07/12",
+            source_audio="older-review.webm",
+            output_path=str(review_output),
+            summary="shared-needs-review older",
+            quality_report={"score": 95, "label": "ok", "warnings": ["check transcript"]},
+        )
+        normal_id = database.save_meeting(
+            title="Newer Normal",
+            date="2026/07/12",
+            source_audio="newer-normal.webm",
+            output_path=str(normal_output),
+            summary="shared-needs-review newer",
+            quality_report={"score": 98, "label": "ok", "warnings": []},
+        )
+        with database.get_db() as conn:
+            conn.execute("UPDATE meetings SET created_at=? WHERE id=?", ("2026-07-12 08:00:00", review_id))
+            conn.execute("UPDATE meetings SET created_at=? WHERE id=?", ("2026-07-12 09:00:00", normal_id))
+
+        self.assertEqual(database.list_meetings(limit=1)[0]["id"], normal_id)
+
+        filtered = database.list_meetings(limit=1, needs_review=True)
+
+        self.assertEqual([row["id"] for row in filtered], [review_id])
+        self.assertEqual(database.count_meetings(needs_review=True), 1)
+
+    def test_search_and_api_can_filter_needs_review(self):
+        database, tmp_path = self._isolated_database()
+        review_output = tmp_path / "search-review.md"
+        normal_output = tmp_path / "search-normal.md"
+        review_output.write_text("shared-search-keyword", encoding="utf-8")
+        normal_output.write_text("shared-search-keyword", encoding="utf-8")
+
+        review_id = database.save_meeting(
+            title="Search Review",
+            date="2026/07/12",
+            source_audio="search-review.webm",
+            output_path=str(review_output),
+            summary="shared-search-keyword older",
+            quality_report={"score": 80, "label": "needs review", "warnings": []},
+        )
+        normal_id = database.save_meeting(
+            title="Search Normal",
+            date="2026/07/12",
+            source_audio="search-normal.webm",
+            output_path=str(normal_output),
+            summary="shared-search-keyword newer",
+            quality_report={"score": 98, "label": "ok", "warnings": []},
+        )
+        with database.get_db() as conn:
+            conn.execute("UPDATE meetings SET created_at=? WHERE id=?", ("2026-07-12 08:00:00", review_id))
+            conn.execute("UPDATE meetings SET created_at=? WHERE id=?", ("2026-07-12 09:00:00", normal_id))
+
+        self.assertEqual(database.search_meetings("shared-search-keyword", limit=1)[0]["id"], normal_id)
+        self.assertEqual(
+            [row["id"] for row in database.search_meetings("shared-search-keyword", limit=1, needs_review=True)],
+            [review_id],
+        )
+
+        import backend.main as main
+
+        list_response = asgi_request(main.app, "GET", "/meetings?limit=1&needs_review=true")
+        search_response = asgi_request(
+            main.app,
+            "GET",
+            "/meetings/search?q=shared-search-keyword&limit=1&needs_review=true",
+        )
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(list_response.json()["total"], 1)
+        self.assertEqual(list_response.json()["records"][0]["id"], review_id)
+        self.assertEqual(search_response.status_code, 200)
+        self.assertEqual([row["id"] for row in search_response.json()], [review_id])
+
 
 class MeetingEvidenceRegressionTests(unittest.TestCase):
     def _isolated_database(self):
@@ -3866,7 +3948,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
 
         self.assertIn('id="search-status"', html)
         self.assertIn("AbortController", html)
-        self.assertIn("找到 ${fetchedRecords.length} 筆相關會議記錄", html)
+        self.assertIn("找到 ${fetchedRecords.length} 筆${reviewOnly ? '需複核且相關' : '相關'}會議記錄", html)
         self.assertIn("function renderQualityReport", html)
         self.assertIn("quality_report", html)
         self.assertIn("quality-warning", html)
@@ -3882,8 +3964,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality_warning_count", html)
         self.assertIn("card-quality-chip", html)
         self.assertIn("需複核 ${warningCount}", html)
-        self.assertIn("fetchedRecords.filter(isNeedsReviewRecord)", html)
-        self.assertIn("顯示 ${records.length} 筆需複核", html)
+        self.assertIn("const reviewParam = reviewOnly ? '&needs_review=true' : ''", html)
+        self.assertIn("/meetings/search?q=${encodeURIComponent(query)}&limit=100${reviewParam}", html)
+        self.assertIn("/meetings?limit=50${reviewParam}", html)
         self.assertIn("startsWith('摘要品質警示')", html)
         self.assertIn("startsWith('逐字稿品質警示')", html)
         self.assertIn("triggerButtonId", html)
