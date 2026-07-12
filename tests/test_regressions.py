@@ -2951,6 +2951,68 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertNotIn("D9", markdown)
         self.assertNotIn("R8", markdown)
 
+    def test_summary_grounding_uses_actual_meeting_date_and_explicit_speaker_owner(self):
+        from backend.tasks import _infer_meeting_date, _summary_response_to_markdown
+
+        meeting_date = _infer_meeting_date(
+            "現場錄製_2026-7-10 下午1-17-27",
+            Path("099a6561_20260710_131729.webm"),
+        )
+        transcript = (
+            "[00:00] **[發言者 A]**：熱處理參數暫定 140 到 145 度，後續再調整。\n"
+            "[00:15] **[發言者 A]**：今天是 7 月 10 號，那我會再問一下品保，改成下禮拜一去做端相。"
+        )
+        payload = {
+            "discussion_summary": [
+                {"topic": "熱處理", "summary": "討論熱處理參數。", "evidence_timecodes": ["00:00"]}
+            ],
+            "final_decisions": [
+                {
+                    "related_discussions": ["D1"],
+                    "decision": "熱處理參數暫定 140 到 145 度，後續再調整。",
+                    "basis": "會議中提出暫定參數。",
+                    "status": "confirmed",
+                    "evidence_timecodes": ["00:00"],
+                }
+            ],
+            "action_items": [
+                {
+                    "related_discussions": ["D1"],
+                    "task": "向品保確認端相安排",
+                    "owner": "品保",
+                    "due": "2026/07/14",
+                    "due_source": "下禮拜一",
+                    "source_timecodes": ["00:15"],
+                    "priority": "中",
+                }
+            ],
+        }
+
+        markdown = _summary_response_to_markdown(
+            json.dumps(payload, ensure_ascii=False),
+            transcript,
+            meeting_date,
+        )
+
+        self.assertEqual(meeting_date.isoformat(), "2026-07-10")
+        self.assertIn("| R1 | D1 |", markdown)
+        self.assertIn("| pending |", markdown)
+        self.assertIn("佐證：00:00", markdown)
+        self.assertIn("| 發言者 A | 2026/07/13（原文：下禮拜一） |", markdown)
+
+    def test_summary_prompt_requires_fact_ledger_and_preserves_relative_due_source(self):
+        from backend.tasks import _build_summary_prompt
+
+        prompt = _build_summary_prompt(
+            "[00:00] **[發言者 A]**：下週一追蹤。",
+            datetime(2026, 7, 10).date(),
+        )
+
+        self.assertIn("實際會議日期：2026/07/10（星期五）", prompt)
+        self.assertIn("silently build a fact ledger", prompt)
+        self.assertIn("due_source 必須保留逐字稿原句", prompt)
+        self.assertIn("我會問品保", prompt)
+
     def test_meeting_quality_report_round_trips_through_database(self):
         import backend.database as database
 
@@ -2987,6 +3049,14 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = Path(tmpdir) / "meeting.webm"
             audio_path.write_bytes(b"audio")
+            meeting_path = Path(tmpdir) / "meeting.md"
+            meeting_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n[00:00] **[發言者 A]**：第一段。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n[10:00] **[發言者 B]**：第二段。",
+                encoding="utf-8",
+            )
+            record["output_path"] = str(meeting_path)
             with mock.patch.object(main, "get_meeting", return_value=record), \
                  mock.patch.object(main, "_resolve_meeting_source_audio", return_value=audio_path), \
                  mock.patch.object(main, "enqueue_audio_job") as enqueue:
@@ -2999,7 +3069,305 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(enqueue.call_args.kwargs["force_segment_indices"], [1])
+        self.assertEqual(enqueue.call_args.kwargs["transcript_reuse_source_path"], meeting_path)
         self.assertIn("第 2 段", response.json()["message"])
+
+    def test_meeting_rerun_api_can_rebuild_summary_without_forcing_transcription(self):
+        import backend.main as main
+
+        record = {
+            "id": 8,
+            "title": "摘要重整測試",
+            "quality_report": {"segments": [{"index": 0}, {"index": 1}]},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            meeting_path = Path(tmpdir) / "meeting.md"
+            meeting_path.write_text("## 📝 四、完整逐字稿 (Verbatim Transcript)\n[00:00] **[發言者 A]**：測試。", encoding="utf-8")
+            record["output_path"] = str(meeting_path)
+            with mock.patch.object(main, "get_meeting", return_value=record), \
+                 mock.patch.object(main, "_resolve_meeting_source_audio", return_value=audio_path), \
+                 mock.patch.object(main, "enqueue_audio_job") as enqueue:
+                response = asgi_request(
+                    main.app,
+                    "POST",
+                    "/meetings/8/rerun",
+                    json={"summary_only": True},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(enqueue.call_args.kwargs["force_segment_indices"], [])
+        self.assertEqual(enqueue.call_args.kwargs["source"], "meeting_summary_rerun")
+        self.assertEqual(enqueue.call_args.kwargs["summary_source_path"], meeting_path)
+        self.assertIn("摘要重整", response.json()["message"])
+
+    def test_high_quality_summary_api_enables_second_model_verification(self):
+        import backend.main as main
+
+        record = {"id": 9, "title": "高手質測試", "quality_report": None}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            meeting_path = Path(tmpdir) / "meeting.md"
+            meeting_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n[00:00] **[發言者 A]**：測試。",
+                encoding="utf-8",
+            )
+            record["output_path"] = str(meeting_path)
+            with mock.patch.object(main, "get_meeting", return_value=record), \
+                 mock.patch.object(main, "_resolve_meeting_source_audio", return_value=audio_path), \
+                 mock.patch.object(main, "enqueue_audio_job") as enqueue:
+                response = asgi_request(
+                    main.app,
+                    "POST",
+                    "/meetings/9/rerun",
+                    json={"summary_only": True, "high_quality": True},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(enqueue.call_args.kwargs["high_quality_summary"])
+        self.assertEqual(enqueue.call_args.kwargs["source"], "meeting_summary_high_quality")
+        self.assertIn("第二模型", response.json()["message"])
+
+    def test_high_quality_summary_calls_verifier_and_uses_verified_result(self):
+        from backend import tasks
+
+        initial = {
+            "discussion_summary": [{"topic": "初稿", "summary": "第一階段", "evidence_timecodes": ["00:00"]}],
+            "final_decisions": [],
+            "action_items": [],
+        }
+        verified = {
+            "discussion_summary": [{"topic": "查核後", "summary": "第二模型已查核", "evidence_timecodes": ["00:00"]}],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def __init__(self):
+                self.calls = []
+
+            def generate_content(self, **kwargs):
+                self.calls.append(kwargs)
+                payload = initial if len(self.calls) == 1 else verified
+                return type("Response", (), {"text": json.dumps(payload, ensure_ascii=False)})()
+
+        fake_client = type("Client", (), {"models": FakeModels()})()
+        transcript = "[00:00] **[發言者 A]**：第二模型已查核。"
+
+        with mock.patch.object(tasks, "update_job_status"):
+            content, used_model = tasks._generate_meeting_content_from_transcript(
+                fake_client,
+                full_transcript=transcript,
+                job_id="high-quality-job",
+                summary_primary_model="gemma-primary",
+                summary_secondary_model="gemini-verifier",
+                meeting_date=datetime(2026, 7, 10).date(),
+                high_quality=True,
+            )
+
+        self.assertEqual([call["model"] for call in fake_client.models.calls], ["gemma-primary", "gemini-verifier"])
+        self.assertIn("第二模型已查核", content)
+        self.assertNotIn("第一階段", content)
+        self.assertEqual(used_model, "gemma-primary+verified:gemini-verifier")
+
+    def test_partial_rerun_reuses_unselected_segments_from_existing_record(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{"topic": "局部重跑", "summary": "完成", "evidence_timecodes": ["00:00"]}],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **kwargs):
+                return type("Response", (), {"text": json.dumps(summary_payload, ensure_ascii=False)})()
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            slices = []
+            for index in range(3):
+                segment_path = root / f"_seg_meeting_{index:03d}.mp3"
+                segment_path.write_bytes(b"segment")
+                slices.append(tasks.AudioSlice(segment_path, index * 600, (index + 1) * 600))
+            source_path = root / "existing.md"
+            source_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n[00:00] **[發言者 A]**：保留第一段。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n[10:00] **[發言者 B]**：舊第二段。\n"
+                "### 【第 3 段｜20:00 – 30:00】\n[20:00] **[發言者 C]**：保留第三段。",
+                encoding="utf-8",
+            )
+            output_dir = root / "output"
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=slices), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", return_value="[10:00] **[發言者 B]**：新第二段。") as transcribe, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting"):
+                output_path = tasks.process_audio_task(
+                    job_id="partial-rerun-job",
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    force_segment_indices=[1],
+                    transcript_reuse_source_path=source_path,
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertEqual(transcribe.call_count, 1)
+            output_text = output_path.read_text(encoding="utf-8")
+            self.assertIn("保留第一段", output_text)
+            self.assertIn("新第二段", output_text)
+            self.assertIn("保留第三段", output_text)
+            self.assertNotIn("舊第二段", output_text)
+
+    def test_old_meeting_detail_recovers_segment_controls_from_transcript(self):
+        import backend.main as main
+
+        record = {
+            "id": 12,
+            "title": "舊紀錄",
+            "date": "2026/07/08",
+            "source_audio": "old.webm",
+            "output_path": "old.md",
+            "summary": "摘要",
+            "job_id": None,
+            "quality_score": None,
+            "quality_label": None,
+            "created_at": "2026-07-08 10:00:00",
+            "quality_report": None,
+            "full_content": (
+                "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+                "## 二、最終決議 (Final Decisions)\n決議\n"
+                "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n[00:00] **[發言者 A]**：第一段。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n[10:00] **[發言者 B]**：第二段。"
+            ),
+        }
+        with mock.patch.object(main, "get_meeting", return_value=record):
+            response = asgi_request(main.app, "GET", "/meetings/12")
+
+        self.assertEqual(response.status_code, 200)
+        report = response.json()["quality_report"]
+        self.assertEqual(len(report["segments"]), 2)
+        self.assertEqual(report["segments"][1]["start_seconds"], 600)
+        self.assertIn("已重建分段", report["label"])
+
+    def test_manual_summary_edit_preserves_transcript_and_ai_original(self):
+        import backend.database as database
+        import backend.main as main
+        from backend.tasks import _extract_transcript_section_body
+
+        original = (
+            "---\ntitle: 測試\n---\n\n"
+            "## 一、討論摘要 (Discussion Summary)\n\n### D1. 原始摘要\n- 摘要：AI 原稿\n\n"
+            "## 二、最終決議 (Final Decisions)\n\n| # | 關聯討論 | 決議 | 依據 | 狀態 |\n|---|---|---|---|---|\n| R1 | D1 | 未提及 | 未提及 | pending |\n\n"
+            "## 三、待辦事項 (Action Items)\n\n| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n|---|---|---|---|---|---|---|\n| A1 | D1 | R1 | 未提及 | 未提及 | 未提及 | 中 |\n\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n[00:00] **[發言者 A]**：逐字稿不得改變。\n"
+        )
+        edited_summary = (
+            "## 一、討論摘要 (Discussion Summary)\n\n### D1. 人工修訂\n- 摘要：修訂後摘要\n\n"
+            "## 二、最終決議 (Final Decisions)\n\n| # | 關聯討論 | 決議 | 依據 | 狀態 |\n|---|---|---|---|---|\n| R1 | D1 | 維持測試 | 00:00 | confirmed |\n\n"
+            "## 三、待辦事項 (Action Items)\n\n| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n|---|---|---|---|---|---|---|\n| A1 | D1 | R1 | 整理紀錄 | 發言者 A | 未提及 | 中 |"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_path = root / "meeting.md"
+            output_path.write_text(original, encoding="utf-8")
+            with mock.patch.object(database, "DB_PATH", root / "meetings.db"):
+                database.init_db()
+                meeting_id = database.save_meeting(
+                    "編輯測試", "2026/07/12", "meeting.webm", str(output_path), "AI 原稿"
+                )
+                response = asgi_request(
+                    main.app,
+                    "PUT",
+                    f"/meetings/{meeting_id}/summary",
+                    json={"summary_markdown": edited_summary},
+                )
+                revisions = database.list_meeting_revisions(meeting_id)
+
+            saved = output_path.read_text(encoding="utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("修訂後摘要", saved)
+        self.assertEqual(
+            _extract_transcript_section_body(saved),
+            _extract_transcript_section_body(original),
+        )
+        self.assertEqual(len(revisions), 1)
+        self.assertEqual(revisions[0]["content"], original)
+
+    def test_summary_only_processing_never_calls_transcription_model(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [
+                {"topic": "測試", "summary": "已沿用逐字稿。", "evidence_timecodes": ["00:00"]}
+            ],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **kwargs):
+                return type(
+                    "Response",
+                    (),
+                    {"text": json.dumps(summary_payload, ensure_ascii=False)},
+                )()
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "099a6561_20260710_131729.webm"
+            audio_path.write_bytes(b"audio")
+            source_path = root / "existing.md"
+            source_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "[00:00] **[發言者 A]**：保留這份完整逐字稿。\n",
+                encoding="utf-8",
+            )
+            output_dir = root / "output"
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=[audio_path]), \
+                 mock.patch.object(tasks, "_transcribe_segment") as transcribe, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting"):
+                output_path = tasks.process_audio_task(
+                    job_id="summary-only-job",
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    meeting_title="現場錄製_2026-7-10 下午1-17-27",
+                    summary_source_path=source_path,
+                )
+
+            self.assertIsNotNone(output_path)
+            transcribe.assert_not_called()
+            output_text = output_path.read_text(encoding="utf-8")
+            self.assertIn("已沿用逐字稿", output_text)
+            self.assertIn("保留這份完整逐字稿", output_text)
 
     def test_web_ui_shows_quality_report_and_segment_rerun_controls(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
@@ -3008,6 +3376,12 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality_report", html)
         self.assertIn("rerun-segment-${index}", html)
         self.assertIn("JSON.stringify({ segments: [segmentIndex] })", html)
+        self.assertIn('id="rerun-summary-button"', html)
+        self.assertIn("summary_only: true, high_quality: highQuality", html)
+        self.assertIn('id="rerun-summary-high-quality-button"', html)
+        self.assertIn('id="edit-summary-button"', html)
+        self.assertIn('id="revision-history-button"', html)
+        self.assertIn("function saveSummaryEdit", html)
 
 
 if __name__ == "__main__":

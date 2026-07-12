@@ -43,6 +43,9 @@ def enqueue_audio_job(
     summary_model: Optional[str] = None,
     summary_fallback_model: Optional[str] = None,
     force_segment_indices: Optional[list[int]] = None,
+    summary_source_path: Optional[Path] = None,
+    transcript_reuse_source_path: Optional[Path] = None,
+    high_quality_summary: bool = False,
 ) -> None:
     """Persist an uploaded audio job for the local worker."""
     selected_summary_model = summary_model or SUMMARY_MODEL
@@ -59,6 +62,9 @@ def enqueue_audio_job(
             "summary_fallback_model": selected_summary_fallback_model,
             "meeting_title": meeting_title,
             "force_segment_indices": sorted(set(force_segment_indices or [])),
+            "summary_source_path": str(summary_source_path) if summary_source_path else None,
+            "transcript_reuse_source_path": str(transcript_reuse_source_path) if transcript_reuse_source_path else None,
+            "high_quality_summary": bool(high_quality_summary),
         },
         max_attempts=max_attempts,
         message="音檔已接收，已排入可靠處理佇列。",
@@ -186,6 +192,9 @@ class JobQueueWorker:
         summary_fallback_model = payload.get("summary_fallback_model") or SUMMARY_FALLBACK_MODEL
         meeting_title = payload.get("meeting_title")
         force_segment_indices = payload.get("force_segment_indices") or []
+        summary_source_path = payload.get("summary_source_path")
+        transcript_reuse_source_path = payload.get("transcript_reuse_source_path")
+        high_quality_summary = bool(payload.get("high_quality_summary"))
 
         output_path = process_audio_task(
             job_id=job_id,
@@ -197,6 +206,11 @@ class JobQueueWorker:
             summary_model=summary_model,
             summary_fallback_model=summary_fallback_model,
             force_segment_indices=force_segment_indices,
+            summary_source_path=Path(summary_source_path) if summary_source_path else None,
+            transcript_reuse_source_path=(
+                Path(transcript_reuse_source_path) if transcript_reuse_source_path else None
+            ),
+            high_quality_summary=high_quality_summary,
         )
         if output_path is not None:
             self._log_source_audio_retention(job, "done")

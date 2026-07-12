@@ -556,6 +556,22 @@
     .form-input:focus { border-color: var(--blue); }
 
     .modal-footer { display: flex; justify-content: flex-end; gap: 12px; margin-top: 32px; }
+    .modal-wide { max-width: min(1040px, calc(100vw - 32px)); }
+    .summary-editor {
+      width: 100%; min-height: min(62vh, 680px); resize: vertical;
+      padding: 16px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--bg); color: var(--text); outline: none;
+      font: 14px/1.65 Consolas, "Microsoft JhengHei", monospace;
+    }
+    .summary-editor:focus { border-color: var(--blue); }
+    .revision-list { max-height: 68vh; overflow-y: auto; display: grid; gap: 10px; }
+    .revision-item { border-bottom: 1px solid var(--border); padding: 0 0 10px; }
+    .revision-item summary { cursor: pointer; color: var(--text); padding: 8px 0; }
+    .revision-item pre {
+      margin: 8px 0 0; padding: 14px; overflow: auto; max-height: 48vh;
+      background: var(--bg); color: var(--text-mid); white-space: pre-wrap;
+      overflow-wrap: anywhere; font-size: 13px; line-height: 1.6;
+    }
     .btn-secondary {
       background: transparent; color: var(--text); border: 1px solid var(--border);
       padding: 10px 18px; border-radius: 8px; font-size: 14px; cursor: pointer;
@@ -802,6 +818,32 @@
   </div>
 </div>
 
+<!-- Summary Editor Modal -->
+<div class="modal-overlay" id="summary-editor-modal">
+  <div class="modal modal-wide">
+    <div class="modal-header">
+      <div class="modal-title">編輯摘要、決議與待辦</div>
+      <button class="modal-close" onclick="closeSummaryEditor()">×</button>
+    </div>
+    <textarea id="summary-editor" class="summary-editor" aria-label="摘要、決議與待辦 Markdown"></textarea>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeSummaryEditor()">取消</button>
+      <button class="btn-primary" id="save-summary-button" onclick="saveSummaryEdit()">儲存版本</button>
+    </div>
+  </div>
+</div>
+
+<!-- Revision History Modal -->
+<div class="modal-overlay" id="revision-modal">
+  <div class="modal modal-wide">
+    <div class="modal-header">
+      <div class="modal-title">版本紀錄</div>
+      <button class="modal-close" onclick="closeRevisionHistory()">×</button>
+    </div>
+    <div id="revision-list" class="revision-list"></div>
+  </div>
+</div>
+
 <!-- Recording Modal -->
 <div class="modal-overlay" id="record-modal">
   <div class="modal" style="max-width: 520px;">
@@ -871,6 +913,7 @@
 const API = '';  // 同源請求，不需要前綴
 let debounceTimer = null;
 let currentId = null;
+let currentMeetingData = null;
 let runtimeConfig = {
   model: '',
   max_upload_mb: 500,
@@ -999,6 +1042,7 @@ async function deleteMeeting(event, id) {
     // 如果刪除的是當前正在檢視的記錄，清空右側面板
     if (currentId === id) {
       currentId = null;
+      currentMeetingData = null;
       document.getElementById('detail-panel').innerHTML = `
         <div class="empty-state">
           <div class="icon">🤖</div>
@@ -1015,14 +1059,22 @@ async function deleteMeeting(event, id) {
 }
 
 // ── 重跑會議紀錄 ────────────────────────────────────────────────────
-async function rerunMeeting(id, segmentIndex = null) {
+async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQuality = false) {
   if (!id) return;
-  const segmentText = segmentIndex === null ? '完整重跑' : `只重跑第 ${segmentIndex + 1} 段`;
+  const segmentText = highQuality
+    ? '以高品質模式重整摘要（會增加一次模型查核）'
+    : summaryOnly
+    ? '只重整摘要、決議與待辦（沿用既有逐字稿）'
+    : (segmentIndex === null ? '完整重跑' : `只重跑第 ${segmentIndex + 1} 段`);
   if (!confirm(`確定要${segmentText}嗎？\n完成後會產生一筆新的會議紀錄，原本這筆會保留。`)) {
     return;
   }
 
-  const button = segmentIndex === null
+  const button = highQuality
+    ? document.getElementById('rerun-summary-high-quality-button')
+    : summaryOnly
+    ? document.getElementById('rerun-summary-button')
+    : segmentIndex === null
     ? document.getElementById('rerun-meeting-button')
     : document.getElementById(`rerun-segment-${segmentIndex}`);
   const originalButtonText = button?.innerHTML;
@@ -1033,7 +1085,10 @@ async function rerunMeeting(id, segmentIndex = null) {
 
   try {
     const options = { method: 'POST' };
-    if (segmentIndex !== null) {
+    if (summaryOnly) {
+      options.headers = { 'Content-Type': 'application/json' };
+      options.body = JSON.stringify({ summary_only: true, high_quality: highQuality });
+    } else if (segmentIndex !== null) {
       options.headers = { 'Content-Type': 'application/json' };
       options.body = JSON.stringify({ segments: [segmentIndex] });
     }
@@ -1067,15 +1122,24 @@ function renderQualityReport(meeting) {
     .join('');
   const segments = (report.segments || []).map(segment => {
     const index = Number(segment.index) || 0;
-    const state = segment.status === 'reused' ? '沿用快取' : segment.status === 'rerun' ? '已重跑' : '已轉錄';
+    const state = segment.status === 'reused'
+      ? '沿用快取'
+      : segment.status === 'rerun'
+      ? '已重跑'
+      : segment.status === 'existing_record'
+      ? '既有逐字稿'
+      : '已轉錄';
     return `<div class="segment-status">
       <span>第 ${index + 1} 段 · ${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)} · ${escapeHtml(state)}</span>
       <button id="rerun-segment-${index}" title="只重跑這一段" onclick="rerunMeeting(${meeting.id}, ${index})">↻ 重跑</button>
     </div>`;
   }).join('');
+  const scoreText = report.score === null || report.score === undefined
+    ? '品質未評分'
+    : `品質 ${escapeHtml(report.score)} / 100`;
   return `<div class="quality-strip">
     <div class="quality-summary">
-      <span class="quality-score">品質 ${escapeHtml(report.score)} / 100</span>
+      <span class="quality-score">${scoreText}</span>
       <span>${escapeHtml(report.label || '')}</span>
       <span class="meta-chip">${escapeHtml((report.speaker_labels || []).length)} 個發言者標籤</span>
       <span class="meta-chip">${escapeHtml(report.timestamp_count || 0)} 個時間戳</span>
@@ -1083,6 +1147,84 @@ function renderQualityReport(meeting) {
     ${warnings}
     <div class="segment-status-list">${segments}</div>
   </div>`;
+}
+
+function extractEditableSummaryMarkdown(fullContent = '') {
+  let text = String(fullContent || '').replace(/^---\s*\r?\n[\s\S]*?\r?\n---\s*(?:\r?\n)?/, '');
+  const transcriptIndex = text.search(/^##\s*[^\n]*(?:完整逐字稿|Verbatim Transcript)[^\n]*$/im);
+  if (transcriptIndex >= 0) text = text.slice(0, transcriptIndex);
+  return text.replace(/\n-{3,}\s*$/, '').trim();
+}
+
+function openSummaryEditor() {
+  if (!currentMeetingData) return;
+  document.getElementById('summary-editor').value = extractEditableSummaryMarkdown(currentMeetingData.full_content);
+  document.getElementById('summary-editor-modal').classList.add('show');
+}
+
+function closeSummaryEditor() {
+  document.getElementById('summary-editor-modal').classList.remove('show');
+}
+
+async function saveSummaryEdit() {
+  if (!currentId) return;
+  const editor = document.getElementById('summary-editor');
+  const button = document.getElementById('save-summary-button');
+  const summaryMarkdown = editor.value.trim();
+  if (summaryMarkdown.length < 20) {
+    alert('摘要內容過短，請確認三個區塊均已保留。');
+    return;
+  }
+
+  const originalText = button.innerHTML;
+  button.disabled = true;
+  button.innerHTML = '<span class="loading-spinner"></span> 儲存中';
+  try {
+    const res = await fetch(`${API}/meetings/${currentId}/summary`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ summary_markdown: summaryMarkdown }),
+    });
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    closeSummaryEditor();
+    await openDetail(currentId);
+    await loadMeetings(document.getElementById('search-input').value.trim());
+  } catch (err) {
+    alert(`儲存失敗：${err.message}`);
+  } finally {
+    button.disabled = false;
+    button.innerHTML = originalText;
+  }
+}
+
+async function openRevisionHistory() {
+  if (!currentId) return;
+  const list = document.getElementById('revision-list');
+  list.innerHTML = '<div class="detail-placeholder"><div class="loading-spinner"></div></div>';
+  document.getElementById('revision-modal').classList.add('show');
+  try {
+    const res = await fetch(`${API}/meetings/${currentId}/revisions`);
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    const revisions = await res.json();
+    if (!revisions.length) {
+      list.innerHTML = '<div class="quality-warning">尚無人工修訂版本。</div>';
+      return;
+    }
+    list.innerHTML = revisions.map((revision, index) => {
+      const label = index === revisions.length - 1 ? 'AI 原稿' : '修改前版本';
+      const summary = extractEditableSummaryMarkdown(revision.content);
+      return `<details class="revision-item">
+        <summary>${escapeHtml(label)} · ${escapeHtml(formatDate(revision.created_at))}</summary>
+        <pre>${escapeHtml(summary)}</pre>
+      </details>`;
+    }).join('');
+  } catch (err) {
+    list.innerHTML = `<div class="quality-warning">無法載入版本：${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function closeRevisionHistory() {
+  document.getElementById('revision-modal').classList.remove('show');
 }
 
 // ── 上傳補充資料 ────────────────────────────────────────────────────
@@ -1184,6 +1326,7 @@ async function openDetail(id) {
     const res = await fetch(`${API}/meetings/${id}`);
     if (!res.ok) throw new Error(await apiErrorMessage(res));
     const r = await res.json();
+    currentMeetingData = r;
 
     // 渲染 Markdown
     const md = r.full_content || '（無內容）';
@@ -1195,6 +1338,10 @@ async function openDetail(id) {
           <div class="detail-title">${escapeHtml(r.title)}</div>
           <div class="detail-actions">
             <button id="reading-mode-button" class="btn-secondary" onclick="toggleReadingMode()">⛶ 閱讀模式</button>
+            <button id="edit-summary-button" class="btn-secondary" title="編輯摘要、決議與待辦；逐字稿不會被修改" onclick="openSummaryEditor()">✎ 編輯</button>
+            <button id="revision-history-button" class="btn-secondary" title="查看 AI 原稿與修改前版本" onclick="openRevisionHistory()">☷ 版本</button>
+            <button id="rerun-summary-button" class="btn-secondary" title="沿用逐字稿，只重新產生摘要、決議與待辦" onclick="rerunMeeting(${id}, null, true)">↻ 重整摘要</button>
+            <button id="rerun-summary-high-quality-button" class="btn-secondary" title="沿用逐字稿，增加一次第二模型證據查核" onclick="rerunMeeting(${id}, null, true, true)">✓ 高品質重整</button>
             <button id="rerun-meeting-button" class="btn-secondary" onclick="rerunMeeting(${id})">🔁 重跑</button>
             <button id="evidence-upload-button" class="btn-secondary" onclick="document.getElementById('evidence-file-input').click()">📎 補充資料</button>
             <input id="evidence-file-input"

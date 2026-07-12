@@ -16,6 +16,7 @@ ReDoc：
 import asyncio
 import hashlib
 import os
+import re
 import uuid
 import logging
 import ipaddress
@@ -55,6 +56,8 @@ from backend.database import (
     get_meeting,
     search_meetings,
     delete_meeting,
+    update_meeting_content_with_revision,
+    list_meeting_revisions,
 )
 from backend.models import (
     JobResponse,
@@ -65,6 +68,9 @@ from backend.models import (
     MeetingRecord,
     MeetingDetail,
     MeetingRerunRequest,
+    MeetingSummaryUpdateRequest,
+    MeetingSummaryUpdateResponse,
+    MeetingRevisionRecord,
     MeetingListResponse,
     MeetingEvidenceResponse,
     HealthResponse,
@@ -79,7 +85,18 @@ from backend.maintenance import run_startup_health_checks, run_startup_maintenan
 from backend.media_validation import validate_media_magic
 from backend.ngrok_status import get_ngrok_status
 from backend.source_audio import finalize_source_audio_upload
-from backend.tasks import GEMINI_MODEL, SUMMARY_FALLBACK_MODEL, SUMMARY_MODEL, SUPPORTED_MEDIA_FORMATS
+from backend.tasks import (
+    GEMINI_MODEL,
+    SUMMARY_FALLBACK_MODEL,
+    SUMMARY_MODEL,
+    SUPPORTED_MEDIA_FORMATS,
+    _extract_transcript_section_body,
+    _extract_summary_preview,
+    _meeting_content_quality_issues,
+    _replace_transcript_section,
+    _transcript_integrity_issues,
+    _transcript_segment_metadata,
+)
 from backend.logging_utils import configure_utf8_logging
 
 # =============================================================================
@@ -705,6 +722,20 @@ async def get_meeting_detail(meeting_id: int):
     if not record:
         raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
 
+    quality_report = dict(record.get("quality_report") or {})
+    if not quality_report.get("segments"):
+        transcript = _extract_transcript_section_body(record.get("full_content") or "") or ""
+        recovered_segments = _transcript_segment_metadata(transcript)
+        if recovered_segments:
+            quality_report.update({
+                "score": quality_report.get("score"),
+                "label": quality_report.get("label") or "舊紀錄，已重建分段",
+                "warnings": quality_report.get("warnings") or [],
+                "segments": recovered_segments,
+                "timestamp_count": quality_report.get("timestamp_count") or len(re.findall(r"\[\d{1,3}:[0-5]\d\]", transcript)),
+                "speaker_labels": quality_report.get("speaker_labels") or [],
+            })
+
     return MeetingDetail(
         id=record["id"],
         title=record["title"],
@@ -717,8 +748,79 @@ async def get_meeting_detail(meeting_id: int):
         quality_label=record.get("quality_label"),
         created_at=record["created_at"],
         full_content=record["full_content"],
-        quality_report=record.get("quality_report"),
+        quality_report=quality_report or None,
     )
+
+
+@app.put(
+    "/meetings/{meeting_id}/summary",
+    response_model=MeetingSummaryUpdateResponse,
+    summary="人工修訂摘要、決議與待辦並保留版本",
+    tags=["會議記錄"],
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
+async def update_meeting_summary(meeting_id: int, request_body: MeetingSummaryUpdateRequest):
+    record = get_meeting(meeting_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
+
+    original_content = record.get("full_content") or ""
+    transcript = _extract_transcript_section_body(original_content)
+    if not transcript:
+        raise HTTPException(status_code=409, detail="原會議紀錄缺少完整逐字稿，無法安全編輯。")
+
+    summary_markdown = request_body.summary_markdown.strip()
+    if re.search(r"(?:Verbatim Transcript|完整逐字稿)", summary_markdown, flags=re.IGNORECASE):
+        raise HTTPException(status_code=400, detail="編輯內容不可包含完整逐字稿區塊。")
+
+    frontmatter_match = re.match(
+        r"\A---\s*\r?\n.*?\r?\n---\s*(?:\r?\n)?",
+        original_content,
+        flags=re.DOTALL,
+    )
+    frontmatter = frontmatter_match.group(0).strip() if frontmatter_match else ""
+    edited_body = _replace_transcript_section(summary_markdown, transcript)
+    edited_content = f"{frontmatter}\n\n{edited_body}" if frontmatter else edited_body
+
+    issues = [
+        *_meeting_content_quality_issues(edited_content),
+        *_transcript_integrity_issues(edited_content, transcript),
+    ]
+    if issues:
+        raise HTTPException(
+            status_code=400,
+            detail="修訂內容格式不完整：" + "；".join(dict.fromkeys(issues)),
+        )
+
+    try:
+        revision_id = update_meeting_content_with_revision(
+            meeting_id,
+            edited_content,
+            _extract_summary_preview(edited_content),
+            source="manual_edit",
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return MeetingSummaryUpdateResponse(
+        status="success",
+        meeting_id=meeting_id,
+        revision_id=revision_id,
+        full_content=edited_content,
+    )
+
+
+@app.get(
+    "/meetings/{meeting_id}/revisions",
+    response_model=list[MeetingRevisionRecord],
+    summary="查看人工修訂前的歷史版本",
+    tags=["會議記錄"],
+    responses={404: {"model": ErrorResponse}},
+)
+async def get_meeting_revisions(meeting_id: int):
+    if not get_meeting(meeting_id):
+        raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
+    return list_meeting_revisions(meeting_id)
 
 
 @app.get(
@@ -784,12 +886,31 @@ async def rerun_meeting_record(
     audio_path = _resolve_meeting_source_audio(record)
     quality_report = record.get("quality_report") or {}
     known_segments = quality_report.get("segments") or []
-    if request_body is not None and request_body.segments is not None:
+    if not known_segments:
+        transcript = _extract_transcript_section_body(record.get("full_content") or "") or ""
+        known_segments = _transcript_segment_metadata(transcript)
+    summary_only = bool(request_body and request_body.summary_only)
+    high_quality = bool(request_body and request_body.high_quality)
+    summary_source_path = None
+    transcript_reuse_source_path = None
+    if high_quality and not summary_only:
+        raise HTTPException(status_code=400, detail="高品質模式只能用於重整摘要。")
+    if summary_only and request_body is not None and request_body.segments is not None:
+        raise HTTPException(status_code=400, detail="只重整摘要時不可同時指定重跑分段。")
+    if summary_only:
+        summary_source_path = Path(record.get("output_path") or "")
+        if not summary_source_path.is_file():
+            raise HTTPException(status_code=409, detail="原會議紀錄檔不存在，無法沿用逐字稿重整摘要。")
+        force_segment_indices = []
+    elif request_body is not None and request_body.segments is not None:
         force_segment_indices = sorted(set(request_body.segments))
         if any(index < 0 or index >= len(known_segments) for index in force_segment_indices):
             raise HTTPException(status_code=400, detail="指定的重跑分段不存在。")
         if not force_segment_indices:
             raise HTTPException(status_code=400, detail="請至少指定一個要重跑的分段。")
+        transcript_reuse_source_path = Path(record.get("output_path") or "")
+        if not transcript_reuse_source_path.is_file():
+            raise HTTPException(status_code=409, detail="原會議紀錄檔不存在，無法沿用其他分段逐字稿。")
     else:
         force_segment_indices = list(range(len(known_segments)))
 
@@ -801,8 +922,17 @@ async def rerun_meeting_record(
             output_dir=OUTPUT_DIR,
             model=GEMINI_MODEL,
             meeting_title=record["title"],
-            source="meeting_rerun",
+            source=(
+                "meeting_summary_high_quality"
+                if high_quality
+                else "meeting_summary_rerun"
+                if summary_only
+                else "meeting_rerun"
+            ),
             force_segment_indices=force_segment_indices,
+            summary_source_path=summary_source_path,
+            transcript_reuse_source_path=transcript_reuse_source_path,
+            high_quality_summary=high_quality,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"重跑任務排入佇列失敗：{exc}") from exc
@@ -817,9 +947,15 @@ async def rerun_meeting_record(
         job_id=job_id,
         status=JobStatus.PENDING,
         message=(
-            f"已建立指定分段重跑任務：第 {', '.join(str(index + 1) for index in force_segment_indices)} 段。"
-            if request_body is not None and request_body.segments is not None
-            else "已用原始音檔建立完整重跑任務，完成後會產生新的會議紀錄。"
+            "已建立高品質摘要重整任務，會由第二模型再做一次證據查核。"
+            if high_quality
+            else "已沿用既有逐字稿建立摘要重整任務，完成後會產生新的會議紀錄。"
+            if summary_only
+            else (
+                f"已建立指定分段重跑任務：第 {', '.join(str(index + 1) for index in force_segment_indices)} 段。"
+                if request_body is not None and request_body.segments is not None
+                else "已用原始音檔建立完整重跑任務，完成後會產生新的會議紀錄。"
+            )
         ),
     )
 

@@ -178,6 +178,32 @@ class MeetingDetail(MeetingRecord):
 class MeetingRerunRequest(BaseModel):
     """Optionally rerun only selected zero-based transcript segments."""
     segments: Optional[list[int]] = Field(None, description="要強制重跑的零起算分段索引；省略代表全部重跑")
+    summary_only: bool = Field(False, description="沿用既有逐字稿，只重新產生摘要、決議與待辦")
+    high_quality: bool = Field(False, description="摘要完成後，再用第二模型做一次證據查核")
+
+
+class MeetingSummaryUpdateRequest(BaseModel):
+    summary_markdown: str = Field(
+        ...,
+        min_length=20,
+        max_length=200_000,
+        description="只包含討論摘要、最終決議與待辦事項的 Markdown",
+    )
+
+
+class MeetingSummaryUpdateResponse(BaseModel):
+    status: str
+    meeting_id: int
+    revision_id: int
+    full_content: str
+
+
+class MeetingRevisionRecord(BaseModel):
+    id: int
+    meeting_id: int
+    source: str
+    content: str
+    created_at: datetime
 
 
 class MeetingListResponse(BaseModel):

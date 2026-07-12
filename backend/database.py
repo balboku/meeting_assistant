@@ -187,6 +187,21 @@ def _ensure_job_events_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_meeting_revisions_table(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS meeting_revisions (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            meeting_id  INTEGER NOT NULL,
+            source      TEXT    NOT NULL,
+            content     TEXT    NOT NULL,
+            created_at  TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_meeting_revisions_meeting_id ON meeting_revisions(meeting_id, id DESC)"
+    )
+
+
 def _ensure_meeting_quality_columns(conn: sqlite3.Connection) -> None:
     """Add local quality-report fields to existing databases in place."""
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(meetings)").fetchall()}
@@ -321,6 +336,7 @@ def init_db() -> None:
 
         # 任務事件時間線：供維運頁面與 API 追蹤狀態變化。
         _ensure_job_events_table(conn)
+        _ensure_meeting_revisions_table(conn)
         _ensure_meeting_fts(conn)
 
     logger.info("✅ 資料庫初始化完成")
@@ -973,6 +989,62 @@ def get_meeting(meeting_id: int) -> Optional[dict]:
         return record
 
 
+def update_meeting_content_with_revision(
+    meeting_id: int,
+    full_content: str,
+    summary: str,
+    source: str = "manual_edit",
+) -> int:
+    """Replace meeting Markdown while preserving the previous full content."""
+    record = get_meeting(meeting_id)
+    if not record:
+        raise ValueError(f"找不到會議記錄：ID={meeting_id}")
+
+    output_file = Path(record["output_path"])
+    if not output_file.is_file():
+        raise FileNotFoundError(f"找不到會議 Markdown：{output_file}")
+
+    temp_file = output_file.with_suffix(output_file.suffix + ".editing.tmp")
+    temp_file.write_text(full_content, encoding="utf-8")
+    try:
+        with get_db() as conn:
+            _ensure_meeting_revisions_table(conn)
+            cursor = conn.execute(
+                """INSERT INTO meeting_revisions (meeting_id, source, content, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (meeting_id, source, record["full_content"], _now()),
+            )
+            revision_id = int(cursor.lastrowid)
+            conn.execute("UPDATE meetings SET summary=? WHERE id=?", (summary, meeting_id))
+            try:
+                conn.execute(
+                    "UPDATE meeting_fts SET summary=? WHERE rowid=?",
+                    (summary, meeting_id),
+                )
+            except sqlite3.OperationalError:
+                _ensure_meeting_fts(conn)
+            temp_file.replace(output_file)
+    finally:
+        if temp_file.exists():
+            temp_file.unlink()
+
+    logger.info("✏️  會議記錄已人工修訂並保留版本（ID: %s，revision: %s）", meeting_id, revision_id)
+    return revision_id
+
+
+def list_meeting_revisions(meeting_id: int) -> list[dict[str, Any]]:
+    with get_db() as conn:
+        _ensure_meeting_revisions_table(conn)
+        rows = conn.execute(
+            """SELECT id, meeting_id, source, content, created_at
+                 FROM meeting_revisions
+                WHERE meeting_id=?
+                ORDER BY id DESC""",
+            (meeting_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def search_meetings(query: str, limit: int = 50) -> list[dict]:
     """
     全文搜尋會議記錄，支援在標題、音檔名稱與摘要中搜尋關鍵字。
@@ -1043,6 +1115,8 @@ def delete_meeting(meeting_id: int) -> bool:
 
     # 刪除資料庫記錄
     with get_db() as conn:
+        _ensure_meeting_revisions_table(conn)
+        conn.execute("DELETE FROM meeting_revisions WHERE meeting_id=?", (meeting_id,))
         conn.execute("DELETE FROM meeting_fts WHERE rowid=?", (meeting_id,))
         conn.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
         logger.info(f"🗑️  已從資料庫移除會議記錄（ID: {meeting_id}）")

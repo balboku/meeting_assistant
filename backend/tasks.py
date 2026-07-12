@@ -19,7 +19,7 @@ import hashlib
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 # 將專案根目錄加入 sys.path，才能 import meeting_assistant
@@ -229,6 +229,65 @@ def _extract_transcript_section_body(meeting_content: str) -> Optional[str]:
     if not match:
         return None
     return (meeting_content or "")[match.end():].strip()
+
+
+_TRANSCRIPT_SEGMENT_HEADING_PATTERN = re.compile(
+    r"(?m)^#{1,6}\s*(?:"
+    r"【第\s*(?P<zh_index>\d+)\s*段\s*[｜|]\s*"
+    r"(?P<zh_start>\d{1,3}:[0-5]\d)\s*[–—-]\s*(?P<zh_end>\d{1,3}:[0-5]\d|end)】"
+    r"|\[?Segment\s+(?P<en_index>\d+)(?:/\d+)?\s*[|｜]\s*"
+    r"(?P<en_start>\d{1,3}:[0-5]\d)\s*[–—-]\s*(?P<en_end>\d{1,3}:[0-5]\d|end)\]?)\s*$",
+    flags=re.IGNORECASE,
+)
+
+
+def _clock_seconds(value: str, default: int = 0) -> int:
+    match = re.fullmatch(r"(\d{1,3}):([0-5]\d)", value or "")
+    if not match:
+        return default
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def _transcript_segment_metadata(transcript: str) -> list[dict[str, Any]]:
+    """Recover segment controls from transcript headings, including older records."""
+    matches = list(_TRANSCRIPT_SEGMENT_HEADING_PATTERN.finditer(transcript or ""))
+    metadata: list[dict[str, Any]] = []
+    for position, match in enumerate(matches):
+        raw_index = match.group("zh_index") or match.group("en_index")
+        raw_start = match.group("zh_start") or match.group("en_start") or "00:00"
+        raw_end = match.group("zh_end") or match.group("en_end") or "end"
+        start_seconds = _clock_seconds(raw_start)
+        if raw_end.lower() == "end":
+            next_start = None
+            if position + 1 < len(matches):
+                next_match = matches[position + 1]
+                next_raw_start = next_match.group("zh_start") or next_match.group("en_start") or ""
+                next_start = _clock_seconds(next_raw_start, start_seconds + SEGMENT_TARGET_SECONDS)
+            end_seconds = next_start or start_seconds + SEGMENT_TARGET_SECONDS
+        else:
+            end_seconds = _clock_seconds(raw_end, start_seconds + SEGMENT_TARGET_SECONDS)
+        metadata.append({
+            "index": max(0, int(raw_index) - 1),
+            "start_seconds": start_seconds,
+            "end_seconds": max(start_seconds + 1, end_seconds),
+            "status": "existing_record",
+            "issues": [],
+        })
+    return metadata
+
+
+def _transcript_segments_by_index(transcript: str) -> dict[int, str]:
+    matches = list(_TRANSCRIPT_SEGMENT_HEADING_PATTERN.finditer(transcript or ""))
+    segments: dict[int, str] = {}
+    for position, match in enumerate(matches):
+        raw_index = match.group("zh_index") or match.group("en_index")
+        body_end = matches[position + 1].start() if position + 1 < len(matches) else len(transcript or "")
+        body = (transcript or "")[match.end():body_end].strip()
+        if body:
+            segments[max(0, int(raw_index) - 1)] = body
+    if not segments and (transcript or "").strip():
+        segments[0] = (transcript or "").strip()
+    return segments
 
 
 def _transcript_segment_heading_count(transcript: str) -> int:
@@ -1772,7 +1831,159 @@ def _validated_summary_refs(value: Any, prefix: str, allowed: set[str]) -> list[
     return [ref for ref in refs.split("、") if ref in allowed]
 
 
-def _normalize_summary_payload(payload: dict[str, Any], transcript: str) -> dict[str, Any]:
+def _infer_meeting_date(
+    meeting_title: Optional[str],
+    audio_path: Optional[Path] = None,
+    fallback: Optional[date] = None,
+) -> date:
+    """Infer the actual meeting date from the title or retained source filename."""
+    candidates = [meeting_title or ""]
+    if audio_path is not None:
+        candidates.extend([audio_path.stem, audio_path.name])
+
+    patterns = (
+        re.compile(r"(?<!\d)(20\d{2})[-_/年](\d{1,2})[-_/月](\d{1,2})(?:日)?(?!\d)"),
+        re.compile(r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)"),
+    )
+    for candidate in candidates:
+        for pattern in patterns:
+            for match in pattern.finditer(candidate):
+                try:
+                    return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+                except ValueError:
+                    continue
+    return fallback or datetime.now().date()
+
+
+def _transcript_turns(transcript: str) -> list[tuple[int, str, str]]:
+    turns: list[tuple[int, str, str]] = []
+    pattern = re.compile(
+        r"^\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\d)\]\s*"
+        r"(?:\*{1,2})?\[(?P<speaker>[^\]]+)\](?:\*{1,2})?\s*[：:]\s*(?P<text>.*)$",
+        flags=re.MULTILINE,
+    )
+    for match in pattern.finditer(transcript or ""):
+        seconds = int(match.group("minutes")) * 60 + int(match.group("seconds"))
+        turns.append((seconds, match.group("speaker").strip(), match.group("text").strip()))
+    return turns
+
+
+def _nearest_transcript_turn(
+    transcript: str,
+    timecodes: Any,
+    max_distance_seconds: int = 20,
+) -> Optional[tuple[int, str, str]]:
+    validated = _validated_summary_timecodes(timecodes, transcript)
+    if not validated:
+        return None
+    match = re.fullmatch(r"(\d{1,3}):([0-5]\d)", validated[0])
+    turns = _transcript_turns(transcript)
+    if not match or not turns:
+        return None
+    target = int(match.group(1)) * 60 + int(match.group(2))
+    nearest = min(turns, key=lambda turn: abs(turn[0] - target))
+    return nearest if abs(nearest[0] - target) <= max_distance_seconds else None
+
+
+def _explicit_first_person_owner(transcript: str, timecodes: Any) -> Optional[str]:
+    turn = _nearest_transcript_turn(transcript, timecodes)
+    if not turn:
+        return None
+    _, speaker, spoken_text = turn
+    first_person_commitment = re.search(
+        r"(?:我們這邊|我這邊|我)"
+        r"(?:後續)?(?:會|要|再|來|先|負責|預計|打算|需要)",
+        spoken_text,
+    )
+    if not first_person_commitment:
+        return None
+    return speaker
+
+
+_SPOKEN_DUE_PATTERN = re.compile(
+    r"(20\d{2}\s*[年/-]\s*\d{1,2}\s*[月/-]\s*\d{1,2}\s*日?"
+    r"|\d{1,2}\s*月\s*\d{1,2}\s*[日號]?"
+    r"|(?:下週|下禮拜|下個禮拜)\s*[一二三四五六日天]"
+    r"|(?:今天|今日|明天|月底|下週|下禮拜|下個禮拜))"
+)
+_WEEKDAY_INDEX = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+
+
+def _spoken_due_from_transcript(
+    transcript: str,
+    timecodes: Any,
+    preferred_source: str = "",
+) -> str:
+    turn = _nearest_transcript_turn(transcript, timecodes)
+    if not turn:
+        return ""
+    spoken_text = re.sub(r"\s+", "", turn[2])
+    preferred = re.sub(r"\s+", "", preferred_source or "").strip()
+    if preferred and preferred != "未提及" and preferred in spoken_text:
+        return preferred
+    matches = list(_SPOKEN_DUE_PATTERN.finditer(turn[2]))
+    return re.sub(r"\s+", "", matches[-1].group(1)) if matches else ""
+
+
+def _resolve_spoken_due(source_text: str, meeting_date: Optional[date]) -> str:
+    source = re.sub(r"\s+", "", source_text or "").strip()
+    if not source or not meeting_date:
+        return source
+
+    if source in {"今天", "今日"}:
+        return f"{meeting_date:%Y/%m/%d}（原文：{source}）"
+    if source == "明天":
+        resolved = meeting_date + timedelta(days=1)
+        return f"{resolved:%Y/%m/%d}（原文：{source}）"
+
+    weekday_match = re.fullmatch(r"(?:下週|下禮拜|下個禮拜)([一二三四五六日天])", source)
+    if weekday_match:
+        start_of_next_week = meeting_date + timedelta(days=7 - meeting_date.weekday())
+        resolved = start_of_next_week + timedelta(days=_WEEKDAY_INDEX[weekday_match.group(1)])
+        return f"{resolved:%Y/%m/%d}（原文：{source}）"
+
+    full_date_match = re.fullmatch(
+        r"(20\d{2})[年/-](\d{1,2})[月/-](\d{1,2})日?",
+        source,
+    )
+    if full_date_match:
+        try:
+            resolved = date(*(int(value) for value in full_date_match.groups()))
+            return f"{resolved:%Y/%m/%d}"
+        except ValueError:
+            return source
+
+    month_day_match = re.fullmatch(r"(\d{1,2})月(\d{1,2})[日號]?", source)
+    if month_day_match:
+        try:
+            resolved = date(meeting_date.year, int(month_day_match.group(1)), int(month_day_match.group(2)))
+            return f"{resolved:%Y/%m/%d}"
+        except ValueError:
+            return source
+    return source
+
+
+def _normalize_decision_status(item: dict[str, Any]) -> str:
+    status = str(item.get("status") or "pending").strip().lower()
+    if status not in {"confirmed", "pending"}:
+        status = "pending"
+    decision_text = " ".join(
+        str(item.get(key) or "") for key in ("decision", "basis", "reason")
+    )
+    tentative_markers = (
+        "暫定", "預計", "待確認", "尚未決定", "尚待", "需再", "後續再",
+        "考慮", "可能", "視情況", "視需求", "再決定", "再討論", "評估中",
+    )
+    if any(marker in decision_text for marker in tentative_markers):
+        return "pending"
+    return status
+
+
+def _normalize_summary_payload(
+    payload: dict[str, Any],
+    transcript: str,
+    meeting_date: Optional[date] = None,
+) -> dict[str, Any]:
     """Repair identifiers and evidence references locally without another model call."""
     discussions: list[Any] = []
     for index, raw in enumerate(_coerce_summary_items(payload.get("discussion_summary")), start=1):
@@ -1789,8 +2000,9 @@ def _normalize_summary_payload(payload: dict[str, Any], transcript: str) -> dict
         item["id"] = f"R{index}"
         refs = item.get("related_discussions") or item.get("discussion_ids") or item.get("related_discussion")
         item["related_discussions"] = _validated_summary_refs(refs, "D", discussion_ids)
-        status = str(item.get("status") or "pending").strip().lower()
-        item["status"] = status if status in {"confirmed", "pending"} else "pending"
+        timecodes = item.get("evidence_timecodes") or item.get("timecodes") or item.get("source_timecodes")
+        item["evidence_timecodes"] = _validated_summary_timecodes(timecodes, transcript)
+        item["status"] = _normalize_decision_status(item)
         decisions.append(item)
     decision_ids = {item["id"] for item in decisions}
 
@@ -1806,6 +2018,19 @@ def _normalize_summary_payload(payload: dict[str, Any], transcript: str) -> dict
         item["source_timecodes"] = _validated_summary_timecodes(source_timecodes, transcript)
         priority = str(item.get("priority") or "中").strip()
         item["priority"] = priority if priority in {"高", "中", "低"} else "中"
+        explicit_owner = _explicit_first_person_owner(transcript, item["source_timecodes"])
+        if explicit_owner:
+            item["owner"] = explicit_owner
+        model_due_source = str(item.get("due_source") or "").strip()
+        spoken_due = _spoken_due_from_transcript(
+            transcript,
+            item["source_timecodes"],
+            model_due_source,
+        )
+        due_source = spoken_due or model_due_source
+        if due_source:
+            item["due_source"] = due_source
+            item["due"] = _resolve_spoken_due(due_source, meeting_date)
         actions.append(item)
 
     return {
@@ -1871,6 +2096,12 @@ def _summary_json_to_markdown(payload: dict[str, Any]) -> str:
                 )
                 decision = _plain_markdown_cell(item.get("decision") or item.get("content") or item, "")
                 basis = _plain_markdown_cell(item.get("basis") or item.get("reason"))
+                evidence = _plain_markdown_cell(
+                    item.get("evidence_timecodes") or item.get("timecodes") or item.get("source_timecodes"),
+                    "",
+                )
+                if evidence:
+                    basis = f"{basis}<br>佐證：{evidence}"
                 status = _plain_markdown_cell(item.get("status"), "pending")
             else:
                 related_discussions = "未提及"
@@ -1903,6 +2134,9 @@ def _summary_json_to_markdown(payload: dict[str, Any]) -> str:
                     "R",
                 )
                 task = _plain_markdown_cell(item.get("task") or item.get("description") or item.get("content"))
+                evidence = _plain_markdown_cell(item.get("source_timecodes") or item.get("timecodes"), "")
+                if evidence:
+                    task = f"{task}<br>佐證：{evidence}"
                 owner = _plain_markdown_cell(item.get("owner") or item.get("assignee"))
                 due = _plain_markdown_cell(item.get("due") or item.get("deadline"))
                 priority = _plain_markdown_cell(item.get("priority"), "中")
@@ -1920,23 +2154,32 @@ def _summary_json_to_markdown(payload: dict[str, Any]) -> str:
     return _normalize_domain_terms("\n".join(lines).strip())
 
 
-def _summary_response_to_markdown(text: str, full_transcript: str = "") -> str:
+def _summary_response_to_markdown(
+    text: str,
+    full_transcript: str = "",
+    meeting_date: Optional[date] = None,
+) -> str:
     payload = _extract_json_object(text)
     if payload:
-        return _summary_json_to_markdown(_normalize_summary_payload(payload, full_transcript))
+        return _summary_json_to_markdown(
+            _normalize_summary_payload(payload, full_transcript, meeting_date)
+        )
     cleaned = _normalize_domain_terms(clean_hallucinated_loops(text or ""))
     cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
     return cleaned.strip()
 
 
-def _build_summary_prompt(full_transcript: str) -> str:
-    meeting_date = datetime.now().strftime("%Y/%m/%d")
+def _build_summary_prompt(full_transcript: str, meeting_date: Optional[date] = None) -> str:
+    actual_meeting_date = meeting_date or datetime.now().date()
+    weekday_names = "一二三四五六日"
+    meeting_date_text = actual_meeting_date.strftime("%Y/%m/%d")
+    meeting_weekday = weekday_names[actual_meeting_date.weekday()]
     prompt = f"""
 # 角色設定
 你是一位擁有 15 年經驗的國際企業專業高階秘書（Executive Secretary），
 精通醫療器材研發會議記錄、法規文件追蹤、商業寫作與多語言溝通。
 
-目前系統日期/會議處理日期：{meeting_date}
+實際會議日期：{meeting_date_text}（星期{meeting_weekday}）
 
 以下是一份完整的會議逐字稿（已分段），請根據逐字稿生成摘要、決議與待辦事項：
 
@@ -1976,7 +2219,8 @@ def _build_summary_prompt(full_transcript: str) -> str:
 
 若負責人只能從逐字稿辨識為匿名發言者，請保留「發言者 A/B/C」標籤，不要自行推測姓名。
 若任務過大，請拆成可驗收的文件、測試、追蹤或會議安排項目。
-若逐字稿只提到月/日或「下週二」等相對期限，請以會議處理日期的年份推定，或保留相對期限；不可自行填入過去年份。
+若逐字稿只提到月/日，年份以實際會議日期為準。
+若逐字稿使用「下週二」等相對期限，due_source 必須保留逐字稿原句，不要自行換算日期；系統會在本機換算。
 
 > ⚠️ 重要：輸出完三個區塊後立即停止，不要輸出逐字稿，也不要附加任何秘書備註或後記。
 """.strip()
@@ -2006,7 +2250,8 @@ Schema:
       "related_discussions": ["D1"],
       "decision": "已確認的決議；若只是討論中請寫成待確認",
       "basis": "逐字稿依據",
-      "status": "confirmed|pending"
+      "status": "confirmed|pending",
+      "evidence_timecodes": ["00:00"]
     }
   ],
   "action_items": [
@@ -2017,6 +2262,7 @@ Schema:
       "task": "待辦事項",
       "owner": "負責人或未提及",
       "due": "期限或未提及",
+      "due_source": "逐字稿中的期限原句；沒有就寫未提及",
       "priority": "高|中|低",
       "source_timecodes": ["00:00"]
     }
@@ -2025,11 +2271,16 @@ Schema:
 Rules:
 - Use Traditional Chinese.
 - Keep Qisda as 佳世達.
-- If there are multiple discussion topics, split them into D1, D2, D3... instead of merging unrelated topics.
+- Before writing JSON, silently build a fact ledger from timestamped utterances, then cluster facts by project and deliverable.
+- One discussion item may contain only one independently actionable topic. Split different projects, deliverables, tests, document packages, or decisions into separate D items even when the same speaker discusses them continuously.
+- Do not use a combined title such as "A 與 B" when A and B have separate progress, risks, decisions, or owners.
 - Every final decision must reference related_discussions when traceable.
+- Every final decision must include evidence_timecodes. Use confirmed only for explicit agreement, approval, selection, or a completed fact accepted by the meeting. Words such as 暫定、預計、考慮、待確認、後續再調整 must be pending.
 - Every action item must reference related_discussions and related_decisions when traceable.
+- Every action item must include source_timecodes and due_source. due_source must copy the spoken date phrase exactly.
+- A person or department being asked, consulted, notified, or followed up with is not automatically the owner. For example, "我會問品保" means the current speaker owns the follow-up, not 品保.
 - If owner, due date, or decision is not explicit, write 未提及 or pending instead of guessing.
-- If only month/day is spoken, use the meeting processing year above or keep the relative wording; do not invent past years.
+- If only month/day is spoken, use the actual meeting year above. Preserve relative wording in due_source; do not calculate it yourself.
 - Do not use **bold** markers in JSON values.
 """.strip()
 
@@ -2041,6 +2292,8 @@ def _generate_meeting_content_from_transcript(
     job_id: str,
     summary_primary_model: str,
     summary_secondary_model: str,
+    meeting_date: Optional[date] = None,
+    high_quality: bool = False,
 ) -> tuple[str, str]:
     update_job_status(
         job_id,
@@ -2054,7 +2307,7 @@ def _generate_meeting_content_from_transcript(
         summary_secondary_model,
     )
 
-    summary_prompt = _build_summary_prompt(full_transcript)
+    summary_prompt = _build_summary_prompt(full_transcript, meeting_date)
     response, summary_model_used = _generate_text_with_fallback(
         client,
         primary_model=summary_primary_model,
@@ -2069,7 +2322,60 @@ def _generate_meeting_content_from_transcript(
         stage="會議摘要生成",
     )
 
-    summary_section = _summary_response_to_markdown(response.text or "", full_transcript)
+    summary_section = _summary_response_to_markdown(
+        response.text or "",
+        full_transcript,
+        meeting_date,
+    )
+    if high_quality:
+        update_job_status(job_id, "processing", "🔎 第二模型正在查核摘要證據與逐字稿完整性...")
+        verification_prompt = f"""
+# 角色
+你是第二階段會議紀錄稽核員。請以完整逐字稿為唯一事實來源，查核第一階段摘要並輸出修正版。
+
+# 完整逐字稿
+{full_transcript}
+
+# 第一階段摘要
+{summary_section}
+
+# 查核規則
+1. 每個重要討論主題都要有獨立 D 編號，不可把不同專案、文件、測試或決策合併。
+2. 每個 D、R、A 都必須能由時間戳附近的逐字稿支持；找不到證據就刪除或標為未提及。
+3. confirmed 只限明確同意、核准、選定或已完成並被會議接受的事實；暫定、預計、可能、待確認一律 pending。
+4. 「我會問品保」的負責人是當前發言者，不是品保。被詢問、通知或協作的對象不得自動列為負責人。
+5. 期限原句放在 due_source，不可自行猜測日期。
+6. 不可新增逐字稿沒有的姓名、文件、數字、日期、風險、決議或待辦。
+
+Return JSON only, without Markdown fences, using exactly these top-level keys:
+{{
+  "discussion_summary": [{{"id":"D1","topic":"主題","context":"背景","summary":"摘要","key_points":["重點"],"impact":"影響或未提及","open_questions":["待釐清或未提及"],"evidence_timecodes":["00:00"]}}],
+  "final_decisions": [{{"id":"R1","related_discussions":["D1"],"decision":"決議","basis":"逐字稿依據","status":"confirmed|pending","evidence_timecodes":["00:00"]}}],
+  "action_items": [{{"id":"A1","related_discussions":["D1"],"related_decisions":["R1"],"task":"可驗收任務","owner":"負責人或未提及","due":"期限或未提及","due_source":"期限原句或未提及","priority":"高|中|低","source_timecodes":["00:00"]}}]
+}}
+""".strip()
+        verification_response, verification_model = _generate_text_with_fallback(
+            client,
+            primary_model=summary_secondary_model,
+            fallback_model=summary_model_used,
+            contents=[verification_prompt],
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                top_p=0.8,
+                max_output_tokens=65536,
+            ),
+            job_id=job_id,
+            stage="高品質摘要查核",
+        )
+        if not _extract_json_object(verification_response.text or ""):
+            raise RuntimeError("高品質摘要查核未回傳有效 JSON，保留任務以便自動重試。")
+        summary_section = _summary_response_to_markdown(
+            verification_response.text or "",
+            full_transcript,
+            meeting_date,
+        )
+        summary_model_used = f"{summary_model_used}+verified:{verification_model}"
+
     meeting_content = _replace_transcript_section(summary_section, full_transcript)
     meeting_content = _prepend_transcript_quality_notice(meeting_content, full_transcript)
     return meeting_content, summary_model_used
@@ -2113,6 +2419,9 @@ def process_audio_task(
     summary_model: Optional[str] = None,
     summary_fallback_model: Optional[str] = None,
     force_segment_indices: Optional[list[int]] = None,
+    summary_source_path: Optional[Path] = None,
+    transcript_reuse_source_path: Optional[Path] = None,
+    high_quality_summary: bool = False,
 ) -> Optional[Path]:
     """
     主要背景任務函數：接收音檔路徑，執行完整的 AI 會議記錄生成流程。
@@ -2134,6 +2443,7 @@ def process_audio_task(
         summary_fallback_model=summary_fallback_model,
     )
     summary_model_used = model
+    actual_meeting_date = _infer_meeting_date(meeting_title, audio_path)
 
     try:
         # ------------------------------------------------------------------
@@ -2197,8 +2507,45 @@ def process_audio_task(
         # 步驟 4：逐段轉錄（或整體上傳）
         # ------------------------------------------------------------------
         all_transcripts: list[str] = []
+        existing_segment_transcripts: dict[int, str] = {}
+        if transcript_reuse_source_path is not None:
+            try:
+                reuse_content = transcript_reuse_source_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise RuntimeError(f"無法讀取原會議逐字稿：{transcript_reuse_source_path}") from exc
+            reuse_transcript = _extract_transcript_section_body(reuse_content)
+            if not reuse_transcript:
+                raise RuntimeError("原會議紀錄缺少完整逐字稿，無法沿用未指定分段。")
+            existing_segment_transcripts = _transcript_segments_by_index(reuse_transcript)
 
-        if is_segmented:
+        if summary_source_path is not None:
+            update_job_status(job_id, "processing", "♻️ 正在沿用既有逐字稿重整摘要...")
+            try:
+                source_content = summary_source_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise RuntimeError(f"無法讀取原會議紀錄：{summary_source_path}") from exc
+            full_transcript = _extract_transcript_section_body(source_content)
+            if not full_transcript:
+                raise RuntimeError("原會議紀錄缺少完整逐字稿，無法只重整摘要。")
+            _raise_if_full_transcript_unsafe(full_transcript, job_id)
+            segment_report.extend({
+                "index": index,
+                "start_seconds": audio_slice.start_seconds,
+                "end_seconds": audio_slice.end_seconds,
+                "status": "reused",
+                "issues": [],
+            } for index, audio_slice in enumerate(audio_slices))
+            meeting_content, summary_model_used = _generate_meeting_content_from_transcript(
+                client=client,
+                full_transcript=full_transcript,
+                job_id=job_id,
+                summary_primary_model=summary_primary_model,
+                summary_secondary_model=summary_secondary_model,
+                meeting_date=actual_meeting_date,
+                high_quality=high_quality_summary,
+            )
+
+        elif is_segmented:
             for i, audio_slice in enumerate(audio_slices):
                 _raise_if_cancelled(job_id)
                 seg_path = audio_slice.path
@@ -2207,6 +2554,7 @@ def process_audio_task(
                 segment_end = _format_mmss(audio_slice.end_seconds)
 
                 transcript = None
+                transcript_source = ""
                 if i not in forced_segments:
                     transcript = _load_segment_transcript_cache(
                         output_dir=output_dir,
@@ -2214,12 +2562,25 @@ def process_audio_task(
                         segment_index=i,
                         context=segment_cache_context or {},
                     )
+                    transcript_source = "cache" if transcript is not None else ""
+                    if transcript is None:
+                        transcript = existing_segment_transcripts.get(i)
+                        transcript_source = "record" if transcript is not None else ""
                 if transcript is not None:
-                    logger.info(f"[{job_id}] ♻️  使用第 {i + 1}/{total_segs} 段轉錄快取")
+                    source_label = "原會議逐字稿" if transcript_source == "record" else "轉錄快取"
+                    logger.info(f"[{job_id}] ♻️  使用第 {i + 1}/{total_segs} 段{source_label}")
+                    if transcript_source == "record":
+                        _save_segment_transcript_cache(
+                            output_dir=output_dir,
+                            job_id=job_id,
+                            segment_index=i,
+                            context=segment_cache_context or {},
+                            transcript=transcript,
+                        )
                     all_transcripts.append(f"\n\n### 【第 {i + 1} 段｜{segment_start} – {segment_end}】\n\n{transcript}")
                     update_job_status(
                         job_id, "processing",
-                        f"♻️ 已載入第 {i + 1}/{total_segs} 段既有轉錄",
+                        f"♻️ 已沿用第 {i + 1}/{total_segs} 段既有逐字稿",
                         progress_current=i + 1,
                         progress_total=total_segs,
                     )
@@ -2288,6 +2649,8 @@ def process_audio_task(
                 job_id=job_id,
                 summary_primary_model=summary_primary_model,
                 summary_secondary_model=summary_secondary_model,
+                meeting_date=actual_meeting_date,
+                high_quality=high_quality_summary,
             )
 
         else:
@@ -2306,6 +2669,8 @@ def process_audio_task(
                     segment_index=0,
                     context=segment_cache_context,
                 )
+                if transcript is None:
+                    transcript = existing_segment_transcripts.get(0)
             if transcript is None:
                 update_job_status(job_id, "processing", "📝 正在轉錄音訊逐字稿...")
                 transcript = _transcribe_segment(client, transcription_path, 0, total_segs, job_id, model)
@@ -2351,6 +2716,8 @@ def process_audio_task(
                 job_id=job_id,
                 summary_primary_model=summary_primary_model,
                 summary_secondary_model=summary_secondary_model,
+                meeting_date=actual_meeting_date,
+                high_quality=high_quality_summary,
             )
 
         repair_model = summary_model_used
@@ -2373,20 +2740,24 @@ def process_audio_task(
 
         title = meeting_title or audio_path.stem
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        date_str = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        generated_at = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        meeting_date_str = actual_meeting_date.strftime("%Y/%m/%d")
         output_filename = f"meeting_notes_{audio_path.stem}_{timestamp}.md"
         output_path = output_dir / output_filename
         quality_report = _build_quality_report(audio_report, segment_report, full_transcript)
+        quality_report["summary_quality_mode"] = "high" if high_quality_summary else "standard"
 
         seg_note = f"（分 {total_segs} 段處理）" if is_segmented else ""
         frontmatter = f"""---
 title: 會議記錄 - {title}
-date: {date_str}
+date: {meeting_date_str}
+generated_at: {generated_at}
 source_audio: {audio_path.name}
 generated_by: AI 語音會議助理 Backend{seg_note}
 transcription_model: {model}
 summary_model: {summary_model_used}
 summary_fallback_model: {summary_secondary_model}
+summary_quality_mode: {'high' if high_quality_summary else 'standard'}
 job_id: {job_id}
 quality_score: {quality_report['score']}
 quality_label: {quality_report['label']}
@@ -2403,7 +2774,7 @@ quality_label: {quality_report['label']}
         summary_preview = _extract_summary_preview(meeting_content)
         save_meeting(
             title=title,
-            date=datetime.now().strftime("%Y/%m/%d"),
+            date=meeting_date_str,
             source_audio=audio_path.name,
             output_path=str(output_path),
             summary=summary_preview,
