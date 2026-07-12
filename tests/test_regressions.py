@@ -3505,6 +3505,63 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(audio_response.status_code, 200)
         self.assertIn("audio/webm", audio_response.headers.get("content-type", ""))
 
+    def test_source_media_type_uses_ffprobe_when_profile_is_unknown(self):
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = Path(tmpdir) / "recording.webm"
+            source_path.write_bytes(b"webm")
+            record = {"source_audio": str(source_path), "quality_report": {}}
+
+            with mock.patch.object(main.shutil, "which", return_value="ffprobe"), \
+                 mock.patch.object(
+                     main.subprocess,
+                     "run",
+                     return_value=subprocess.CompletedProcess(
+                         args=[],
+                         returncode=0,
+                         stdout='{"streams":[{"codec_type":"video"},{"codec_type":"audio"}]}',
+                         stderr="",
+                     ),
+                 ):
+                self.assertEqual(main._source_media_type(record), "video")
+
+            with mock.patch.object(main.shutil, "which", return_value="ffprobe"), \
+                 mock.patch.object(
+                     main.subprocess,
+                     "run",
+                     return_value=subprocess.CompletedProcess(
+                         args=[],
+                         returncode=0,
+                         stdout='{"streams":[{"codec_type":"audio"}]}',
+                         stderr="",
+                     ),
+                 ):
+                self.assertEqual(main._source_media_type(record), "audio")
+
+    def test_meeting_detail_exposes_source_media_type(self):
+        import backend.main as main
+
+        record = {
+            "id": 7,
+            "title": "錄影會議",
+            "date": "2026/07/12",
+            "source_audio": "screen.webm",
+            "output_path": "meeting.md",
+            "summary": "summary",
+            "job_id": None,
+            "quality_score": None,
+            "quality_label": None,
+            "created_at": datetime(2026, 7, 12, 9, 0, 0),
+            "full_content": "## 一、討論摘要 (Discussion Summary)\nD1 測試",
+            "quality_report": {"recording": {"profile": "video_balanced"}},
+        }
+        with mock.patch.object(main, "get_meeting", return_value=record):
+            response = asgi_request(main.app, "GET", "/meetings/7")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["source_media_type"], "video")
+
     def test_meeting_rerun_api_can_force_only_one_segment(self):
         import backend.main as main
 
@@ -4015,7 +4072,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("↗ 開啟", html)
         self.assertIn("⬇ 下載", html)
         self.assertIn("function isVideoSource", html)
+        self.assertIn("source_media_type", html)
         self.assertIn("<video id=\"source-media-player\"", html)
+        self.assertIn("display: grid;", html)
+        self.assertIn("grid-template-columns: minmax(0, 1fr);", html)
         self.assertIn("function enhanceTranscriptTimecodes", html)
         self.assertIn("function seekSourceAudio", html)
         self.assertIn("/transcript", html)

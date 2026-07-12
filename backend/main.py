@@ -15,8 +15,11 @@ ReDoc：
 
 import asyncio
 import hashlib
+import json
 import os
 import re
+import shutil
+import subprocess
 import uuid
 import logging
 import ipaddress
@@ -118,6 +121,9 @@ TRUST_LOCAL_NETWORK = os.getenv(
     "MEETING_ASSISTANT_TRUST_LOCAL_NETWORK",
     "1",
 ).strip().lower() not in {"0", "false", "no", "off"}
+VIDEO_RECORDING_PROFILES = {"video_balanced"}
+AUDIO_RECORDING_PROFILES = {"audio_standard", "audio_compact"}
+VIDEO_SOURCE_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".mpeg", ".mpg", ".wmv"}
 TRUSTED_LOCAL_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "10.0.0.0/8",
     "172.16.0.0/12",
@@ -626,6 +632,105 @@ def _resolve_meeting_source_audio(record: dict) -> Path:
     )
 
 
+def _recording_profile(record: dict) -> str:
+    quality_report = record.get("quality_report") or {}
+    if not isinstance(quality_report, dict):
+        return ""
+    recording = quality_report.get("recording") or {}
+    if not isinstance(recording, dict):
+        return ""
+    return str(recording.get("profile") or "").strip()
+
+
+def _optional_source_media_path(record: dict) -> Optional[Path]:
+    source_audio = str(record.get("source_audio") or "").strip()
+    if not source_audio:
+        return None
+
+    raw_path = Path(source_audio)
+    candidates = [raw_path] if raw_path.is_absolute() else []
+    source_name = raw_path.name
+    if source_name:
+        candidates.append(SOURCE_AUDIO_DIR / source_name)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _ffprobe_stream_types(path: Path) -> set[str]:
+    ffprobe = (
+        os.getenv("FFPROBE_PATH")
+        or os.getenv("FFPROBE_BINARY")
+        or shutil.which("ffprobe")
+    )
+    if not ffprobe:
+        return set()
+
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+
+    if result.returncode != 0:
+        return set()
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return set()
+    return {
+        str(stream.get("codec_type") or "").strip().lower()
+        for stream in payload.get("streams", [])
+        if isinstance(stream, dict) and stream.get("codec_type")
+    }
+
+
+def _source_media_type(record: dict, source_path: Optional[Path] = None) -> str:
+    profile = _recording_profile(record)
+    if profile in VIDEO_RECORDING_PROFILES:
+        return "video"
+    if profile in AUDIO_RECORDING_PROFILES:
+        return "audio"
+
+    path = source_path or _optional_source_media_path(record)
+    suffix = (path.suffix if path else Path(str(record.get("source_audio") or "")).suffix).lower()
+    if path and suffix in VIDEO_SOURCE_EXTENSIONS | {".webm"}:
+        stream_types = _ffprobe_stream_types(path)
+        if "video" in stream_types:
+            return "video"
+        if "audio" in stream_types:
+            return "audio"
+
+    media_type = SUPPORTED_MEDIA_FORMATS.get(suffix, "")
+    if media_type.startswith("video/"):
+        return "video"
+    return "audio"
+
+
+def _source_media_content_type(record: dict, source_path: Path) -> str:
+    suffix = source_path.suffix.lower()
+    media_kind = _source_media_type(record, source_path)
+    if suffix == ".webm":
+        return "video/webm" if media_kind == "video" else "audio/webm"
+    return SUPPORTED_MEDIA_FORMATS.get(suffix, "application/octet-stream")
+
+
 @app.get(
     "/status/{job_id}",
     response_model=JobStatusResponse,
@@ -932,6 +1037,12 @@ async def get_meeting_detail(meeting_id: int):
             "speaker_labels": quality_report.get("speaker_labels") or [],
         })
 
+    detail_quality_report = quality_report or record.get("quality_report")
+    source_media_type = _source_media_type({
+        **record,
+        "quality_report": detail_quality_report,
+    })
+
     return MeetingDetail(
         id=record["id"],
         title=record["title"],
@@ -945,6 +1056,7 @@ async def get_meeting_detail(meeting_id: int):
         created_at=record["created_at"],
         full_content=record["full_content"],
         quality_report=quality_report or None,
+        source_media_type=source_media_type,
     )
 
 
@@ -970,17 +1082,7 @@ async def get_meeting_source_media(
         raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
 
     audio_path = _resolve_meeting_source_audio(record)
-    suffix = audio_path.suffix.lower()
-    quality_report = record.get("quality_report") or {}
-    recording_profile = (quality_report.get("recording") or {}).get("profile")
-    if suffix == ".webm":
-        media_type = (
-            "audio/webm"
-            if recording_profile in {"audio_standard", "audio_compact"}
-            else "video/webm"
-        )
-    else:
-        media_type = SUPPORTED_MEDIA_FORMATS.get(suffix, "application/octet-stream")
+    media_type = _source_media_content_type(record, audio_path)
     return FileResponse(
         path=audio_path,
         filename=audio_path.name,

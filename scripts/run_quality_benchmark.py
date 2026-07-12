@@ -16,6 +16,12 @@ from pathlib import Path
 from typing import Any
 
 
+def _configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -230,6 +236,7 @@ def format_summary(report: dict[str, Any]) -> str:
 
 
 def main() -> int:
+    _configure_stdio()
     parser = argparse.ArgumentParser(description="Run offline meeting-note quality benchmark.")
     parser.add_argument("manifest", nargs="?", type=Path, help="Path to benchmark manifest JSON.")
     parser.add_argument("--scan-dir", type=Path, help="Scan generated Markdown files in a directory.")
