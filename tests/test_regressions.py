@@ -2293,6 +2293,43 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(searched["quality_label"], "需複核")
         self.assertEqual(searched["quality_warning_count"], 2)
 
+    def test_legacy_meeting_list_infers_quality_warning_count_from_markdown(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "legacy-warning.md"
+        repeated_turns = "\n".join(
+            f"[00:0{index}] **[發言者 A]**：這一句不應該連續重複。"
+            for index in range(4)
+        )
+        output_path.write_text(
+            "## 一、討論摘要 (Discussion Summary)\n"
+            "這是一段沒有 D 編號的摘要。\n"
+            "## 二、最終決議 (Final Decisions)\n"
+            "決議沒有 R 編號。\n"
+            "## 三、待辦事項 (Action Items)\n"
+            "| # | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|\n"
+            "| - | 整理追蹤表 | 發言者 A | 未提及 | 中 |\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "*(註：為節省篇幅，已省略逐字稿中重複內容)*\n"
+            f"{repeated_turns}\n",
+            encoding="utf-8",
+        )
+        meeting_id = database.save_meeting(
+            title="Legacy Warning",
+            date="2026/07/12",
+            source_audio="legacy-warning.webm",
+            output_path=str(output_path),
+            summary="legacy-warning-summary",
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Legacy Warning")[0]
+
+        self.assertIsNone(listed["quality_score"])
+        self.assertIsNone(listed["quality_label"])
+        self.assertGreaterEqual(listed["quality_warning_count"], 5)
+        self.assertEqual(searched["quality_warning_count"], listed["quality_warning_count"])
+
 
 class MeetingEvidenceRegressionTests(unittest.TestCase):
     def _isolated_database(self):

@@ -11,6 +11,7 @@ import json
 import sqlite3
 import logging
 import os
+import re
 import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -40,6 +41,99 @@ DB_PATH = Path(os.getenv("DB_PATH") or Path(__file__).parent.parent / "meetings.
 def _now() -> str:
     """Return a local timestamp in the same format SQLite uses in this project."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _markdown_section(text: str, heading_terms: tuple[str, ...], next_terms: tuple[str, ...]) -> str:
+    heading_pattern = "|".join(re.escape(term) for term in heading_terms)
+    next_pattern = "|".join(re.escape(term) for term in next_terms)
+    if next_pattern:
+        pattern = rf"^##\s*[^\n]*(?:{heading_pattern})[^\n]*\n(?P<body>.*?)(?=^##\s*[^\n]*(?:{next_pattern})|\Z)"
+    else:
+        pattern = rf"^##\s*[^\n]*(?:{heading_pattern})[^\n]*\n(?P<body>.*)\Z"
+    match = re.search(pattern, text or "", flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+    return match.group("body").strip() if match else ""
+
+
+def _markdown_ids(text: str, prefix: str) -> set[str]:
+    return set(re.findall(rf"\b{re.escape(prefix)}\d+\b", text or ""))
+
+
+def _normalize_turn_text(text: str) -> str:
+    normalized = re.sub(r"\s+", "", text.strip().lower())
+    return re.sub(r"[，。,.、；;：:！!？?\-—~「」『』（）()\[\]【】\"'`*_]+", "", normalized)
+
+
+def _has_repeated_transcript_turn_loop(transcript: str, limit: int = 3) -> bool:
+    pattern = re.compile(
+        r"\[\d{1,3}:[0-5]\d\]\s*(?:\*\*\[[^\]]+\]\*\*|\[[^\]]+\])?\s*[：:]?\s*(?P<text>.+)"
+    )
+    current_text = ""
+    current_run = 0
+    for line in (transcript or "").splitlines():
+        match = pattern.search(line)
+        if not match:
+            continue
+        normalized = _normalize_turn_text(match.group("text"))
+        if len(normalized) < 8:
+            current_text = ""
+            current_run = 0
+            continue
+        if normalized == current_text:
+            current_run += 1
+        else:
+            current_text = normalized
+            current_run = 1
+        if current_run > limit:
+            return True
+    return False
+
+
+LEGACY_TRANSCRIPT_OMISSION_PATTERNS = (
+    r"為節省篇幅",
+    r"省略[^。\n]{0,20}逐字稿",
+    r"逐字稿[^。\n]{0,20}省略",
+    r"已過濾[^。\n]{0,20}逐字稿",
+    r"自動過濾後續重複內容",
+)
+
+
+def _legacy_markdown_quality_warning_count(output_path: str) -> int:
+    path = Path(output_path or "")
+    if not path.is_file():
+        return 0
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+
+    summary = _markdown_section(text, ("討論摘要", "Discussion Summary"), ("最終決議", "Final Decisions"))
+    decisions = _markdown_section(text, ("最終決議", "Final Decisions"), ("待辦事項", "Action Items"))
+    actions = _markdown_section(text, ("待辦事項", "Action Items"), ("完整逐字稿", "Verbatim Transcript"))
+    transcript = _markdown_section(text, ("完整逐字稿", "Verbatim Transcript"), ())
+
+    count = 0
+    summary_ids = _markdown_ids(summary, "D")
+    decision_ids = _markdown_ids(decisions, "R")
+    action_ids = _markdown_ids(actions, "A")
+    discussion_refs = _markdown_ids(decisions + "\n" + actions, "D")
+    decision_refs = _markdown_ids(actions, "R")
+
+    if summary.strip() and not summary_ids:
+        count += 1
+    if decisions.strip() and not decision_ids:
+        count += 1
+    if actions.strip() and not action_ids:
+        count += 1
+    if discussion_refs - summary_ids:
+        count += 1
+    if decision_refs - decision_ids:
+        count += 1
+    if transcript and any(re.search(pattern, transcript, flags=re.IGNORECASE) for pattern in LEGACY_TRANSCRIPT_OMISSION_PATTERNS):
+        count += 1
+    if _has_repeated_transcript_turn_loop(transcript):
+        count += 1
+
+    return count
 
 
 def _transient_retry_delay_seconds() -> int:
@@ -1111,6 +1205,8 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         warnings = quality_report.get("warnings") or []
         if isinstance(warnings, list):
             warning_count = len(warnings)
+    if not warning_count and record.get("quality_score") is None and not record.get("quality_label"):
+        warning_count = _legacy_markdown_quality_warning_count(str(record.get("output_path") or ""))
     record["quality_warning_count"] = warning_count
     return record
 
