@@ -113,14 +113,80 @@ def run_manifest(manifest_path: Path, min_score: float) -> dict[str, Any]:
     }
 
 
+def _markdown_files(scan_dir: Path, recursive: bool = False, limit: int = 0) -> list[Path]:
+    pattern = "**/*.md" if recursive else "*.md"
+    paths = [path for path in scan_dir.glob(pattern) if path.is_file()]
+    paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return paths[:limit] if limit > 0 else paths
+
+
+def run_scan_dir(
+    scan_dir: Path,
+    min_score: float,
+    *,
+    recursive: bool = False,
+    limit: int = 0,
+    expected: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    paths = _markdown_files(scan_dir, recursive=recursive, limit=limit)
+    results = []
+    for markdown_path in paths:
+        result = score_markdown(_read_text(markdown_path), expected or {})
+        result.update({"id": markdown_path.stem, "markdown_path": str(markdown_path)})
+        results.append(result)
+    average = round(sum(result["score"] for result in results) / len(results), 1) if results else 0.0
+    return {
+        "scan_dir": str(scan_dir),
+        "recursive": recursive,
+        "case_count": len(results),
+        "average_score": average,
+        "min_score": min_score,
+        "passed": bool(results) and all(result["score"] >= min_score for result in results),
+        "results": results,
+    }
+
+
+def format_summary(report: dict[str, Any]) -> str:
+    lines = [
+        (
+            f"passed={report['passed']} "
+            f"case_count={report['case_count']} "
+            f"average_score={report['average_score']} "
+            f"min_score={report['min_score']}"
+        )
+    ]
+    for result in report.get("results", []):
+        failed = ", ".join(item["name"] for item in result.get("failed", [])) or "-"
+        path = result.get("markdown_path", "")
+        lines.append(f"{result['score']:>5.1f}  {result['id']}  failed={failed}  path={path}")
+    return "\n".join(lines)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run offline meeting-note quality benchmark.")
-    parser.add_argument("manifest", type=Path, help="Path to benchmark manifest JSON.")
+    parser.add_argument("manifest", nargs="?", type=Path, help="Path to benchmark manifest JSON.")
+    parser.add_argument("--scan-dir", type=Path, help="Scan generated Markdown files in a directory.")
+    parser.add_argument("--recursive", action="store_true", help="Recursively scan --scan-dir for Markdown files.")
+    parser.add_argument("--limit", type=int, default=0, help="Limit scan mode to the newest N Markdown files.")
     parser.add_argument("--min-score", type=float, default=80.0, help="Minimum passing score per case.")
+    parser.add_argument("--format", choices=("json", "summary"), default="json", help="Output format.")
     args = parser.parse_args()
 
-    report = run_manifest(args.manifest, args.min_score)
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if args.scan_dir:
+        report = run_scan_dir(
+            args.scan_dir,
+            args.min_score,
+            recursive=args.recursive,
+            limit=max(0, args.limit),
+        )
+    else:
+        if not args.manifest:
+            parser.error("manifest is required unless --scan-dir is provided")
+        report = run_manifest(args.manifest, args.min_score)
+    if args.format == "summary":
+        print(format_summary(report))
+    else:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["passed"] else 1
 
 

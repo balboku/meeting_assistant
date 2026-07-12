@@ -13,6 +13,12 @@
 .venv/bin/python scripts/run_quality_benchmark.py benchmarks/meeting_quality/cases.example.json --min-score 80
 ```
 
+也可以直接掃描目前產出的 Markdown 會議紀錄，先抓出需要人工複核的低分檔案：
+
+```bash
+.venv/bin/python scripts/run_quality_benchmark.py --scan-dir output --limit 20 --min-score 75 --format summary
+```
+
 ## 可檢查項目
 
 - 四大區塊是否存在：討論摘要、最終決議、待辦事項、完整逐字稿。

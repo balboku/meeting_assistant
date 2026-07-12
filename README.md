@@ -127,7 +127,10 @@ BASE_URL=http://127.0.0.1:8001 scripts/smoke_e2e.sh
 
 ```bash
 .venv/bin/python scripts/run_quality_benchmark.py benchmarks/meeting_quality/cases.example.json --min-score 80
+.venv/bin/python scripts/run_quality_benchmark.py --scan-dir output --limit 20 --min-score 75 --format summary
 ```
+
+第一行適合跑人工確認過的固定案例；第二行會掃描最近產出的 Markdown 會議紀錄，快速找出結構或逐字稿品質疑似退步的檔案。
 
 可調整的維運環境變數：
 

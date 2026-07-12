@@ -315,6 +315,72 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
         self.assertEqual(payload["case_count"], 1)
         self.assertGreaterEqual(payload["average_score"], 80)
 
+    def test_quality_benchmark_can_scan_generated_markdown_directory(self):
+        sample = (
+            "## 一、討論摘要 (Discussion Summary)\n\n"
+            "### D1. 測試議題\n- 摘要：保留可追蹤摘要。\n\n"
+            "## 二、最終決議 (Final Decisions)\n\n"
+            "| # | 關聯討論 | 決議 | 依據 | 狀態 |\n"
+            "|---|---|---|---|---|\n"
+            "| R1 | D1 | 確認測試。 | [00:00] | confirmed |\n\n"
+            "## 三、待辦事項 (Action Items)\n\n"
+            "| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|---|---|\n"
+            "| A1 | D1 | R1 | 完成測試。 | 發言者 A | 未提及 | 中 |\n\n"
+            "## 四、完整逐字稿 (Verbatim Transcript)\n\n"
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：測試逐字稿。\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scan_dir = Path(tmpdir)
+            (scan_dir / "meeting-one.md").write_text(sample, encoding="utf-8")
+            (scan_dir / "ignore.txt").write_text("not markdown", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/run_quality_benchmark.py",
+                    "--scan-dir",
+                    str(scan_dir),
+                    "--limit",
+                    "1",
+                    "--min-score",
+                    "80",
+                ],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["passed"])
+        self.assertEqual(payload["case_count"], 1)
+        self.assertEqual(payload["results"][0]["id"], "meeting-one")
+        self.assertGreaterEqual(payload["results"][0]["score"], 80)
+
+    def test_quality_benchmark_summary_format_is_human_readable(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_quality_benchmark.py",
+                "benchmarks/meeting_quality/cases.example.json",
+                "--min-score",
+                "80",
+                "--format",
+                "summary",
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertIn("passed=True", result.stdout)
+        self.assertIn("golden_meeting_structure", result.stdout)
+        self.assertIn("failed=-", result.stdout)
+
     def test_ci_runs_unit_tests_and_security_scan(self):
         ci = ROOT / ".github" / "workflows" / "ci.yml"
         security_scan = ROOT / "scripts" / "security_scan.py"
