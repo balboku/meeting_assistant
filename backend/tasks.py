@@ -15,6 +15,9 @@ import re
 import time
 import json
 import logging
+import hashlib
+import math
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
@@ -57,8 +60,17 @@ MAX_UPLOAD_WAIT_SECONDS = 600
 POLLING_INTERVAL        = 3
 SEGMENT_MINUTES         = 10
 TIMESTAMP_PATTERN       = re.compile(r"\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\d)\]")
-SEGMENT_CACHE_VERSION   = 2
+SEGMENT_CACHE_VERSION   = 3
 SEGMENT_CACHE_DIRNAME   = "segment_cache"
+SEGMENT_TARGET_SECONDS  = SEGMENT_MINUTES * 60
+SEGMENT_SILENCE_WINDOW_SECONDS = int(os.getenv("SEGMENT_SILENCE_WINDOW_SECONDS", "45"))
+SEGMENT_OVERLAP_SECONDS = int(os.getenv("SEGMENT_OVERLAP_SECONDS", "2"))
+AUDIO_PREPROCESSING_ENABLED = os.getenv("AUDIO_PREPROCESSING", "1").strip().lower() not in {
+    "0", "false", "no", "off",
+}
+AUDIO_PREPROCESSING_VERSION = 1
+AUDIO_MIN_DBFS = float(os.getenv("AUDIO_MIN_DBFS", "-55"))
+AUDIO_NORMALIZE_BELOW_DBFS = float(os.getenv("AUDIO_NORMALIZE_BELOW_DBFS", "-28"))
 SEGMENT_COMPLETENESS_GRACE_SECONDS = 120
 SEGMENT_RECOVERY_SPLIT_SECONDS = (300, 180, 120, 60, 30, 15, 10, 5)
 TRANSCRIPT_SECTION_HEADING = "## 📝 四、完整逐字稿 (Verbatim Transcript)"
@@ -97,6 +109,15 @@ TRANSCRIPT_OMISSION_MARKERS = (
 
 class JobCancelled(RuntimeError):
     """Raised when a persisted job receives a cancellation request."""
+
+
+@dataclass(frozen=True)
+class AudioSlice:
+    """Temporary audio segment with its absolute position in the meeting."""
+
+    path: Path
+    start_seconds: int
+    end_seconds: int
 
 
 def _raise_if_cancelled(job_id: str) -> None:
@@ -653,11 +674,43 @@ def _segment_cache_file(output_dir: Path, job_id: str, segment_index: int) -> Pa
     return _segment_cache_dir(output_dir, job_id) / f"segment_{segment_index + 1:03d}.json"
 
 
+def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _shared_segment_cache_file(
+    output_dir: Path,
+    context: dict[str, Any],
+    segment_index: int,
+) -> Optional[Path]:
+    source_sha256 = str(context.get("source_audio_sha256") or "").strip()
+    model = re.sub(r"[^A-Za-z0-9_.-]", "_", str(context.get("model") or "model"))
+    if not source_sha256:
+        return None
+    profile_data = {
+        "version": context.get("cache_version", SEGMENT_CACHE_VERSION),
+        "model": model,
+        "source": source_sha256,
+        "bounds": context.get("segment_bounds") or [],
+        "preprocessing": context.get("audio_preprocessing_version"),
+    }
+    profile_hash = hashlib.sha256(
+        json.dumps(profile_data, sort_keys=True, ensure_ascii=True).encode("utf-8")
+    ).hexdigest()[:16]
+    profile = f"{source_sha256[:16]}_{model}_{profile_hash}"
+    return Path(output_dir) / SEGMENT_CACHE_DIRNAME / "shared" / profile / f"segment_{segment_index + 1:03d}.json"
+
+
 def _segment_cache_context(
     audio_path: Path,
     model: str,
     total_segments: int,
     segment_minutes: int,
+    segment_bounds: Optional[list[list[int]]] = None,
 ) -> dict[str, Any]:
     stat = audio_path.stat()
     try:
@@ -671,9 +724,12 @@ def _segment_cache_context(
         "source_audio_name": audio_path.name,
         "source_audio_size": stat.st_size,
         "source_audio_mtime_ns": stat.st_mtime_ns,
+        "source_audio_sha256": _sha256_file(audio_path),
         "model": model,
         "total_segments": total_segments,
         "segment_minutes": segment_minutes,
+        "segment_bounds": segment_bounds or [],
+        "audio_preprocessing_version": AUDIO_PREPROCESSING_VERSION,
     }
 
 
@@ -693,42 +749,54 @@ def _load_segment_transcript_cache(
     segment_index: int,
     context: dict[str, Any],
 ) -> Optional[str]:
-    cache_file = _segment_cache_file(output_dir, job_id, segment_index)
-    if not cache_file.is_file():
-        return None
+    cache_files = [_segment_cache_file(output_dir, job_id, segment_index)]
+    shared_file = _shared_segment_cache_file(output_dir, context, segment_index)
+    if shared_file is not None and shared_file not in cache_files:
+        cache_files.append(shared_file)
 
-    try:
-        payload = json.loads(cache_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("[%s] ⚠️  分段快取讀取失敗，將重新轉錄：%s", job_id, exc)
-        return None
-
-    if not isinstance(payload, dict) or not _segment_cache_matches(payload, context, segment_index):
-        logger.info("[%s] ♻️  分段 %s 快取與目前音檔/模型不符，略過", job_id, segment_index + 1)
-        return None
-
-    transcript = payload.get("transcript")
-    if not isinstance(transcript, str):
-        return None
-    issues = _segment_transcript_quality_issues(
-        transcript=transcript,
-        segment_index=segment_index,
-        total_segments=int(context.get("total_segments") or 1),
-        segment_minutes=int(context.get("segment_minutes") or SEGMENT_MINUTES),
-    )
-    if issues:
-        logger.warning(
-            "[%s] ⚠️  第 %s 段快取不完整，將重新轉錄：%s",
-            job_id,
-            segment_index + 1,
-            "；".join(issues),
-        )
+    for cache_file in cache_files:
+        if not cache_file.is_file():
+            continue
         try:
-            cache_file.unlink()
-        except OSError:
-            pass
-        return None
-    return transcript
+            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("[%s] ⚠️  分段快取讀取失敗，將重新轉錄：%s", job_id, exc)
+            continue
+
+        if not isinstance(payload, dict) or not _segment_cache_matches(payload, context, segment_index):
+            logger.info("[%s] ♻️  分段 %s 快取與目前音檔/模型不符，略過", job_id, segment_index + 1)
+            continue
+
+        transcript = payload.get("transcript")
+        if not isinstance(transcript, str):
+            continue
+        bounds = context.get("segment_bounds") or []
+        expected_end = None
+        if segment_index < len(bounds) and len(bounds[segment_index]) >= 2:
+            expected_end = int(bounds[segment_index][1])
+        issues = _segment_transcript_quality_issues(
+            transcript=transcript,
+            segment_index=segment_index,
+            total_segments=int(context.get("total_segments") or 1),
+            segment_minutes=int(context.get("segment_minutes") or SEGMENT_MINUTES),
+            expected_end_seconds=expected_end,
+        )
+        if issues:
+            logger.warning(
+                "[%s] ⚠️  第 %s 段快取不完整，將重新轉錄：%s",
+                job_id,
+                segment_index + 1,
+                "；".join(issues),
+            )
+            try:
+                cache_file.unlink()
+            except OSError:
+                pass
+            continue
+        if cache_file == shared_file:
+            logger.info("[%s] ♻️  第 %s 段使用相同音檔的共用快取", job_id, segment_index + 1)
+        return transcript
+    return None
 
 
 def _save_segment_transcript_cache(
@@ -738,21 +806,24 @@ def _save_segment_transcript_cache(
     context: dict[str, Any],
     transcript: str,
 ) -> Path:
-    cache_file = _segment_cache_file(output_dir, job_id, segment_index)
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         **context,
         "segment_index": segment_index,
         "transcript": transcript,
         "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
-    temp_file = cache_file.with_suffix(".tmp")
-    temp_file.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temp_file.replace(cache_file)
-    return cache_file
+    cache_files = [_segment_cache_file(output_dir, job_id, segment_index)]
+    shared_file = _shared_segment_cache_file(output_dir, context, segment_index)
+    if shared_file is not None and shared_file not in cache_files:
+        cache_files.append(shared_file)
+
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    for cache_file in cache_files:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = cache_file.with_suffix(".tmp")
+        temp_file.write_text(serialized, encoding="utf-8")
+        temp_file.replace(cache_file)
+    return cache_files[0]
 
 
 SUPPORTED_MEDIA_FORMATS = {
@@ -1144,7 +1215,129 @@ def _repair_meeting_content_if_needed(
     return repaired
 
 
-def _split_audio_to_segments(audio_path: Path, segment_minutes: int = 10) -> list[Path]:
+def _prepare_audio_for_transcription(
+    audio_path: Path,
+    temp_dir: Path,
+    job_id: str,
+) -> tuple[Path, dict[str, Any]]:
+    """Inspect audio locally and normalize only recordings that are unusually quiet."""
+    _configure_ffmpeg_tools()
+    from pydub import AudioSegment, effects, silence
+
+    ffmpeg_path = os.getenv("FFMPEG_PATH") or os.getenv("FFMPEG_BINARY")
+    if ffmpeg_path and Path(ffmpeg_path).is_file():
+        AudioSegment.converter = ffmpeg_path
+
+    try:
+        with audio_path.open("rb") as source_handle:
+            audio = AudioSegment.from_file(
+                source_handle,
+                format=audio_path.suffix.lower().lstrip(".") or None,
+            )
+    except Exception as exc:
+        logger.warning(
+            "[%s] ⚠️  本機音訊預檢無法解碼，沿用原檔交由既有流程處理：%s",
+            job_id,
+            str(exc).splitlines()[0],
+        )
+        return audio_path, {
+            "duration_seconds": None,
+            "channels": None,
+            "sample_rate": None,
+            "average_dbfs": None,
+            "max_dbfs": None,
+            "silence_ratio": None,
+            "preprocessed": False,
+            "warnings": ["本機音訊預檢無法解碼，已沿用原檔。"],
+        }
+    duration_seconds = max(1, math.ceil(len(audio) / 1000))
+    dbfs = float(audio.dBFS)
+    max_dbfs = float(audio.max_dBFS)
+    report: dict[str, Any] = {
+        "duration_seconds": duration_seconds,
+        "channels": audio.channels,
+        "sample_rate": audio.frame_rate,
+        "average_dbfs": round(dbfs, 1) if math.isfinite(dbfs) else None,
+        "max_dbfs": round(max_dbfs, 1) if math.isfinite(max_dbfs) else None,
+        "preprocessed": False,
+        "warnings": [],
+    }
+
+    if (
+        not math.isfinite(dbfs)
+        or (
+            dbfs <= AUDIO_MIN_DBFS
+            and (not math.isfinite(max_dbfs) or max_dbfs <= -40.0)
+        )
+    ):
+        raise RuntimeError("音訊幾乎沒有可辨識聲音，已停止送出模型以避免浪費免費額度。")
+    if dbfs <= AUDIO_MIN_DBFS:
+        report["warnings"].append("錄音平均音量極低，但仍偵測到可辨識峰值，已保守繼續處理。")
+
+    silence_threshold = max(-55.0, min(-32.0, dbfs - 16.0))
+    silent_ranges = silence.detect_silence(
+        audio,
+        min_silence_len=500,
+        silence_thresh=silence_threshold,
+        seek_step=100,
+    )
+    silent_ms = sum(max(0, end - start) for start, end in silent_ranges)
+    silence_ratio = min(1.0, silent_ms / max(1, len(audio)))
+    report["silence_ratio"] = round(silence_ratio, 3)
+    if duration_seconds >= 30 and silence_ratio >= 0.995:
+        raise RuntimeError("音訊有 99.5% 以上為靜音，已停止送出模型以避免浪費免費額度。")
+
+    if math.isfinite(max_dbfs) and max_dbfs >= -0.1:
+        report["warnings"].append("偵測到可能的爆音；原始音檔已保留，重要內容請抽查。")
+
+    if not AUDIO_PREPROCESSING_ENABLED or dbfs >= AUDIO_NORMALIZE_BELOW_DBFS:
+        return audio_path, report
+
+    cleaned = effects.normalize(audio.high_pass_filter(70), headroom=1.5)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    prepared_path = temp_dir / f"_prepared_{_safe_segment_cache_name(job_id)}.mp3"
+    cleaned.export(str(prepared_path), format="mp3", parameters=["-q:a", "2"])
+    report["preprocessed"] = True
+    report["warnings"].append("原錄音音量偏低，轉錄時已使用本機正規化副本。")
+    logger.info(
+        "[%s] 🎚️  音量偏低（%.1f dBFS），已建立本機正規化轉錄副本",
+        job_id,
+        dbfs,
+    )
+    return prepared_path, report
+
+
+def _smart_segment_boundaries(audio, segment_ms: int) -> list[int]:
+    """Choose cuts near quiet passages while keeping segments close to the target size."""
+    from pydub import silence
+
+    duration_ms = len(audio)
+    if duration_ms <= segment_ms:
+        return [0, duration_ms]
+
+    search_ms = max(0, SEGMENT_SILENCE_WINDOW_SECONDS) * 1000
+    threshold = max(-55.0, min(-32.0, float(audio.dBFS) - 14.0))
+    boundaries = [0]
+    while boundaries[-1] + segment_ms < duration_ms:
+        target = boundaries[-1] + segment_ms
+        window_start = max(boundaries[-1] + segment_ms // 2, target - search_ms)
+        window_end = min(duration_ms, target + search_ms)
+        quiet_ranges = silence.detect_silence(
+            audio[window_start:window_end],
+            min_silence_len=350,
+            silence_thresh=threshold,
+            seek_step=25,
+        )
+        candidates = [window_start + (start + end) // 2 for start, end in quiet_ranges]
+        cut = min(candidates, key=lambda value: abs(value - target)) if candidates else target
+        if cut <= boundaries[-1] or duration_ms - cut < 1000:
+            cut = target
+        boundaries.append(cut)
+    boundaries.append(duration_ms)
+    return boundaries
+
+
+def _split_audio_to_segments(audio_path: Path, segment_minutes: int = 10) -> list[AudioSlice]:
     """
     將音訊檔切割成等長分段。若切割失敗（pydub 未安裝等），回傳原始路徑。
 
@@ -1168,26 +1361,52 @@ def _split_audio_to_segments(audio_path: Path, segment_minutes: int = 10) -> lis
         segment_ms = segment_minutes * 60 * 1000
 
         if duration_ms <= segment_ms:
-            return [audio_path]  # 夠短，不需切割
+            return [AudioSlice(audio_path, 0, max(1, math.ceil(duration_ms / 1000)))]
 
-        segments = []
+        segments: list[AudioSlice] = []
         base = audio_path.parent / f"_seg_{audio_path.stem}"
         base.parent.mkdir(parents=True, exist_ok=True)
+        boundaries = _smart_segment_boundaries(audio, segment_ms)
+        overlap_ms = max(0, SEGMENT_OVERLAP_SECONDS) * 1000
 
-        for i, start in enumerate(range(0, duration_ms, segment_ms)):
-            chunk = audio[start:start + segment_ms]
+        for i, (boundary_start, boundary_end) in enumerate(zip(boundaries, boundaries[1:])):
+            start = max(0, boundary_start - overlap_ms) if i else 0
+            chunk = audio[start:boundary_end]
             seg_path = audio_path.parent / f"_seg_{audio_path.stem}_{i:03d}.mp3"
             chunk.export(str(seg_path), format="mp3", parameters=["-q:a", "3"])
-            segments.append(seg_path)
+            segments.append(
+                AudioSlice(
+                    path=seg_path,
+                    start_seconds=start // 1000,
+                    end_seconds=max(1, math.ceil(boundary_end / 1000)),
+                )
+            )
 
-        logger.info(f"🔪 音訊已切割為 {len(segments)} 段（每段 {segment_minutes} 分鐘）")
+        logger.info(
+            "🔪 音訊已依靜音位置切割為 %s 段（目標 %s 分鐘，重疊 %s 秒）",
+            len(segments),
+            segment_minutes,
+            SEGMENT_OVERLAP_SECONDS,
+        )
         return segments
     except ImportError:
         logger.warning("⚠️  pydub 未安裝，無法切割音訊，將以整體方式送出")
-        return [audio_path]
+        return [AudioSlice(audio_path, 0, SEGMENT_TARGET_SECONDS)]
     except Exception as e:
         logger.warning(f"⚠️  音訊切割失敗（{e}），改以整體方式送出")
-        return [audio_path]
+        return [AudioSlice(audio_path, 0, SEGMENT_TARGET_SECONDS)]
+
+
+def _coerce_audio_slices(items: list[Any]) -> list[AudioSlice]:
+    """Keep compatibility with tests and integrations that still return plain paths."""
+    slices: list[AudioSlice] = []
+    for index, item in enumerate(items):
+        if isinstance(item, AudioSlice):
+            slices.append(item)
+            continue
+        start = index * SEGMENT_TARGET_SECONDS
+        slices.append(AudioSlice(Path(item), start, start + SEGMENT_TARGET_SECONDS))
+    return slices
 
 
 def _split_audio_to_subsegments(audio_path: Path, chunk_seconds: int) -> list[tuple[Path, int, int]]:
@@ -1518,6 +1737,84 @@ def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
     return payload if isinstance(payload, dict) else None
 
 
+def _validated_summary_timecodes(value: Any, transcript: str) -> list[str]:
+    candidates = value if isinstance(value, list) else [value]
+    available_seconds = sorted({
+        int(match.group("minutes")) * 60 + int(match.group("seconds"))
+        for match in TIMESTAMP_PATTERN.finditer(transcript or "")
+    })
+    if not available_seconds:
+        return [
+            _format_mmss(int(match.group(1)) * 60 + int(match.group(2)))
+            for candidate in candidates
+            if (match := re.search(r"(\d{1,3}):([0-5]\d)", str(candidate or "")))
+        ]
+
+    validated: list[str] = []
+    for candidate in candidates:
+        match = re.search(r"(\d{1,3}):([0-5]\d)", str(candidate or ""))
+        if not match:
+            continue
+        requested = int(match.group(1)) * 60 + int(match.group(2))
+        nearest = min(available_seconds, key=lambda seconds: abs(seconds - requested))
+        if abs(nearest - requested) > 90:
+            continue
+        normalized = _format_mmss(nearest)
+        if normalized not in validated:
+            validated.append(normalized)
+    return validated
+
+
+def _validated_summary_refs(value: Any, prefix: str, allowed: set[str]) -> list[str]:
+    refs = _summary_reference_ids(value, prefix, default="")
+    if not refs:
+        return []
+    return [ref for ref in refs.split("、") if ref in allowed]
+
+
+def _normalize_summary_payload(payload: dict[str, Any], transcript: str) -> dict[str, Any]:
+    """Repair identifiers and evidence references locally without another model call."""
+    discussions: list[Any] = []
+    for index, raw in enumerate(_coerce_summary_items(payload.get("discussion_summary")), start=1):
+        item = dict(raw) if isinstance(raw, dict) else {"summary": raw}
+        item["id"] = f"D{index}"
+        timecodes = item.get("evidence_timecodes") or item.get("timecodes") or item.get("source_timecodes")
+        item["evidence_timecodes"] = _validated_summary_timecodes(timecodes, transcript)
+        discussions.append(item)
+    discussion_ids = {item["id"] for item in discussions}
+
+    decisions: list[Any] = []
+    for index, raw in enumerate(_coerce_summary_items(payload.get("final_decisions")), start=1):
+        item = dict(raw) if isinstance(raw, dict) else {"decision": raw}
+        item["id"] = f"R{index}"
+        refs = item.get("related_discussions") or item.get("discussion_ids") or item.get("related_discussion")
+        item["related_discussions"] = _validated_summary_refs(refs, "D", discussion_ids)
+        status = str(item.get("status") or "pending").strip().lower()
+        item["status"] = status if status in {"confirmed", "pending"} else "pending"
+        decisions.append(item)
+    decision_ids = {item["id"] for item in decisions}
+
+    actions: list[Any] = []
+    for index, raw in enumerate(_coerce_summary_items(payload.get("action_items")), start=1):
+        item = dict(raw) if isinstance(raw, dict) else {"task": raw}
+        item["id"] = f"A{index}"
+        discussion_refs = item.get("related_discussions") or item.get("discussion_ids") or item.get("related_discussion")
+        decision_refs = item.get("related_decisions") or item.get("decision_ids") or item.get("related_decision")
+        item["related_discussions"] = _validated_summary_refs(discussion_refs, "D", discussion_ids)
+        item["related_decisions"] = _validated_summary_refs(decision_refs, "R", decision_ids)
+        source_timecodes = item.get("source_timecodes") or item.get("timecodes")
+        item["source_timecodes"] = _validated_summary_timecodes(source_timecodes, transcript)
+        priority = str(item.get("priority") or "中").strip()
+        item["priority"] = priority if priority in {"高", "中", "低"} else "中"
+        actions.append(item)
+
+    return {
+        "discussion_summary": discussions,
+        "final_decisions": decisions,
+        "action_items": actions,
+    }
+
+
 def _summary_json_to_markdown(payload: dict[str, Any]) -> str:
     discussion_items = _coerce_summary_items(payload.get("discussion_summary"))
     decision_items = _coerce_summary_items(payload.get("final_decisions"))
@@ -1623,10 +1920,10 @@ def _summary_json_to_markdown(payload: dict[str, Any]) -> str:
     return _normalize_domain_terms("\n".join(lines).strip())
 
 
-def _summary_response_to_markdown(text: str) -> str:
+def _summary_response_to_markdown(text: str, full_transcript: str = "") -> str:
     payload = _extract_json_object(text)
     if payload:
-        return _summary_json_to_markdown(payload)
+        return _summary_json_to_markdown(_normalize_summary_payload(payload, full_transcript))
     cleaned = _normalize_domain_terms(clean_hallucinated_loops(text or ""))
     cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
     return cleaned.strip()
@@ -1772,10 +2069,38 @@ def _generate_meeting_content_from_transcript(
         stage="會議摘要生成",
     )
 
-    summary_section = _summary_response_to_markdown(response.text or "")
+    summary_section = _summary_response_to_markdown(response.text or "", full_transcript)
     meeting_content = _replace_transcript_section(summary_section, full_transcript)
     meeting_content = _prepend_transcript_quality_notice(meeting_content, full_transcript)
     return meeting_content, summary_model_used
+
+
+def _build_quality_report(
+    audio_report: dict[str, Any],
+    segment_report: list[dict[str, Any]],
+    full_transcript: str,
+) -> dict[str, Any]:
+    warnings = list(audio_report.get("warnings") or [])
+    silence_ratio = float(audio_report.get("silence_ratio") or 0)
+    if silence_ratio >= 0.8:
+        warnings.append("錄音中靜音比例偏高，建議抽查聲音較小的時段。")
+
+    score = 100
+    score -= min(20, len(warnings) * 5)
+    if silence_ratio >= 0.9:
+        score -= 10
+    score = max(0, score)
+    label = "良好" if score >= 90 else "可用，建議抽查" if score >= 75 else "需人工確認"
+    speakers = sorted(set(re.findall(r"\*\*\[([^\]]+)\]\*\*", full_transcript or "")))
+    return {
+        "score": score,
+        "label": label,
+        "warnings": list(dict.fromkeys(warnings)),
+        "audio": audio_report,
+        "segments": segment_report,
+        "timestamp_count": _timestamp_count(full_transcript),
+        "speaker_labels": speakers,
+    }
 
 
 def process_audio_task(
@@ -1787,6 +2112,7 @@ def process_audio_task(
     cleanup_source_audio: bool = False,
     summary_model: Optional[str] = None,
     summary_fallback_model: Optional[str] = None,
+    force_segment_indices: Optional[list[int]] = None,
 ) -> Optional[Path]:
     """
     主要背景任務函數：接收音檔路徑，執行完整的 AI 會議記錄生成流程。
@@ -1799,6 +2125,9 @@ def process_audio_task(
     client = None
     segment_paths: list[Path] = []
     temporary_segment_paths: list[Path] = []
+    audio_report: dict[str, Any] = {}
+    segment_report: list[dict[str, Any]] = []
+    forced_segments = {int(value) for value in (force_segment_indices or []) if int(value) >= 0}
     summary_primary_model, summary_secondary_model = _resolve_summary_models(
         transcription_model=model,
         summary_model=summary_model,
@@ -1834,13 +2163,35 @@ def process_audio_task(
         _raise_if_cancelled(job_id)
 
         # ------------------------------------------------------------------
-        # 步驟 3：切割音訊（若音訊過長）
+        # 步驟 3：本機音訊檢測、必要時正規化，再依靜音位置切段
         # ------------------------------------------------------------------
-        update_job_status(job_id, "processing", "✂️  正在分析音訊長度...")
-        segment_paths = _split_audio_to_segments(audio_path, segment_minutes=SEGMENT_MINUTES)
-        total_segs = len(segment_paths)
+        update_job_status(job_id, "processing", "🎚️ 正在進行免費的本機音訊品質檢查...")
+        prepared_audio_path, audio_report = _prepare_audio_for_transcription(
+            audio_path,
+            ROOT_DIR / "temp",
+            job_id,
+        )
+        if prepared_audio_path != audio_path:
+            temporary_segment_paths.append(prepared_audio_path)
+
+        raw_segments = _split_audio_to_segments(prepared_audio_path, segment_minutes=SEGMENT_MINUTES)
+        legacy_segment_paths = all(not isinstance(item, AudioSlice) for item in raw_segments)
+        audio_slices = _coerce_audio_slices(raw_segments)
+        segment_paths = [item.path for item in audio_slices]
+        total_segs = len(audio_slices)
         is_segmented = total_segs > 1
-        segment_cache_context = _segment_cache_context(audio_path, model, total_segs, SEGMENT_MINUTES)
+        segment_bounds = (
+            []
+            if legacy_segment_paths
+            else [[item.start_seconds, item.end_seconds] for item in audio_slices]
+        )
+        segment_cache_context = _segment_cache_context(
+            audio_path,
+            model,
+            total_segs,
+            SEGMENT_MINUTES,
+            segment_bounds=segment_bounds,
+        )
 
         # ------------------------------------------------------------------
         # 步驟 4：逐段轉錄（或整體上傳）
@@ -1848,18 +2199,21 @@ def process_audio_task(
         all_transcripts: list[str] = []
 
         if is_segmented:
-            for i, seg_path in enumerate(segment_paths):
+            for i, audio_slice in enumerate(audio_slices):
                 _raise_if_cancelled(job_id)
-                offset_seconds = i * SEGMENT_MINUTES * 60
+                seg_path = audio_slice.path
+                offset_seconds = audio_slice.start_seconds
                 segment_start = _format_mmss(offset_seconds)
-                segment_end = _format_mmss((i + 1) * SEGMENT_MINUTES * 60)
+                segment_end = _format_mmss(audio_slice.end_seconds)
 
-                transcript = _load_segment_transcript_cache(
-                    output_dir=output_dir,
-                    job_id=job_id,
-                    segment_index=i,
-                    context=segment_cache_context or {},
-                )
+                transcript = None
+                if i not in forced_segments:
+                    transcript = _load_segment_transcript_cache(
+                        output_dir=output_dir,
+                        job_id=job_id,
+                        segment_index=i,
+                        context=segment_cache_context or {},
+                    )
                 if transcript is not None:
                     logger.info(f"[{job_id}] ♻️  使用第 {i + 1}/{total_segs} 段轉錄快取")
                     all_transcripts.append(f"\n\n### 【第 {i + 1} 段｜{segment_start} – {segment_end}】\n\n{transcript}")
@@ -1869,6 +2223,13 @@ def process_audio_task(
                         progress_current=i + 1,
                         progress_total=total_segs,
                     )
+                    segment_report.append({
+                        "index": i,
+                        "start_seconds": audio_slice.start_seconds,
+                        "end_seconds": audio_slice.end_seconds,
+                        "status": "reused",
+                        "issues": [],
+                    })
                     continue
 
                 update_job_status(
@@ -1887,7 +2248,7 @@ def process_audio_task(
                     job_id,
                     model,
                     offset_seconds=offset_seconds,
-                    duration_seconds=SEGMENT_MINUTES * 60,
+                    duration_seconds=max(1, audio_slice.end_seconds - audio_slice.start_seconds),
                     is_last_segment=i >= total_segs - 1,
                     speaker_context=speaker_context,
                     temp_segment_paths=temporary_segment_paths,
@@ -1900,6 +2261,13 @@ def process_audio_task(
                     transcript=transcript,
                 )
                 all_transcripts.append(f"\n\n### 【第 {i + 1} 段｜{segment_start} – {segment_end}】\n\n{transcript}")
+                segment_report.append({
+                    "index": i,
+                    "start_seconds": audio_slice.start_seconds,
+                    "end_seconds": audio_slice.end_seconds,
+                    "status": "rerun" if i in forced_segments else "transcribed",
+                    "issues": [],
+                })
                 update_job_status(
                     job_id, "processing",
                     f"✅ 已完成第 {i + 1}/{total_segs} 段音訊轉錄",
@@ -1925,18 +2293,22 @@ def process_audio_task(
         else:
             # 短音訊：也走雙模型，先產生完整逐字稿，再交給摘要模型整理。
             _raise_if_cancelled(job_id)
-            file_size_mb = audio_path.stat().st_size / (1024 * 1024)
+            audio_slice = audio_slices[0]
+            transcription_path = audio_slice.path
+            file_size_mb = transcription_path.stat().st_size / (1024 * 1024)
             logger.info(f"[{job_id}] 🎙 轉錄單段音檔（{file_size_mb:.2f} MB；模型：{model}）...")
 
-            transcript = _load_segment_transcript_cache(
-                output_dir=output_dir,
-                job_id=job_id,
-                segment_index=0,
-                context=segment_cache_context,
-            )
+            transcript = None
+            if 0 not in forced_segments:
+                transcript = _load_segment_transcript_cache(
+                    output_dir=output_dir,
+                    job_id=job_id,
+                    segment_index=0,
+                    context=segment_cache_context,
+                )
             if transcript is None:
                 update_job_status(job_id, "processing", "📝 正在轉錄音訊逐字稿...")
-                transcript = _transcribe_segment(client, audio_path, 0, total_segs, job_id, model)
+                transcript = _transcribe_segment(client, transcription_path, 0, total_segs, job_id, model)
                 _raise_if_segment_transcript_incomplete(
                     transcript=transcript,
                     segment_index=0,
@@ -1951,15 +2323,25 @@ def process_audio_task(
                     transcript=transcript,
                 )
                 update_job_status(job_id, "processing", "✅ 已完成音訊逐字稿轉錄")
+                segment_status = "rerun" if 0 in forced_segments else "transcribed"
             else:
                 logger.info(f"[{job_id}] ♻️  使用單段轉錄快取")
                 update_job_status(job_id, "processing", "♻️ 已載入既有逐字稿轉錄")
+                segment_status = "reused"
+
+            segment_report.append({
+                "index": 0,
+                "start_seconds": audio_slice.start_seconds,
+                "end_seconds": audio_slice.end_seconds,
+                "status": segment_status,
+                "issues": [],
+            })
 
             full_transcript = _format_transcript_segment(
                 0,
                 total_segs,
                 0,
-                None,
+                None if legacy_segment_paths else audio_slice.end_seconds,
                 transcript,
             )
             _raise_if_full_transcript_unsafe(full_transcript, job_id)
@@ -1994,6 +2376,7 @@ def process_audio_task(
         date_str = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
         output_filename = f"meeting_notes_{audio_path.stem}_{timestamp}.md"
         output_path = output_dir / output_filename
+        quality_report = _build_quality_report(audio_report, segment_report, full_transcript)
 
         seg_note = f"（分 {total_segs} 段處理）" if is_segmented else ""
         frontmatter = f"""---
@@ -2005,6 +2388,8 @@ transcription_model: {model}
 summary_model: {summary_model_used}
 summary_fallback_model: {summary_secondary_model}
 job_id: {job_id}
+quality_score: {quality_report['score']}
+quality_label: {quality_report['label']}
 ---
 
 """
@@ -2021,7 +2406,9 @@ job_id: {job_id}
             date=datetime.now().strftime("%Y/%m/%d"),
             source_audio=audio_path.name,
             output_path=str(output_path),
-            summary=summary_preview
+            summary=summary_preview,
+            job_id=job_id,
+            quality_report=quality_report,
         )
 
         # ------------------------------------------------------------------

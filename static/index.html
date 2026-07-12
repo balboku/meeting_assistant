@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AI 語音會議助理 · 歷史記錄</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png" />
+  <link rel="shortcut icon" href="/static/favicon.ico" />
   <script src="/static/vendor/marked.min.js"></script>
   <script src="/static/vendor/purify.min.js"></script>
   <style>
@@ -47,9 +49,13 @@
       position: sticky; top: 0; z-index: 100;
       backdrop-filter: blur(8px);
     }
-    .header-left { display: flex; align-items: center; gap: 12px; }
+    .header-left { display: flex; align-items: center; gap: 14px; min-width: 0; }
+    .brand-logo {
+      width: 46px; height: 46px; object-fit: contain;
+      flex-shrink: 0; display: block;
+    }
     .logo { font-size: 22px; font-weight: 700; color: var(--blue);
-            letter-spacing: -0.5px; }
+            letter-spacing: -0.5px; line-height: 1.2; }
     .logo span { color: var(--text-dim); font-weight: 400; font-size: 14px; }
     .badge {
       background: var(--blue-dim); color: var(--blue);
@@ -357,6 +363,24 @@
       display: flex; align-items: center; justify-content: flex-end;
       gap: 10px; flex-wrap: wrap; flex-shrink: 0;
     }
+    .quality-strip {
+      width: 100%; max-width: 1280px; margin: 0 auto 22px;
+      padding: 0 0 18px; border-bottom: 1px solid var(--border);
+    }
+    .quality-summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .quality-score { color: var(--green); font-size: 16px; font-weight: 700; }
+    .quality-warning { color: var(--yellow); font-size: 13px; line-height: 1.6; }
+    .segment-status-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .segment-status {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+      color: var(--text-mid); font-size: 12px;
+    }
+    .segment-status button {
+      border: 0; background: transparent; color: var(--blue); cursor: pointer;
+      padding: 2px 4px; font: inherit;
+    }
+    .segment-status button:disabled { opacity: 0.55; cursor: wait; }
     .document-view {
       width: 100%;
       max-width: 1280px;
@@ -655,7 +679,8 @@
   <!-- Header -->
   <header>
     <div class="header-left">
-      <div class="logo">🎙 AI 會議助理 <span>· 歷史記錄</span></div>
+      <img class="brand-logo" src="/static/favicon.png" alt="MAXIMA" />
+      <div class="logo">AI 會議助理 <span>· 歷史記錄</span></div>
       <div class="badge">Powered by Gemini</div>
     </div>
     <div class="stats">
@@ -990,13 +1015,16 @@ async function deleteMeeting(event, id) {
 }
 
 // ── 重跑會議紀錄 ────────────────────────────────────────────────────
-async function rerunMeeting(id) {
+async function rerunMeeting(id, segmentIndex = null) {
   if (!id) return;
-  if (!confirm('確定要用原始音檔重跑這份會議紀錄嗎？\n完成後會產生一筆新的會議紀錄，原本這筆會保留。')) {
+  const segmentText = segmentIndex === null ? '完整重跑' : `只重跑第 ${segmentIndex + 1} 段`;
+  if (!confirm(`確定要${segmentText}嗎？\n完成後會產生一筆新的會議紀錄，原本這筆會保留。`)) {
     return;
   }
 
-  const button = document.getElementById('rerun-meeting-button');
+  const button = segmentIndex === null
+    ? document.getElementById('rerun-meeting-button')
+    : document.getElementById(`rerun-segment-${segmentIndex}`);
   const originalButtonText = button?.innerHTML;
   if (button) {
     button.disabled = true;
@@ -1004,7 +1032,12 @@ async function rerunMeeting(id) {
   }
 
   try {
-    const res = await fetch(`${API}/meetings/${id}/rerun`, { method: 'POST' });
+    const options = { method: 'POST' };
+    if (segmentIndex !== null) {
+      options.headers = { 'Content-Type': 'application/json' };
+      options.body = JSON.stringify({ segments: [segmentIndex] });
+    }
+    const res = await fetch(`${API}/meetings/${id}/rerun`, options);
     if (!res.ok) throw new Error(await apiErrorMessage(res));
     const data = await res.json();
     await loadJobs();
@@ -1018,6 +1051,38 @@ async function rerunMeeting(id) {
       button.innerHTML = originalButtonText;
     }
   }
+}
+
+function clockText(totalSeconds = 0) {
+  const seconds = Math.max(0, Number(totalSeconds) || 0);
+  const minutes = Math.floor(seconds / 60);
+  return `${String(minutes).padStart(2, '0')}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
+}
+
+function renderQualityReport(meeting) {
+  const report = meeting.quality_report;
+  if (!report) return '';
+  const warnings = (report.warnings || [])
+    .map(warning => `<div class="quality-warning">${escapeHtml(warning)}</div>`)
+    .join('');
+  const segments = (report.segments || []).map(segment => {
+    const index = Number(segment.index) || 0;
+    const state = segment.status === 'reused' ? '沿用快取' : segment.status === 'rerun' ? '已重跑' : '已轉錄';
+    return `<div class="segment-status">
+      <span>第 ${index + 1} 段 · ${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)} · ${escapeHtml(state)}</span>
+      <button id="rerun-segment-${index}" title="只重跑這一段" onclick="rerunMeeting(${meeting.id}, ${index})">↻ 重跑</button>
+    </div>`;
+  }).join('');
+  return `<div class="quality-strip">
+    <div class="quality-summary">
+      <span class="quality-score">品質 ${escapeHtml(report.score)} / 100</span>
+      <span>${escapeHtml(report.label || '')}</span>
+      <span class="meta-chip">${escapeHtml((report.speaker_labels || []).length)} 個發言者標籤</span>
+      <span class="meta-chip">${escapeHtml(report.timestamp_count || 0)} 個時間戳</span>
+    </div>
+    ${warnings}
+    <div class="segment-status-list">${segments}</div>
+  </div>`;
 }
 
 // ── 上傳補充資料 ────────────────────────────────────────────────────
@@ -1145,6 +1210,7 @@ async function openDetail(id) {
           <div class="meta-chip"><span class="icon">⏰</span>${formatDate(r.created_at)}</div>
         </div>
       </div>
+      ${renderQualityReport(r)}
       <div class="document-view">
         <div class="md-content">${html}</div>
       </div>

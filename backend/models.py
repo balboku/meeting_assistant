@@ -161,6 +161,9 @@ class MeetingRecord(BaseModel):
     source_audio: str = Field(..., description="原始音檔名")
     output_path: str = Field(..., description="Markdown 檔案路徑")
     summary_preview: Optional[str] = Field(None, description="摘要前 200 字預覽")
+    job_id: Optional[str] = Field(None, description="產生此會議記錄的任務 ID")
+    quality_score: Optional[int] = Field(None, description="本機品質檢查分數")
+    quality_label: Optional[str] = Field(None, description="本機品質檢查結果")
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -169,6 +172,12 @@ class MeetingRecord(BaseModel):
 class MeetingDetail(MeetingRecord):
     """會議記錄完整內容（用於單筆查詢）"""
     full_content: str = Field(..., description="完整 Markdown 會議記錄")
+    quality_report: Optional[dict] = Field(None, description="音訊與逐段品質報告")
+
+
+class MeetingRerunRequest(BaseModel):
+    """Optionally rerun only selected zero-based transcript segments."""
+    segments: Optional[list[int]] = Field(None, description="要強制重跑的零起算分段索引；省略代表全部重跑")
 
 
 class MeetingListResponse(BaseModel):

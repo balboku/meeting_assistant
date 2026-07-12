@@ -187,6 +187,20 @@ def _ensure_job_events_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_meeting_quality_columns(conn: sqlite3.Connection) -> None:
+    """Add local quality-report fields to existing databases in place."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(meetings)").fetchall()}
+    columns = {
+        "job_id": "TEXT",
+        "quality_score": "INTEGER",
+        "quality_label": "TEXT",
+        "quality_report_json": "TEXT",
+    }
+    for name, definition in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE meetings ADD COLUMN {name} {definition}")
+
+
 # =============================================================================
 # 資料庫連線管理
 # =============================================================================
@@ -278,6 +292,7 @@ def init_db() -> None:
                 created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
             )
         """)
+        _ensure_meeting_quality_columns(conn)
 
         # 任務狀態追蹤表
         conn.execute(f"""
@@ -865,7 +880,9 @@ def save_meeting(
     date: str,
     source_audio: str,
     output_path: str,
-    summary: Optional[str] = None
+    summary: Optional[str] = None,
+    job_id: Optional[str] = None,
+    quality_report: Optional[dict[str, Any]] = None,
 ) -> int:
     """
     將新會議記錄存入資料庫。
@@ -874,10 +891,26 @@ def save_meeting(
         int: 新插入記錄的 ID
     """
     with get_db() as conn:
+        _ensure_meeting_quality_columns(conn)
+        quality_score = quality_report.get("score") if quality_report else None
+        quality_label = quality_report.get("label") if quality_report else None
+        quality_report_json = json.dumps(quality_report, ensure_ascii=False) if quality_report else None
         cursor = conn.execute(
-            """INSERT INTO meetings (title, date, source_audio, output_path, summary)
-               VALUES (?, ?, ?, ?, ?)""",
-            (title, date, source_audio, str(output_path), summary)
+            """INSERT INTO meetings (
+                   title, date, source_audio, output_path, summary,
+                   job_id, quality_score, quality_label, quality_report_json
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                title,
+                date,
+                source_audio,
+                str(output_path),
+                summary,
+                job_id,
+                quality_score,
+                quality_label,
+                quality_report_json,
+            )
         )
         meeting_id = cursor.lastrowid
         try:
@@ -899,6 +932,7 @@ def list_meetings(limit: int = 50, offset: int = 0) -> list[dict]:
         rows = conn.execute(
             """SELECT id, title, date, source_audio, output_path,
                       substr(summary, 1, 200) as summary_preview,
+                      job_id, quality_score, quality_label,
                       created_at
                FROM meetings
                ORDER BY created_at DESC
@@ -924,6 +958,11 @@ def get_meeting(meeting_id: int) -> Optional[dict]:
             return None
 
         record = dict(row)
+        quality_report_json = record.pop("quality_report_json", None)
+        try:
+            record["quality_report"] = json.loads(quality_report_json) if quality_report_json else None
+        except json.JSONDecodeError:
+            record["quality_report"] = None
         # 讀取完整的 Markdown 內容
         output_file = Path(record["output_path"])
         if output_file.exists():

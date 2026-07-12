@@ -42,6 +42,7 @@ def enqueue_audio_job(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     summary_model: Optional[str] = None,
     summary_fallback_model: Optional[str] = None,
+    force_segment_indices: Optional[list[int]] = None,
 ) -> None:
     """Persist an uploaded audio job for the local worker."""
     selected_summary_model = summary_model or SUMMARY_MODEL
@@ -57,6 +58,7 @@ def enqueue_audio_job(
             "summary_model": selected_summary_model,
             "summary_fallback_model": selected_summary_fallback_model,
             "meeting_title": meeting_title,
+            "force_segment_indices": sorted(set(force_segment_indices or [])),
         },
         max_attempts=max_attempts,
         message="音檔已接收，已排入可靠處理佇列。",
@@ -183,6 +185,7 @@ class JobQueueWorker:
         summary_model = payload.get("summary_model") or SUMMARY_MODEL
         summary_fallback_model = payload.get("summary_fallback_model") or SUMMARY_FALLBACK_MODEL
         meeting_title = payload.get("meeting_title")
+        force_segment_indices = payload.get("force_segment_indices") or []
 
         output_path = process_audio_task(
             job_id=job_id,
@@ -193,6 +196,7 @@ class JobQueueWorker:
             cleanup_source_audio=False,
             summary_model=summary_model,
             summary_fallback_model=summary_fallback_model,
+            force_segment_indices=force_segment_indices,
         )
         if output_path is not None:
             self._log_source_audio_retention(job, "done")

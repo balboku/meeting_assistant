@@ -34,6 +34,15 @@ class SecurityRegressionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_favicon_is_public_and_served_from_logo_asset(self):
+        from backend.main import app
+
+        response = asgi_request(app, "GET", "/favicon.ico", headers={"X-Forwarded-For": "203.0.113.8"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("image/x-icon", response.headers.get("content-type", ""))
+        self.assertGreater(len(response.content), 0)
+
     def test_remote_browser_api_key_query_sets_cookie_for_followup_requests(self):
         import backend.main as main
 
@@ -133,8 +142,14 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertNotIn("fonts.gstatic.com", html)
         self.assertIn('/static/vendor/marked.min.js', html)
         self.assertIn('/static/vendor/purify.min.js', html)
+        self.assertIn('<link rel="icon" type="image/png" href="/static/favicon.png" />', html)
+        self.assertIn('<link rel="shortcut icon" href="/static/favicon.ico" />', html)
+        self.assertIn('class="brand-logo"', html)
+        self.assertIn('src="/static/favicon.png"', html)
         self.assertTrue((ROOT / "static" / "vendor" / "marked.min.js").is_file())
         self.assertTrue((ROOT / "static" / "vendor" / "purify.min.js").is_file())
+        self.assertTrue((ROOT / "static" / "favicon.png").is_file())
+        self.assertTrue((ROOT / "static" / "favicon.ico").is_file())
 
 
 class ConfigRegressionTests(unittest.TestCase):
@@ -2856,6 +2871,143 @@ class StartupScriptRegressionTests(unittest.TestCase):
                 command = start._ngrok_command()
 
         self.assertEqual(command, str(ngrok_path))
+
+
+class FreeOptimizationRegressionTests(unittest.TestCase):
+    def test_segment_cache_is_reused_across_jobs_for_identical_audio(self):
+        import backend.tasks as tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"same-audio")
+            context = tasks._segment_cache_context(audio_path, "gemini-test", 1, 10)
+            tasks._save_segment_transcript_cache(
+                root / "output",
+                "job-one",
+                0,
+                context,
+                "[00:00] **[發言者 A]**：共用快取內容。",
+            )
+
+            cached = tasks._load_segment_transcript_cache(
+                root / "output", "job-two", 0, context
+            )
+
+        self.assertIn("共用快取內容", cached)
+
+    def test_smart_segment_boundary_prefers_nearby_silence(self):
+        from pydub import AudioSegment
+        from pydub.generators import Sine
+        from backend.tasks import _smart_segment_boundaries
+
+        tone = Sine(440).to_audio_segment(duration=9000)
+        audio = tone + AudioSegment.silent(duration=2000) + tone
+        boundaries = _smart_segment_boundaries(audio, segment_ms=10000)
+
+        self.assertEqual(boundaries[0], 0)
+        self.assertEqual(boundaries[-1], len(audio))
+        self.assertGreaterEqual(boundaries[1], 9500)
+        self.assertLessEqual(boundaries[1], 10500)
+
+    def test_audio_preflight_rejects_effectively_silent_recording(self):
+        import backend.tasks as tasks
+        from pydub import AudioSegment
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "silent.wav"
+            export_handle = AudioSegment.silent(duration=31000).export(audio_path, format="wav")
+            export_handle.close()
+
+            with self.assertRaisesRegex(RuntimeError, "幾乎沒有可辨識聲音"):
+                tasks._prepare_audio_for_transcription(audio_path, root / "temp", "silent-job")
+
+    def test_summary_payload_repairs_ids_refs_and_timecodes_locally(self):
+        from backend.tasks import _summary_response_to_markdown
+
+        payload = {
+            "discussion_summary": [
+                {"id": "D9", "topic": "測試", "summary": "內容", "evidence_timecodes": ["04:40"]}
+            ],
+            "final_decisions": [
+                {"id": "R8", "related_discussions": ["D9", "D1"], "decision": "通過", "status": "confirmed"}
+            ],
+            "action_items": [
+                {"id": "A7", "related_discussions": ["D1"], "related_decisions": ["R8", "R1"], "task": "追蹤"}
+            ],
+        }
+        transcript = (
+            "[00:00] **[發言者 A]**：開始。\n"
+            "[05:00] **[發言者 B]**：確認。"
+        )
+
+        markdown = _summary_response_to_markdown(json.dumps(payload, ensure_ascii=False), transcript)
+
+        self.assertIn("### D1. 測試", markdown)
+        self.assertIn("佐證時間：05:00", markdown)
+        self.assertIn("| R1 | D1 |", markdown)
+        self.assertIn("| A1 | D1 | R1 |", markdown)
+        self.assertNotIn("D9", markdown)
+        self.assertNotIn("R8", markdown)
+
+    def test_meeting_quality_report_round_trips_through_database(self):
+        import backend.database as database
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_path = root / "meeting.md"
+            output_path.write_text("meeting", encoding="utf-8")
+            quality_report = {"score": 95, "label": "良好", "segments": [{"index": 0}]}
+            with mock.patch.object(database, "DB_PATH", root / "meetings.db"):
+                database.init_db()
+                meeting_id = database.save_meeting(
+                    "品質測試",
+                    "2026/07/12",
+                    "meeting.webm",
+                    str(output_path),
+                    "摘要",
+                    job_id="quality-job",
+                    quality_report=quality_report,
+                )
+                record = database.get_meeting(meeting_id)
+
+        self.assertEqual(record["job_id"], "quality-job")
+        self.assertEqual(record["quality_score"], 95)
+        self.assertEqual(record["quality_report"]["segments"][0]["index"], 0)
+
+    def test_meeting_rerun_api_can_force_only_one_segment(self):
+        import backend.main as main
+
+        record = {
+            "id": 8,
+            "title": "局部重跑測試",
+            "quality_report": {"segments": [{"index": 0}, {"index": 1}]},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            with mock.patch.object(main, "get_meeting", return_value=record), \
+                 mock.patch.object(main, "_resolve_meeting_source_audio", return_value=audio_path), \
+                 mock.patch.object(main, "enqueue_audio_job") as enqueue:
+                response = asgi_request(
+                    main.app,
+                    "POST",
+                    "/meetings/8/rerun",
+                    json={"segments": [1]},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(enqueue.call_args.kwargs["force_segment_indices"], [1])
+        self.assertIn("第 2 段", response.json()["message"])
+
+    def test_web_ui_shows_quality_report_and_segment_rerun_controls(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("function renderQualityReport", html)
+        self.assertIn("quality_report", html)
+        self.assertIn("rerun-segment-${index}", html)
+        self.assertIn("JSON.stringify({ segments: [segmentIndex] })", html)
 
 
 if __name__ == "__main__":

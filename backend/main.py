@@ -64,6 +64,7 @@ from backend.models import (
     JobEventsResponse,
     MeetingRecord,
     MeetingDetail,
+    MeetingRerunRequest,
     MeetingListResponse,
     MeetingEvidenceResponse,
     HealthResponse,
@@ -236,7 +237,7 @@ def _valid_api_key(request: Request) -> bool:
 @app.middleware("http")
 async def restrict_remote_access(request: Request, call_next):
     """Allow LINE publicly; protect management UI except local/trusted network."""
-    if request.url.path == "/line-webhook":
+    if request.url.path in {"/line-webhook", "/favicon.ico"}:
         return await call_next(request)
 
     if (
@@ -286,6 +287,15 @@ app.add_middleware(
 STATIC_DIR = ROOT_DIR / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """Serve the browser tab icon from the bundled static assets."""
+    favicon_path = STATIC_DIR / "favicon.ico"
+    if not favicon_path.exists():
+        raise HTTPException(status_code=404, detail="favicon not found")
+    return FileResponse(favicon_path, media_type="image/x-icon")
+
 
 @app.get("/history", summary="歷史記錄 Web 介面", tags=["網頁介面"])
 async def history_page():
@@ -702,8 +712,12 @@ async def get_meeting_detail(meeting_id: int):
         source_audio=record["source_audio"],
         output_path=record["output_path"],
         summary_preview=record.get("summary", "")[:200],
+        job_id=record.get("job_id"),
+        quality_score=record.get("quality_score"),
+        quality_label=record.get("quality_label"),
         created_at=record["created_at"],
-        full_content=record["full_content"]
+        full_content=record["full_content"],
+        quality_report=record.get("quality_report"),
     )
 
 
@@ -758,13 +772,27 @@ async def export_meeting_docx(meeting_id: int):
     tags=["會議記錄"],
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
 )
-async def rerun_meeting_record(meeting_id: int):
+async def rerun_meeting_record(
+    meeting_id: int,
+    request_body: Optional[MeetingRerunRequest] = None,
+):
     """用已保留的原始音檔建立新的背景任務，重新產生一筆會議紀錄。"""
     record = get_meeting(meeting_id)
     if not record:
         raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
 
     audio_path = _resolve_meeting_source_audio(record)
+    quality_report = record.get("quality_report") or {}
+    known_segments = quality_report.get("segments") or []
+    if request_body is not None and request_body.segments is not None:
+        force_segment_indices = sorted(set(request_body.segments))
+        if any(index < 0 or index >= len(known_segments) for index in force_segment_indices):
+            raise HTTPException(status_code=400, detail="指定的重跑分段不存在。")
+        if not force_segment_indices:
+            raise HTTPException(status_code=400, detail="請至少指定一個要重跑的分段。")
+    else:
+        force_segment_indices = list(range(len(known_segments)))
+
     job_id = str(uuid.uuid4())
     try:
         enqueue_audio_job(
@@ -774,6 +802,7 @@ async def rerun_meeting_record(meeting_id: int):
             model=GEMINI_MODEL,
             meeting_title=record["title"],
             source="meeting_rerun",
+            force_segment_indices=force_segment_indices,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"重跑任務排入佇列失敗：{exc}") from exc
@@ -787,7 +816,11 @@ async def rerun_meeting_record(meeting_id: int):
     return JobResponse(
         job_id=job_id,
         status=JobStatus.PENDING,
-        message="已用原始音檔建立重跑任務，完成後會產生新的會議紀錄。",
+        message=(
+            f"已建立指定分段重跑任務：第 {', '.join(str(index + 1) for index in force_segment_indices)} 段。"
+            if request_body is not None and request_body.segments is not None
+            else "已用原始音檔建立完整重跑任務，完成後會產生新的會議紀錄。"
+        ),
     )
 
 
