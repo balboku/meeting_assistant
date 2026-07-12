@@ -3184,10 +3184,17 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             }
             with mock.patch.object(main, "get_meeting", return_value=record):
                 response = asgi_request(main.app, "GET", "/meetings/5/source-audio")
+                download_response = asgi_request(main.app, "GET", "/meetings/5/source-audio?download=1")
+                media_response = asgi_request(main.app, "GET", "/meetings/5/source-media")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("audio/mpeg", response.headers.get("content-type", ""))
+        self.assertIn("inline", response.headers.get("content-disposition", ""))
         self.assertEqual(response.content, b"ID3\x04\x00\x00audio")
+        self.assertEqual(download_response.status_code, 200)
+        self.assertIn("attachment", download_response.headers.get("content-disposition", ""))
+        self.assertEqual(media_response.status_code, 200)
+        self.assertEqual(media_response.content, response.content)
 
     def test_webm_source_audio_endpoint_uses_recording_profile_media_type(self):
         import backend.main as main
@@ -3612,6 +3619,12 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('id="edit-transcript-button"', html)
         self.assertIn('id="transcript-editor-modal"', html)
         self.assertIn('id="source-media-player"', html)
+        self.assertIn("/source-media", html)
+        self.assertNotIn("source-audio`", html)
+        self.assertIn("source-media-actions", html)
+        self.assertIn("download=1", html)
+        self.assertIn("↗ 開啟", html)
+        self.assertIn("⬇ 下載", html)
         self.assertIn("function isVideoSource", html)
         self.assertIn("<video id=\"source-media-player\"", html)
         self.assertIn("function enhanceTranscriptTimecodes", html)

@@ -27,7 +27,7 @@ from typing import Optional
 
 import aiofiles
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, UploadFile, BackgroundTasks, HTTPException, Header, Request
+from fastapi import FastAPI, File, Form, UploadFile, BackgroundTasks, HTTPException, Header, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, RedirectResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -803,12 +803,21 @@ async def get_meeting_detail(meeting_id: int):
 
 
 @app.get(
+    "/meetings/{meeting_id}/source-media",
+    summary="播放或下載會議原始媒體檔",
+    tags=["會議記錄"],
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
+@app.get(
     "/meetings/{meeting_id}/source-audio",
     summary="播放或下載會議原始音檔",
     tags=["會議記錄"],
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
 )
-async def get_meeting_source_audio(meeting_id: int):
+async def get_meeting_source_media(
+    meeting_id: int,
+    download: bool = Query(False, description="設為 true 時以下載附件形式回傳原始檔。"),
+):
     """Return the retained source audio/video file for evidence review."""
     record = get_meeting(meeting_id)
     if not record:
@@ -831,6 +840,7 @@ async def get_meeting_source_audio(meeting_id: int):
         filename=audio_path.name,
         media_type=media_type,
         headers={"Accept-Ranges": "bytes"},
+        content_disposition_type="attachment" if download else "inline",
     )
 
 

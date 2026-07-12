@@ -27,7 +27,7 @@ graph TB
 
     subgraph STORAGE["💾 4. 資料儲存層 (Storage)"]
         TEMP["📁 Temp 資料夾\n(分段 / 處理暫存 · 自動刪除)"]
-        SOURCE["🎧 Source Audio\n(原始音檔保留)"]
+        SOURCE["🎧 Source Media\n(原始錄音/錄影保留)"]
         OUTPUT["📂 Output 資料夾\n(Markdown 會議記錄)"]
         SQLITE["🗄️ SQLite\n(可選 · 歷史記錄搜尋)"]
     end
@@ -114,7 +114,7 @@ graph TB
 meeting_assistant/
 ├── temp/                          ← 分段與處理暫存檔（自動刪除）
 ├── output/
-│   ├── source_audio/              ← 已上傳的原始音檔（處理後保留）
+│   ├── source_audio/              ← 已上傳的原始錄音/錄影（處理後保留，沿用舊資料夾名稱）
 │   ├── 2026-07-04_Marketing.md   ← 日期命名的會議記錄
 │   ├── 2026-07-05_Sync.md
 │   └── ...
@@ -136,7 +136,7 @@ meeting_assistant/
 
 搜尋流程依序合併欄位 FTS、完整內容 FTS 與參數化 `LIKE` 後備搜尋；後備搜尋補足 SQLite `unicode61` 對中文連續字串部分匹配的限制。兩個 FTS 索引在新增、編輯、刪除會議時增量更新，啟動時只對缺漏的既有資料進行一次性補建，搜尋本身維持唯讀。若部署環境的 SQLite 不支援 FTS5，API 仍可使用 `LIKE` 搜尋欄位與完整內容。
 
-Web 歷史頁可從 `/meetings/{id}/source-audio` 串流保留的原始音檔，並把逐字稿時間戳連回播放器。人工修訂分成兩條路徑：`PUT /meetings/{id}/summary` 只改摘要、決議與待辦；`PUT /meetings/{id}/transcript` 只改完整逐字稿。兩者都會先寫入 `meeting_revisions`，再更新 Markdown 與 FTS 索引。
+Web 歷史頁可從 `/meetings/{id}/source-media` 串流保留的原始錄音或錄影，並把逐字稿時間戳連回播放器；舊的 `/meetings/{id}/source-audio` 仍保留相容。人工修訂分成兩條路徑：`PUT /meetings/{id}/summary` 只改摘要、決議與待辦；`PUT /meetings/{id}/transcript` 只改完整逐字稿。兩者都會先寫入 `meeting_revisions`，再更新 Markdown 與 FTS 索引。
 
 ---
 

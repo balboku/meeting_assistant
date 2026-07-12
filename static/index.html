@@ -419,7 +419,7 @@
     .segment-status button:disabled { opacity: 0.55; cursor: wait; }
     .audio-evidence {
       width: 100%; max-width: 1280px; margin: 0 auto 18px;
-      display: grid; grid-template-columns: minmax(220px, 1fr) auto;
+      display: grid; grid-template-columns: 1fr;
       gap: 10px; align-items: center;
       padding: 12px 14px;
       border: 1px solid var(--border);
@@ -443,6 +443,13 @@
     .audio-evidence video {
       max-height: min(52vh, 520px);
     }
+    .audio-evidence-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-width: 0;
+    }
     .audio-evidence-label {
       min-width: 0;
       color: var(--text-mid);
@@ -450,6 +457,30 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+    .source-media-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .source-media-action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      min-height: 28px;
+      padding: 5px 9px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--blue);
+      text-decoration: none;
+      font-size: 12px;
+      background: rgba(122,162,247,0.08);
+    }
+    .source-media-action:hover {
+      border-color: var(--blue);
+      background: rgba(122,162,247,0.16);
     }
     .timecode-button {
       display: inline-flex;
@@ -568,6 +599,10 @@
       .detail-title { min-width: 0; }
       .audio-evidence {
         grid-template-columns: 1fr;
+      }
+      .audio-evidence-header {
+        align-items: flex-start;
+        flex-direction: column;
       }
       .audio-evidence-label {
         white-space: normal;
@@ -1459,17 +1494,29 @@ function isVideoSource(meeting) {
 }
 
 function renderAudioEvidence(meeting) {
-  const sourceUrl = `${API}/meetings/${meeting.id}/source-audio`;
+  const sourceUrl = `${API}/meetings/${meeting.id}/source-media`;
+  const downloadUrl = `${sourceUrl}?download=1`;
   const label = escapeHtml(meeting.source_audio || '原始音檔');
+  const mediaLabel = isVideoSource(meeting) ? '原始錄影' : '原始音檔';
+  const actions = `<div class="source-media-actions">
+    <a class="source-media-action" href="${sourceUrl}" target="_blank" rel="noopener noreferrer" aria-label="開啟${mediaLabel}">↗ 開啟</a>
+    <a class="source-media-action" href="${downloadUrl}" download aria-label="下載${mediaLabel}">⬇ 下載</a>
+  </div>`;
   if (isVideoSource(meeting)) {
     return `<div class="audio-evidence media-video">
-      <span class="audio-evidence-label">原始錄影：${label}</span>
+      <div class="audio-evidence-header">
+        <span class="audio-evidence-label">原始錄影：${label}</span>
+        ${actions}
+      </div>
       <video id="source-media-player" controls preload="metadata" src="${sourceUrl}"></video>
     </div>`;
   }
   return `<div class="audio-evidence media-audio">
+    <div class="audio-evidence-header">
+      <span class="audio-evidence-label">原始音檔：${label}</span>
+      ${actions}
+    </div>
     <audio id="source-media-player" controls preload="metadata" src="${sourceUrl}"></audio>
-    <span class="audio-evidence-label">原始音檔：${label}</span>
   </div>`;
 }
 
