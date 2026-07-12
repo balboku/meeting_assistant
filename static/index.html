@@ -98,27 +98,57 @@
 
     /* ── Job Dashboard ── */
     .job-dashboard {
-      padding: 12px 32px;
+      padding: 8px 32px;
       background: var(--bg-card);
       border-bottom: 1px solid var(--border);
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
     }
     .job-dashboard-header {
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
     }
+    .job-dashboard-heading {
+      min-width: 0;
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    }
     .job-dashboard-title {
       font-size: 13px; font-weight: 700; color: var(--text-mid);
     }
+    .job-dashboard-summary {
+      min-width: 0;
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      color: var(--text-dim); font-size: 11px;
+    }
+    .job-summary-item {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 7px;
+      border-radius: 99px;
+      background: var(--bg);
+      white-space: nowrap;
+    }
+    .job-summary-item strong { color: var(--text-mid); }
+    .job-summary-item.status-processing strong { color: var(--blue); }
+    .job-summary-item.status-pending strong { color: var(--yellow); }
+    .job-summary-item.status-failed strong { color: var(--red); }
+    .job-dashboard-controls {
+      display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+    }
     .job-refresh {
-      padding: 6px 10px;
-      font-size: 12px;
+      padding: 5px 9px;
+      font-size: 11px;
+    }
+    .job-dashboard-details {
+      display: none;
+      gap: 8px;
+      padding-top: 8px;
+    }
+    .job-dashboard.expanded .job-dashboard-details {
+      display: grid;
     }
     .job-list {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 8px;
+      max-height: 180px;
+      overflow-y: auto;
     }
     .job-pill {
       min-width: 0;
@@ -490,6 +520,11 @@
         flex: 1 1 160px;
         justify-content: center;
       }
+      .job-dashboard-header { align-items: flex-start; }
+      .job-dashboard-heading { gap: 6px 10px; }
+      .job-dashboard-title { width: 100%; }
+      .job-dashboard-summary { gap: 4px; }
+      .job-summary-item { padding: 2px 6px; }
     }
 
     /* ── Loading ── */
@@ -731,18 +766,30 @@
   <!-- Job Dashboard -->
   <section class="job-dashboard" id="job-dashboard">
     <div class="job-dashboard-header">
-      <div class="job-dashboard-title">任務狀態</div>
-      <button class="btn-secondary job-refresh" onclick="loadJobs()">更新</button>
-    </div>
-    <div class="job-list" id="job-list">
-      <div class="job-empty">載入任務中...</div>
-    </div>
-    <div class="job-event-panel" id="job-event-panel">
-      <div class="job-event-title">
-        <span id="job-event-heading">任務事件</span>
-        <button class="job-action" onclick="closeJobEvents()">關閉</button>
+      <div class="job-dashboard-heading">
+        <div class="job-dashboard-title">任務狀態</div>
+        <div class="job-dashboard-summary" id="job-dashboard-summary" aria-live="polite">載入中...</div>
       </div>
-      <div class="job-event-list" id="job-event-list"></div>
+      <div class="job-dashboard-controls">
+        <button class="btn-secondary job-refresh" onclick="loadJobs()">更新</button>
+        <button class="btn-secondary job-refresh"
+                id="job-dashboard-toggle"
+                aria-expanded="false"
+                aria-controls="job-dashboard-details"
+                onclick="toggleJobDashboard()">展開</button>
+      </div>
+    </div>
+    <div class="job-dashboard-details" id="job-dashboard-details">
+      <div class="job-list" id="job-list">
+        <div class="job-empty">載入任務中...</div>
+      </div>
+      <div class="job-event-panel" id="job-event-panel">
+        <div class="job-event-title">
+          <span id="job-event-heading">任務事件</span>
+          <button class="job-action" onclick="closeJobEvents()">關閉</button>
+        </div>
+        <div class="job-event-list" id="job-event-list"></div>
+      </div>
     </div>
   </section>
 
@@ -1482,6 +1529,35 @@ function renderJobEvent(event) {
     </div>`;
 }
 
+function setJobDashboardExpanded(expanded) {
+  const dashboard = document.getElementById('job-dashboard');
+  const toggle = document.getElementById('job-dashboard-toggle');
+  if (!dashboard || !toggle) return;
+  dashboard.classList.toggle('expanded', expanded);
+  toggle.setAttribute('aria-expanded', String(expanded));
+  toggle.textContent = expanded ? '收合' : '展開';
+}
+
+function toggleJobDashboard() {
+  const dashboard = document.getElementById('job-dashboard');
+  setJobDashboardExpanded(!dashboard?.classList.contains('expanded'));
+}
+
+function updateJobDashboardSummary(jobs = []) {
+  const summary = document.getElementById('job-dashboard-summary');
+  if (!summary) return;
+  if (!jobs.length) {
+    summary.textContent = '目前沒有任務';
+    return;
+  }
+
+  const count = status => jobs.filter(job => job.status === status).length;
+  summary.innerHTML = `
+    <span class="job-summary-item status-processing">處理中 <strong>${count('processing')}</strong></span>
+    <span class="job-summary-item status-pending">等待 <strong>${count('pending')}</strong></span>
+    <span class="job-summary-item status-failed">失敗 <strong>${count('failed')}</strong></span>`;
+}
+
 function closeJobEvents() {
   const panel = document.getElementById('job-event-panel');
   if (panel) panel.classList.remove('show');
@@ -1493,6 +1569,7 @@ async function loadJobEvents(jobId) {
   const list = document.getElementById('job-event-list');
   if (!panel || !heading || !list) return;
 
+  setJobDashboardExpanded(true);
   panel.classList.add('show');
   heading.textContent = `任務事件 · ${jobId.slice(0, 12)}`;
   list.innerHTML = '<div class="job-empty">載入事件中...</div>';
@@ -1512,6 +1589,7 @@ async function loadJobEvents(jobId) {
 
 async function loadJobs() {
   const jobList = document.getElementById('job-list');
+  const summary = document.getElementById('job-dashboard-summary');
   if (!jobList) return;
 
   try {
@@ -1519,6 +1597,7 @@ async function loadJobs() {
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     const jobs = data.jobs || [];
+    updateJobDashboardSummary(jobs);
 
     if (!jobs.length) {
       jobList.innerHTML = '<div class="job-empty">目前沒有任務</div>';
@@ -1528,6 +1607,7 @@ async function loadJobs() {
     jobList.innerHTML = jobs.slice(0, 6).map(renderJobPill).join('');
   } catch (err) {
     jobList.innerHTML = `<div class="job-empty">任務載入失敗：${escapeHtml(err.message)}</div>`;
+    if (summary) summary.textContent = '無法載入任務';
   }
 }
 

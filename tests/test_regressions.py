@@ -2645,6 +2645,11 @@ class UiRegressionTests(unittest.TestCase):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn('id="job-dashboard"', html)
+        self.assertIn('id="job-dashboard-summary"', html)
+        self.assertIn('id="job-dashboard-toggle"', html)
+        self.assertIn('aria-expanded="false"', html)
+        self.assertIn("function toggleJobDashboard", html)
+        self.assertIn("function updateJobDashboardSummary", html)
         self.assertIn("async function loadJobs", html)
         self.assertIn("/jobs?limit=20", html)
         self.assertIn("任務狀態", html)
