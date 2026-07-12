@@ -351,6 +351,26 @@
       line-height: 1.6; display: -webkit-box;
       -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
     }
+    .card-quality-row {
+      display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px;
+    }
+    .card-quality-chip {
+      display: inline-flex; align-items: center; gap: 5px;
+      min-height: 24px; padding: 3px 8px; border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg-card2); color: var(--text-mid);
+      font-size: 11px; line-height: 1.2;
+    }
+    .card-quality-chip.needs-review {
+      color: var(--yellow);
+      border-color: rgba(224,175,104,0.45);
+      background: rgba(224,175,104,0.08);
+    }
+    .card-quality-chip.good {
+      color: var(--green);
+      border-color: rgba(158,206,106,0.35);
+      background: rgba(158,206,106,0.08);
+    }
 
     /* ── Detail Panel ── */
     .detail-panel {
@@ -1229,6 +1249,25 @@ function updateRecordingEstimate() {
   hint.textContent = `${current}每小時預估容量：${formatBytes(bytesPerHour)}`;
 }
 
+function renderCardQuality(record) {
+  const warningCount = Number(record?.quality_warning_count || 0);
+  const score = record?.quality_score;
+  const label = String(record?.quality_label || '').trim();
+  const chips = [];
+  if (score !== null && score !== undefined) {
+    const reviewClass = Number(score) < 85 || /需|警|低|不/.test(label)
+      ? 'needs-review'
+      : 'good';
+    chips.push(`<span class="card-quality-chip ${reviewClass}">品質 ${escapeHtml(score)}${label ? ` · ${escapeHtml(label)}` : ''}</span>`);
+  } else if (label) {
+    chips.push(`<span class="card-quality-chip needs-review">${escapeHtml(label)}</span>`);
+  }
+  if (warningCount > 0) {
+    chips.push(`<span class="card-quality-chip needs-review">需複核 ${warningCount}</span>`);
+  }
+  return chips.length ? `<div class="card-quality-row">${chips.join('')}</div>` : '';
+}
+
 // ── 主要資料載入 ──────────────────────────────────────────────────
 async function loadMeetings(query = '') {
   const listEl = document.getElementById('list-panel');
@@ -1286,6 +1325,7 @@ async function loadMeetings(query = '') {
           <span class="dot"></span>
           <span>🔊 ${escapeHtml(r.source_audio)}</span>
         </div>
+        ${renderCardQuality(r)}
         <div class="card-preview">${escapeHtml(r.summary_preview || '（無摘要）')}</div>
       </div>
     `).join('');

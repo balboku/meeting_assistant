@@ -167,6 +167,7 @@ class MeetingRecord(BaseModel):
     job_id: Optional[str] = Field(None, description="產生此會議記錄的任務 ID")
     quality_score: Optional[int] = Field(None, description="本機品質檢查分數")
     quality_label: Optional[str] = Field(None, description="本機品質檢查結果")
+    quality_warning_count: int = Field(0, description="已儲存品質警示數量")
     created_at: datetime
 
     model_config = {"from_attributes": True}

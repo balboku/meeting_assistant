@@ -1099,6 +1099,22 @@ def save_meeting(
     return meeting_id
 
 
+def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
+    record = dict(row)
+    quality_report_json = record.pop("quality_report_json", None)
+    warning_count = 0
+    try:
+        quality_report = json.loads(quality_report_json) if quality_report_json else None
+    except json.JSONDecodeError:
+        quality_report = None
+    if isinstance(quality_report, dict):
+        warnings = quality_report.get("warnings") or []
+        if isinstance(warnings, list):
+            warning_count = len(warnings)
+    record["quality_warning_count"] = warning_count
+    return record
+
+
 def list_meetings(limit: int = 50, offset: int = 0) -> list[dict]:
     """列出所有會議記錄（依建立時間倒序）"""
     with get_db() as conn:
@@ -1106,13 +1122,14 @@ def list_meetings(limit: int = 50, offset: int = 0) -> list[dict]:
             """SELECT id, title, date, source_audio, output_path,
                       substr(summary, 1, 200) as summary_preview,
                       job_id, quality_score, quality_label,
+                      quality_report_json,
                       created_at
                FROM meetings
                ORDER BY created_at DESC
                LIMIT ? OFFSET ?""",
             (limit, offset)
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [_meeting_row_with_quality_preview(r) for r in rows]
 
 
 def count_meetings() -> int:
@@ -1346,13 +1363,15 @@ def search_meetings(query: str, limit: int = 50) -> list[dict]:
 
     def add_rows(rows: list[sqlite3.Row]) -> None:
         for row in rows:
-            records_by_id.setdefault(int(row["id"]), dict(row))
+            records_by_id.setdefault(int(row["id"]), _meeting_row_with_quality_preview(row))
 
     with get_db() as conn:
         try:
             rows = conn.execute(
                 """SELECT m.id, m.title, m.date, m.source_audio, m.output_path,
                           substr(m.summary, 1, 200) as summary_preview,
+                          m.job_id, m.quality_score, m.quality_label,
+                          m.quality_report_json,
                           m.created_at
                      FROM meeting_fts
                      JOIN meetings AS m ON m.id = meeting_fts.rowid
@@ -1369,6 +1388,8 @@ def search_meetings(query: str, limit: int = 50) -> list[dict]:
             rows = conn.execute(
                 """SELECT m.id, m.title, m.date, m.source_audio, m.output_path,
                           substr(m.summary, 1, 200) as summary_preview,
+                          m.job_id, m.quality_score, m.quality_label,
+                          m.quality_report_json,
                           m.created_at
                      FROM meeting_content_fts
                      JOIN meetings AS m ON m.id = meeting_content_fts.rowid
@@ -1385,6 +1406,8 @@ def search_meetings(query: str, limit: int = 50) -> list[dict]:
             rows = conn.execute(
                 """SELECT m.id, m.title, m.date, m.source_audio, m.output_path,
                           substr(m.summary, 1, 200) as summary_preview,
+                          m.job_id, m.quality_score, m.quality_label,
+                          m.quality_report_json,
                           m.created_at
                      FROM meetings AS m
                      LEFT JOIN meeting_content_fts AS c ON c.rowid = m.id
@@ -1403,6 +1426,8 @@ def search_meetings(query: str, limit: int = 50) -> list[dict]:
             rows = conn.execute(
                 """SELECT id, title, date, source_audio, output_path,
                           substr(summary, 1, 200) as summary_preview,
+                          job_id, quality_score, quality_label,
+                          quality_report_json,
                           created_at
                    FROM meetings
                    WHERE title LIKE ?

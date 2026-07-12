@@ -2265,6 +2265,34 @@ class SearchRegressionTests(unittest.TestCase):
 
         self.assertEqual(before, after)
 
+    def test_list_and_search_include_quality_warning_count(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "quality-badge.md"
+        output_path.write_text("quality-badge-content", encoding="utf-8")
+        quality_report = {
+            "score": 72,
+            "label": "需複核",
+            "warnings": ["錄音音量偏低", "摘要未串聯待辦"],
+        }
+        meeting_id = database.save_meeting(
+            title="Quality Badge",
+            date="2026/07/12",
+            source_audio="quality-badge.webm",
+            output_path=str(output_path),
+            summary="quality-badge-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Quality Badge")[0]
+
+        self.assertEqual(listed["quality_score"], 72)
+        self.assertEqual(listed["quality_label"], "需複核")
+        self.assertEqual(listed["quality_warning_count"], 2)
+        self.assertEqual(searched["quality_score"], 72)
+        self.assertEqual(searched["quality_label"], "需複核")
+        self.assertEqual(searched["quality_warning_count"], 2)
+
 
 class MeetingEvidenceRegressionTests(unittest.TestCase):
     def _isolated_database(self):
@@ -3810,6 +3838,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality-rerun-summary-button", html)
         self.assertIn("quality-rerun-summary-high-quality-button", html)
         self.assertIn("quality-rerun-full-button", html)
+        self.assertIn("function renderCardQuality", html)
+        self.assertIn("quality_warning_count", html)
+        self.assertIn("card-quality-chip", html)
+        self.assertIn("需複核 ${warningCount}", html)
         self.assertIn("startsWith('摘要品質警示')", html)
         self.assertIn("startsWith('逐字稿品質警示')", html)
         self.assertIn("triggerButtonId", html)
