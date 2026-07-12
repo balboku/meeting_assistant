@@ -1212,6 +1212,17 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         warning_count = _legacy_markdown_quality_warning_count(str(record.get("output_path") or ""))
         if warning_count:
             warning_preview = f"舊紀錄需複核：已偵測到 {warning_count} 個品質警示"
+    if not warning_preview:
+        try:
+            quality_score = int(record["quality_score"]) if record.get("quality_score") is not None else None
+        except (TypeError, ValueError):
+            quality_score = None
+        if quality_score is not None and quality_score < 85:
+            warning_preview = f"品質分數 {quality_score} 低於 85，建議複核"
+    if not warning_preview:
+        label = str(record.get("quality_label") or "").strip()
+        if label and any(token in label for token in ("需", "警", "低", "不")):
+            warning_preview = f"品質標籤：{label}"
     record["quality_warning_count"] = warning_count
     record["quality_warning_preview"] = warning_preview
     return record

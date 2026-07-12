@@ -2413,6 +2413,8 @@ class SearchRegressionTests(unittest.TestCase):
             [row["id"] for row in database.search_meetings("shared-search-keyword", limit=1, needs_review=True)],
             [review_id],
         )
+        filtered = database.search_meetings("shared-search-keyword", limit=1, needs_review=True)[0]
+        self.assertEqual(filtered["quality_warning_preview"], "品質分數 80 低於 85，建議複核")
 
         import backend.main as main
 
@@ -2426,8 +2428,10 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual(list_response.json()["total"], 1)
         self.assertEqual(list_response.json()["records"][0]["id"], review_id)
+        self.assertEqual(list_response.json()["records"][0]["quality_warning_preview"], "品質分數 80 低於 85，建議複核")
         self.assertEqual(search_response.status_code, 200)
         self.assertEqual([row["id"] for row in search_response.json()], [review_id])
+        self.assertEqual(search_response.json()[0]["quality_warning_preview"], "品質分數 80 低於 85，建議複核")
 
 
 class MeetingEvidenceRegressionTests(unittest.TestCase):
