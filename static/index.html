@@ -72,8 +72,12 @@
       background: var(--bg);
       border-bottom: 1px solid var(--border);
     }
+    .search-controls {
+      display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap;
+      max-width: 900px;
+    }
     .search-wrap {
-      position: relative; max-width: 600px;
+      position: relative; flex: 1 1 420px; min-width: min(100%, 280px);
     }
     .search-status {
       min-height: 18px; margin-top: 6px; padding-left: 4px;
@@ -95,6 +99,18 @@
       box-shadow: 0 0 0 3px rgba(122,162,247,0.15);
     }
     #search-input::placeholder { color: var(--text-dim); }
+    .review-filter {
+      display: inline-flex; align-items: center; gap: 8px;
+      min-height: 42px; padding: 0 12px;
+      border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--bg-card); color: var(--text-mid);
+      font-size: 13px; cursor: pointer;
+      user-select: none;
+    }
+    .review-filter input {
+      width: 15px; height: 15px; accent-color: var(--yellow);
+      cursor: pointer;
+    }
 
     /* ── Job Dashboard ── */
     .job-dashboard {
@@ -906,12 +922,18 @@
 
   <!-- Search -->
   <div class="search-bar">
-    <div class="search-wrap">
-      <span class="search-icon">🔍</span>
-      <input id="search-input" type="text"
-             placeholder="搜尋會議標題或內容關鍵字..."
-             autocomplete="off" />
-      <div id="search-status" class="search-status" aria-live="polite"></div>
+    <div class="search-controls">
+      <div class="search-wrap">
+        <span class="search-icon">🔍</span>
+        <input id="search-input" type="text"
+               placeholder="搜尋會議標題或內容關鍵字..."
+               autocomplete="off" />
+        <div id="search-status" class="search-status" aria-live="polite"></div>
+      </div>
+      <label class="review-filter" title="只顯示有品質警示、低分或標示需複核的會議">
+        <input id="needs-review-filter" type="checkbox" />
+        <span>只看需複核</span>
+      </label>
     </div>
   </div>
 
@@ -1268,10 +1290,19 @@ function renderCardQuality(record) {
   return chips.length ? `<div class="card-quality-row">${chips.join('')}</div>` : '';
 }
 
+function isNeedsReviewRecord(record) {
+  const warningCount = Number(record?.quality_warning_count || 0);
+  const score = record?.quality_score;
+  const label = String(record?.quality_label || '').trim();
+  const hasScore = score !== null && score !== undefined && score !== '';
+  return warningCount > 0 || (hasScore && Number(score) < 85) || /需|警|低|不/.test(label);
+}
+
 // ── 主要資料載入 ──────────────────────────────────────────────────
 async function loadMeetings(query = '') {
   const listEl = document.getElementById('list-panel');
   const statusEl = document.getElementById('search-status');
+  const reviewOnly = Boolean(document.getElementById('needs-review-filter')?.checked);
   if (activeMeetingsRequest) activeMeetingsRequest.abort();
   const requestController = new AbortController();
   activeMeetingsRequest = requestController;
@@ -1288,20 +1319,31 @@ async function loadMeetings(query = '') {
 
     if (requestController.signal.aborted) return;
 
-    const records = data.records ?? data;  // search 回傳陣列；list 回傳物件
-    const total = data.total ?? records.length;
+    const fetchedRecords = data.records ?? data;  // search 回傳陣列；list 回傳物件
+    const records = reviewOnly ? fetchedRecords.filter(isNeedsReviewRecord) : fetchedRecords;
+    const total = data.total ?? fetchedRecords.length;
+    const statusPrefix = query
+      ? `找到 ${fetchedRecords.length} 筆相關會議記錄`
+      : `共 ${total} 筆會議記錄`;
 
-    document.getElementById('total-count').textContent = total;
-    statusEl.textContent = query ? `找到 ${records.length} 筆相關會議記錄` : `共 ${total} 筆會議記錄`;
+    document.getElementById('total-count').textContent = reviewOnly ? records.length : total;
+    statusEl.textContent = reviewOnly
+      ? `${statusPrefix}，顯示 ${records.length} 筆需複核`
+      : statusPrefix;
 
     if (!records.length) {
       const safeQuery = escapeHtml(query);
+      const emptyText = reviewOnly
+        ? (query ? `找不到包含「${safeQuery}」且需複核的會議記錄` : '目前沒有需複核的會議記錄')
+        : (query ? `找不到包含「${safeQuery}」的會議記錄` : '尚無會議記錄<br>請先透過 LINE Bot 或桌面 GUI 處理一段音檔');
       listEl.innerHTML = `
         <div class="empty-state">
           <div class="icon">🗂</div>
-          <p>${query ? `找不到包含「${safeQuery}」的會議記錄` : '尚無會議記錄<br>請先透過 LINE Bot 或桌面 GUI 處理一段音檔'}</p>
+          <p>${emptyText}</p>
         </div>`;
-      statusEl.textContent = query ? `找不到包含「${query}」的會議記錄` : '目前沒有會議記錄';
+      statusEl.textContent = reviewOnly
+        ? (query ? `找不到包含「${query}」且需複核的會議記錄` : '目前沒有需複核的會議記錄')
+        : (query ? `找不到包含「${query}」的會議記錄` : '目前沒有會議記錄');
       return;
     }
 
@@ -1882,6 +1924,9 @@ async function openDetail(id) {
 document.getElementById('search-input').addEventListener('input', e => {
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => loadMeetings(e.target.value.trim()), 300);
+});
+document.getElementById('needs-review-filter').addEventListener('change', () => {
+  loadMeetings(document.getElementById('search-input').value.trim());
 });
 
 // ── 工具函式 ────────────────────────────────────────────────────────
