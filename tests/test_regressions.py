@@ -381,6 +381,52 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
         self.assertIn("golden_meeting_structure", result.stdout)
         self.assertIn("failed=-", result.stdout)
 
+    def test_quality_benchmark_flags_omitted_or_repeated_transcripts(self):
+        bad_sample = (
+            "## 一、討論摘要 (Discussion Summary)\n\n"
+            "### D1. 測試議題\n- 摘要：測試。\n\n"
+            "## 二、最終決議 (Final Decisions)\n\n"
+            "| # | 關聯討論 | 決議 | 依據 | 狀態 |\n"
+            "|---|---|---|---|---|\n"
+            "| R1 | D1 | 確認測試。 | [00:00] | confirmed |\n\n"
+            "## 三、待辦事項 (Action Items)\n\n"
+            "| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|---|---|\n"
+            "| A1 | D1 | R1 | 完成測試。 | 發言者 A | 未提及 | 中 |\n\n"
+            "## 四、完整逐字稿 (Verbatim Transcript)\n\n"
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "*(註：為節省篇幅，已省略逐字稿中重複內容)*\n"
+            "[00:00] **[發言者 A]**：這一句不應該連續重複。\n"
+            "[00:01] **[發言者 A]**：這一句不應該連續重複。\n"
+            "[00:02] **[發言者 A]**：這一句不應該連續重複。\n"
+            "[00:03] **[發言者 A]**：這一句不應該連續重複。\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scan_dir = Path(tmpdir)
+            (scan_dir / "bad-meeting.md").write_text(bad_sample, encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/run_quality_benchmark.py",
+                    "--scan-dir",
+                    str(scan_dir),
+                    "--min-score",
+                    "95",
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        payload = json.loads(result.stdout)
+        failed_names = {item["name"] for item in payload["results"][0]["failed"]}
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["passed"])
+        self.assertIn("transcript_has_no_omission_notice", failed_names)
+        self.assertIn("transcript_has_no_repeated_turn_loop", failed_names)
+
     def test_ci_runs_unit_tests_and_security_scan(self):
         ci = ROOT / ".github" / "workflows" / "ci.yml"
         security_scan = ROOT / "scripts" / "security_scan.py"

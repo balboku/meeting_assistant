@@ -39,6 +39,61 @@ def _check(condition: bool, name: str, weight: int = 1, detail: str = "") -> dic
     return {"name": name, "passed": bool(condition), "weight": weight, "detail": detail}
 
 
+OMISSION_NOTICE_PATTERNS = (
+    r"為節省篇幅",
+    r"省略[^。\n]{0,20}逐字稿",
+    r"逐字稿[^。\n]{0,20}省略",
+    r"已過濾[^。\n]{0,20}逐字稿",
+    r"自動過濾後續重複內容",
+    r"只保留摘要化片段",
+)
+
+
+def _omission_notice(transcript: str) -> str:
+    for pattern in OMISSION_NOTICE_PATTERNS:
+        match = re.search(pattern, transcript, flags=re.IGNORECASE)
+        if match:
+            return match.group(0)
+    return ""
+
+
+def _normalize_turn_text(text: str) -> str:
+    normalized = re.sub(r"\s+", "", text.strip().lower())
+    return re.sub(r"[，。,.、；;：:！!？?\-—~「」『』（）()\[\]【】\"'`*_]+", "", normalized)
+
+
+def _turn_texts(transcript: str) -> list[str]:
+    turns: list[str] = []
+    pattern = re.compile(
+        r"\[\d{1,3}:[0-5]\d\]\s*(?:\*\*\[[^\]]+\]\*\*|\[[^\]]+\])?\s*[：:]?\s*(?P<text>.+)"
+    )
+    for line in transcript.splitlines():
+        match = pattern.search(line)
+        if not match:
+            continue
+        normalized = _normalize_turn_text(match.group("text"))
+        if len(normalized) >= 8:
+            turns.append(normalized)
+    return turns
+
+
+def _max_consecutive_repeated_turns(transcript: str) -> tuple[int, str]:
+    max_run = 0
+    max_text = ""
+    current_text = ""
+    current_run = 0
+    for text in _turn_texts(transcript):
+        if text == current_text:
+            current_run += 1
+        else:
+            current_text = text
+            current_run = 1
+        if current_run > max_run:
+            max_run = current_run
+            max_text = text
+    return max_run, max_text
+
+
 def score_markdown(markdown: str, expected: dict[str, Any]) -> dict[str, Any]:
     summary = _section(markdown, ("討論摘要", "Discussion Summary"), ("最終決議", "Final Decisions"))
     decisions = _section(markdown, ("最終決議", "Final Decisions"), ("待辦事項", "Action Items"))
@@ -52,6 +107,9 @@ def score_markdown(markdown: str, expected: dict[str, Any]) -> dict[str, Any]:
     decision_refs_in_actions = _ids(actions, "R")
     timestamp_count = len(re.findall(r"\[\d{1,3}:[0-5]\d\]", transcript))
     segment_heading_count = len(re.findall(r"(?m)^#{1,6}\s*(?:【第\s*\d+\s*段|\[Segment\s+\d+)", transcript))
+    omission_notice = _omission_notice(transcript)
+    max_repeated_turns, repeated_turn_text = _max_consecutive_repeated_turns(transcript)
+    repeated_turn_limit = int(expected.get("max_consecutive_repeated_turns", 3))
 
     checks: list[dict[str, Any]] = [
         _check(bool(summary.strip()), "has_discussion_summary", 3),
@@ -64,6 +122,13 @@ def score_markdown(markdown: str, expected: dict[str, Any]) -> dict[str, Any]:
         _check(all(ref in decision_ids for ref in decision_refs_in_actions), "actions_link_existing_r_ids", 1),
         _check(timestamp_count >= int(expected.get("min_timecodes", 1)), "transcript_has_enough_timecodes", 2, str(timestamp_count)),
         _check(segment_heading_count >= int(expected.get("min_segments", 0)), "transcript_has_expected_segments", 1, str(segment_heading_count)),
+        _check(not omission_notice, "transcript_has_no_omission_notice", 3, omission_notice),
+        _check(
+            max_repeated_turns <= repeated_turn_limit,
+            "transcript_has_no_repeated_turn_loop",
+            3,
+            f"max_run={max_repeated_turns}; limit={repeated_turn_limit}; text={repeated_turn_text[:40]}",
+        ),
     ]
 
     for term in expected.get("required_terms", []):
@@ -86,6 +151,8 @@ def score_markdown(markdown: str, expected: dict[str, Any]) -> dict[str, Any]:
             "action_ids": sorted(action_ids),
             "timestamp_count": timestamp_count,
             "segment_heading_count": segment_heading_count,
+            "omission_notice": omission_notice,
+            "max_consecutive_repeated_turns": max_repeated_turns,
         },
     }
 
