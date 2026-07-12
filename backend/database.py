@@ -315,6 +315,45 @@ def _ensure_meeting_revisions_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_auth_tables(conn: sqlite3.Connection) -> None:
+    """Create future account/role/audit tables without enabling enforcement."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_users (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            email         TEXT    NOT NULL UNIQUE,
+            display_name  TEXT,
+            role          TEXT    NOT NULL DEFAULT 'viewer',
+            is_active     INTEGER NOT NULL DEFAULT 1,
+            created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_app_users_role_active ON app_users(role, is_active)"
+    )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor_user_id   INTEGER,
+            actor_email     TEXT,
+            action          TEXT    NOT NULL,
+            resource_type   TEXT,
+            resource_id     TEXT,
+            request_method  TEXT,
+            request_path    TEXT,
+            client_host     TEXT,
+            detail_json     TEXT,
+            created_at      TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC, id DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_logs_resource ON audit_logs(resource_type, resource_id)"
+    )
+
+
 def _ensure_meeting_quality_columns(conn: sqlite3.Connection) -> None:
     """Add local quality-report fields to existing databases in place."""
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(meetings)").fetchall()}
@@ -451,6 +490,7 @@ def init_db() -> None:
         # 任務事件時間線：供維運頁面與 API 追蹤狀態變化。
         _ensure_job_events_table(conn)
         _ensure_meeting_revisions_table(conn)
+        _ensure_auth_tables(conn)
         _ensure_meeting_fts(conn)
 
     logger.info("✅ 資料庫初始化完成")
@@ -1165,6 +1205,120 @@ def list_meeting_revisions(meeting_id: int) -> list[dict[str, Any]]:
             (meeting_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def upsert_app_user(
+    email: str,
+    display_name: Optional[str] = None,
+    role: str = "viewer",
+    is_active: bool = True,
+) -> dict[str, Any]:
+    """Create or update a future RBAC user record."""
+    normalized_email = str(email or "").strip().lower()
+    if not normalized_email:
+        raise ValueError("email is required")
+
+    with get_db() as conn:
+        _ensure_auth_tables(conn)
+        now = _now()
+        conn.execute(
+            """INSERT INTO app_users (email, display_name, role, is_active, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(email) DO UPDATE SET
+                   display_name=excluded.display_name,
+                   role=excluded.role,
+                   is_active=excluded.is_active,
+                   updated_at=excluded.updated_at""",
+            (normalized_email, display_name, role, 1 if is_active else 0, now, now),
+        )
+        row = conn.execute("SELECT * FROM app_users WHERE email=?", (normalized_email,)).fetchone()
+        return dict(row)
+
+
+def get_app_user_by_email(email: str) -> Optional[dict[str, Any]]:
+    normalized_email = str(email or "").strip().lower()
+    if not normalized_email:
+        return None
+    with get_db() as conn:
+        _ensure_auth_tables(conn)
+        row = conn.execute("SELECT * FROM app_users WHERE email=?", (normalized_email,)).fetchone()
+        return dict(row) if row else None
+
+
+def list_app_users(limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+    with get_db() as conn:
+        _ensure_auth_tables(conn)
+        rows = conn.execute(
+            """SELECT id, email, display_name, role, is_active, created_at, updated_at
+                 FROM app_users
+                ORDER BY email ASC
+                LIMIT ? OFFSET ?""",
+            (min(max(int(limit), 1), 500), max(int(offset), 0)),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def record_audit_log(
+    *,
+    action: str,
+    actor_email: Optional[str] = None,
+    actor_user_id: Optional[int] = None,
+    resource_type: Optional[str] = None,
+    resource_id: Optional[str] = None,
+    request_method: Optional[str] = None,
+    request_path: Optional[str] = None,
+    client_host: Optional[str] = None,
+    detail: Optional[dict[str, Any]] = None,
+) -> int:
+    """Record a future audit event. Callers decide when the feature is enabled."""
+    if not str(action or "").strip():
+        raise ValueError("action is required")
+    with get_db() as conn:
+        _ensure_auth_tables(conn)
+        cursor = conn.execute(
+            """INSERT INTO audit_logs (
+                   actor_user_id, actor_email, action, resource_type, resource_id,
+                   request_method, request_path, client_host, detail_json, created_at
+               )
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                actor_user_id,
+                actor_email,
+                str(action).strip(),
+                resource_type,
+                resource_id,
+                request_method,
+                request_path,
+                client_host,
+                json.dumps(detail, ensure_ascii=False, sort_keys=True) if detail else None,
+                _now(),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def list_audit_logs(limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+    with get_db() as conn:
+        _ensure_auth_tables(conn)
+        rows = conn.execute(
+            """SELECT id, actor_user_id, actor_email, action, resource_type, resource_id,
+                      request_method, request_path, client_host, detail_json, created_at
+                 FROM audit_logs
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?""",
+            (min(max(int(limit), 1), 500), max(int(offset), 0)),
+        ).fetchall()
+
+    records = []
+    for row in rows:
+        record = dict(row)
+        detail_json = record.pop("detail_json", None)
+        try:
+            record["detail"] = json.loads(detail_json) if detail_json else None
+        except json.JSONDecodeError:
+            record["detail"] = None
+        records.append(record)
+    return records
 
 
 def search_meetings(query: str, limit: int = 50) -> list[dict]:

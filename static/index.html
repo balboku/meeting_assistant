@@ -375,12 +375,15 @@
       flex-shrink: 0;
     }
     .detail-title {
-      min-width: 0;
+      flex: 1 1 420px;
+      min-width: min(100%, 320px);
       font-size: clamp(20px, 2vw, 26px); font-weight: 700; color: var(--text);
       line-height: 1.3; margin-bottom: 14px;
+      overflow-wrap: break-word;
     }
     .detail-topline {
       display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;
+      flex-wrap: wrap;
     }
     .detail-meta-row {
       display: flex; flex-wrap: wrap; gap: 12px;
@@ -393,7 +396,8 @@
     .meta-chip .icon { font-size: 14px; }
     .detail-actions {
       display: flex; align-items: center; justify-content: flex-end;
-      gap: 10px; flex-wrap: wrap; flex-shrink: 0;
+      gap: 10px; flex-wrap: wrap; flex: 1 1 640px;
+      max-width: 100%;
     }
     .quality-strip {
       width: 100%; max-width: 1280px; margin: 0 auto 22px;
@@ -413,6 +417,64 @@
       padding: 2px 4px; font: inherit;
     }
     .segment-status button:disabled { opacity: 0.55; cursor: wait; }
+    .audio-evidence {
+      width: 100%; max-width: 1280px; margin: 0 auto 18px;
+      display: grid; grid-template-columns: minmax(220px, 1fr) auto;
+      gap: 10px; align-items: center;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg-card);
+    }
+    .audio-evidence.media-video {
+      grid-template-columns: 1fr;
+      align-items: stretch;
+    }
+    .audio-evidence audio,
+    .audio-evidence video {
+      width: 100%;
+      min-width: 0;
+      border-radius: 6px;
+      background: #000;
+    }
+    .audio-evidence audio {
+      height: 34px;
+    }
+    .audio-evidence video {
+      max-height: min(52vh, 520px);
+    }
+    .audio-evidence-label {
+      min-width: 0;
+      color: var(--text-mid);
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .timecode-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 52px;
+      height: 24px;
+      margin: 0 3px 2px 0;
+      padding: 0 7px;
+      border: 1px solid var(--blue-dim);
+      border-radius: 6px;
+      background: rgba(122,162,247,0.08);
+      color: var(--blue);
+      font: 12px/1.2 Consolas, monospace;
+      cursor: pointer;
+      vertical-align: baseline;
+    }
+    .timecode-button:hover {
+      background: rgba(122,162,247,0.16);
+      border-color: var(--blue);
+    }
+    .timecode-button.active {
+      color: var(--bg);
+      background: var(--blue);
+    }
     .document-view {
       width: 100%;
       max-width: 1280px;
@@ -501,6 +563,14 @@
       }
       .detail-actions {
         justify-content: flex-start;
+        flex-basis: auto;
+      }
+      .detail-title { min-width: 0; }
+      .audio-evidence {
+        grid-template-columns: 1fr;
+      }
+      .audio-evidence-label {
+        white-space: normal;
       }
       .app.reading-mode .list-panel { display: none; }
     }
@@ -888,6 +958,21 @@
     <div class="modal-footer">
       <button class="btn-secondary" onclick="closeSummaryEditor()">取消</button>
       <button class="btn-primary" id="save-summary-button" onclick="saveSummaryEdit()">儲存版本</button>
+    </div>
+  </div>
+</div>
+
+<!-- Transcript Editor Modal -->
+<div class="modal-overlay" id="transcript-editor-modal">
+  <div class="modal modal-wide">
+    <div class="modal-header">
+      <div class="modal-title">編輯完整逐字稿</div>
+      <button class="modal-close" onclick="closeTranscriptEditor()">×</button>
+    </div>
+    <textarea id="transcript-editor" class="summary-editor" aria-label="完整逐字稿 Markdown"></textarea>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeTranscriptEditor()">取消</button>
+      <button class="btn-primary" id="save-transcript-button" onclick="saveTranscriptEdit()">儲存版本</button>
     </div>
   </div>
 </div>
@@ -1296,6 +1381,98 @@ function extractEditableSummaryMarkdown(fullContent = '') {
   return text.replace(/\n-{3,}\s*$/, '').trim();
 }
 
+function extractTranscriptMarkdown(fullContent = '') {
+  const text = String(fullContent || '');
+  const transcriptHeading = /^##\s*[^\n]*(?:完整逐字稿|Verbatim Transcript)[^\n]*$/im;
+  const match = transcriptHeading.exec(text);
+  if (!match) return '';
+  return text.slice(match.index + match[0].length).trim();
+}
+
+function parseTimecodeSeconds(label = '') {
+  const match = String(label).match(/(\d{1,3}):([0-5]\d)/);
+  if (!match) return 0;
+  return (Number(match[1]) * 60) + Number(match[2]);
+}
+
+function seekSourceAudio(seconds = 0) {
+  const player = document.getElementById('source-media-player');
+  if (!player) return;
+  player.currentTime = Math.max(0, Number(seconds) || 0);
+  document.querySelectorAll('.timecode-button.active').forEach(button => button.classList.remove('active'));
+  const active = document.querySelector(`.timecode-button[data-seconds="${Math.max(0, Number(seconds) || 0)}"]`);
+  active?.classList.add('active');
+  player.play().catch(() => {});
+}
+
+function enhanceTranscriptTimecodes(container) {
+  if (!container) return;
+  const matcher = /\[(\d{1,3}:[0-5]\d)\]/g;
+  const walker = document.createTreeWalker(
+    container,
+    NodeFilter.SHOW_TEXT,
+    {
+      acceptNode(node) {
+        if (!matcher.test(node.nodeValue || '')) return NodeFilter.FILTER_REJECT;
+        matcher.lastIndex = 0;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    }
+  );
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach(node => {
+    const text = node.nodeValue || '';
+    const fragment = document.createDocumentFragment();
+    let lastIndex = 0;
+    text.replace(matcher, (raw, timecode, offset) => {
+      if (offset > lastIndex) fragment.append(document.createTextNode(text.slice(lastIndex, offset)));
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'timecode-button';
+      button.textContent = raw;
+      button.dataset.seconds = String(parseTimecodeSeconds(timecode));
+      button.title = `跳到 ${timecode}`;
+      button.addEventListener('click', () => seekSourceAudio(parseTimecodeSeconds(timecode)));
+      fragment.append(button);
+      lastIndex = offset + raw.length;
+      return raw;
+    });
+    if (lastIndex < text.length) fragment.append(document.createTextNode(text.slice(lastIndex)));
+    node.parentNode.replaceChild(fragment, node);
+  });
+}
+
+function sourceMediaExtension(meeting) {
+  const source = String(meeting?.source_audio || '').toLowerCase().split('?')[0];
+  const dotIndex = source.lastIndexOf('.');
+  return dotIndex >= 0 ? source.slice(dotIndex) : '';
+}
+
+function isVideoSource(meeting) {
+  const videoExtensions = new Set(['.webm', '.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);
+  const profile = meeting?.quality_report?.recording?.profile || '';
+  const extension = sourceMediaExtension(meeting);
+  if (profile === 'video_balanced') return true;
+  if (['audio_standard', 'audio_compact'].includes(profile)) return false;
+  return videoExtensions.has(extension);
+}
+
+function renderAudioEvidence(meeting) {
+  const sourceUrl = `${API}/meetings/${meeting.id}/source-audio`;
+  const label = escapeHtml(meeting.source_audio || '原始音檔');
+  if (isVideoSource(meeting)) {
+    return `<div class="audio-evidence media-video">
+      <span class="audio-evidence-label">原始錄影：${label}</span>
+      <video id="source-media-player" controls preload="metadata" src="${sourceUrl}"></video>
+    </div>`;
+  }
+  return `<div class="audio-evidence media-audio">
+    <audio id="source-media-player" controls preload="metadata" src="${sourceUrl}"></audio>
+    <span class="audio-evidence-label">原始音檔：${label}</span>
+  </div>`;
+}
+
 function openSummaryEditor() {
   if (!currentMeetingData) return;
   document.getElementById('summary-editor').value = extractEditableSummaryMarkdown(currentMeetingData.full_content);
@@ -1337,6 +1514,52 @@ async function saveSummaryEdit() {
   }
 }
 
+function openTranscriptEditor() {
+  if (!currentMeetingData) return;
+  const transcript = extractTranscriptMarkdown(currentMeetingData.full_content);
+  if (!transcript) {
+    alert('這筆會議紀錄沒有可編輯的完整逐字稿。');
+    return;
+  }
+  document.getElementById('transcript-editor').value = transcript;
+  document.getElementById('transcript-editor-modal').classList.add('show');
+}
+
+function closeTranscriptEditor() {
+  document.getElementById('transcript-editor-modal').classList.remove('show');
+}
+
+async function saveTranscriptEdit() {
+  if (!currentId) return;
+  const editor = document.getElementById('transcript-editor');
+  const button = document.getElementById('save-transcript-button');
+  const transcriptMarkdown = editor.value.trim();
+  if (transcriptMarkdown.length < 20) {
+    alert('逐字稿內容過短，請確認是否貼上完整內容。');
+    return;
+  }
+
+  const originalText = button.innerHTML;
+  button.disabled = true;
+  button.innerHTML = '<span class="loading-spinner"></span> 儲存中';
+  try {
+    const res = await fetch(`${API}/meetings/${currentId}/transcript`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transcript_markdown: transcriptMarkdown }),
+    });
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    closeTranscriptEditor();
+    await openDetail(currentId);
+    await loadMeetings(document.getElementById('search-input').value.trim());
+  } catch (err) {
+    alert(`儲存失敗：${err.message}`);
+  } finally {
+    button.disabled = false;
+    button.innerHTML = originalText;
+  }
+}
+
 async function openRevisionHistory() {
   if (!currentId) return;
   const list = document.getElementById('revision-list');
@@ -1351,11 +1574,17 @@ async function openRevisionHistory() {
       return;
     }
     list.innerHTML = revisions.map((revision, index) => {
-      const label = index === revisions.length - 1 ? 'AI 原稿' : '修改前版本';
-      const summary = extractEditableSummaryMarkdown(revision.content);
+      const label = revision.source === 'manual_transcript_edit'
+        ? '修改逐字稿前版本'
+        : index === revisions.length - 1
+        ? 'AI 原稿'
+        : '修改前版本';
+      const preview = revision.source === 'manual_transcript_edit'
+        ? extractTranscriptMarkdown(revision.content)
+        : extractEditableSummaryMarkdown(revision.content);
       return `<details class="revision-item">
         <summary>${escapeHtml(label)} · ${escapeHtml(formatDate(revision.created_at))}</summary>
-        <pre>${escapeHtml(summary)}</pre>
+        <pre>${escapeHtml(preview)}</pre>
       </details>`;
     }).join('');
   } catch (err) {
@@ -1478,7 +1707,8 @@ async function openDetail(id) {
           <div class="detail-title">${escapeHtml(r.title)}</div>
           <div class="detail-actions">
             <button id="reading-mode-button" class="btn-secondary" onclick="toggleReadingMode()">⛶ 閱讀模式</button>
-            <button id="edit-summary-button" class="btn-secondary" title="編輯摘要、決議與待辦；逐字稿不會被修改" onclick="openSummaryEditor()">✎ 編輯</button>
+            <button id="edit-summary-button" class="btn-secondary" title="編輯摘要、決議與待辦" onclick="openSummaryEditor()">✎ 摘要</button>
+            <button id="edit-transcript-button" class="btn-secondary" title="編輯完整逐字稿" onclick="openTranscriptEditor()">📝 逐字稿</button>
             <button id="revision-history-button" class="btn-secondary" title="查看 AI 原稿與修改前版本" onclick="openRevisionHistory()">☷ 版本</button>
             <button id="rerun-summary-button" class="btn-secondary" title="沿用逐字稿，只重新產生摘要、決議與待辦" onclick="rerunMeeting(${id}, null, true)">↻ 重整摘要</button>
             <button id="rerun-summary-high-quality-button" class="btn-secondary" title="沿用逐字稿，增加一次第二模型證據查核" onclick="rerunMeeting(${id}, null, true, true)">✓ 高品質重整</button>
@@ -1498,10 +1728,12 @@ async function openDetail(id) {
         </div>
       </div>
       ${renderQualityReport(r)}
+      ${renderAudioEvidence(r)}
       <div class="document-view">
         <div class="md-content">${html}</div>
       </div>
     `;
+    enhanceTranscriptTimecodes(detail.querySelector('.md-content'));
     syncReadingModeButton();
   } catch (err) {
     detail.innerHTML = `

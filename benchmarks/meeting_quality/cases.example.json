@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "golden_meeting_structure",
+      "markdown_path": "golden_structure.md",
+      "expected": {
+        "min_timecodes": 1,
+        "min_segments": 1,
+        "required_terms": ["佳世達"],
+        "forbidden_terms": ["加斯達", "IEC 6304"],
+        "required_discussion_topics": ["D1"]
+      }
+    }
+  ]
+}

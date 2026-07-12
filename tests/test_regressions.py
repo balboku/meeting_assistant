@@ -211,10 +211,56 @@ class ConfigRegressionTests(unittest.TestCase):
         self.assertEqual(payload["summary_model"], main.SUMMARY_MODEL)
         self.assertEqual(payload["summary_fallback_model"], main.SUMMARY_FALLBACK_MODEL)
         self.assertEqual(payload["summary_verifier_model"], main.SUMMARY_VERIFIER_MODEL)
+        self.assertFalse(payload["auth"]["enabled"])
         self.assertEqual(payload["recording_profiles"]["audio_standard"]["audio_bps"], 48000)
         self.assertEqual(payload["recording_profiles"]["video_balanced"]["video_fps"], 15)
         self.assertIn(".mp3", payload["supported_extensions"])
         self.assertIn(".mp4", payload["supported_extensions"])
+
+
+class AuthAuditRegressionTests(unittest.TestCase):
+    def test_auth_feature_is_disabled_by_default_but_tables_and_helpers_exist(self):
+        import backend.database as database
+        from backend.auth import AUTH_FEATURE_ENABLED, ROLE_PERMISSIONS
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "meetings.db"
+            with mock.patch.object(database, "DB_PATH", db_path):
+                database.init_db()
+                user = database.upsert_app_user(
+                    "USER@example.com",
+                    display_name="測試同仁",
+                    role="editor",
+                )
+                audit_id = database.record_audit_log(
+                    action="meeting.transcript.update",
+                    actor_email=user["email"],
+                    resource_type="meeting",
+                    resource_id="7",
+                    detail={"source": "manual_transcript_edit"},
+                )
+                logs = database.list_audit_logs()
+
+                import sqlite3
+                conn = sqlite3.connect(db_path)
+                try:
+                    tables = {
+                        row[0]
+                        for row in conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        ).fetchall()
+                    }
+                finally:
+                    conn.close()
+
+        self.assertFalse(AUTH_FEATURE_ENABLED)
+        self.assertIn("meeting:write", ROLE_PERMISSIONS["editor"])
+        self.assertEqual(user["email"], "user@example.com")
+        self.assertGreater(audit_id, 0)
+        self.assertEqual(logs[0]["action"], "meeting.transcript.update")
+        self.assertEqual(logs[0]["detail"]["source"], "manual_transcript_edit")
+        self.assertIn("app_users", tables)
+        self.assertIn("audit_logs", tables)
 
 
 class ProjectGovernanceRegressionTests(unittest.TestCase):
@@ -248,6 +294,26 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
             "node --check static/index.html",
         ):
             self.assertIn(command, script)
+
+    def test_quality_benchmark_example_runs_without_ai_calls(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_quality_benchmark.py",
+                "benchmarks/meeting_quality/cases.example.json",
+                "--min-score",
+                "80",
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["passed"])
+        self.assertEqual(payload["case_count"], 1)
+        self.assertGreaterEqual(payload["average_score"], 80)
 
     def test_ci_runs_unit_tests_and_security_scan(self):
         ci = ROOT / ".github" / "workflows" / "ci.yml"
@@ -367,6 +433,7 @@ class StartupHealthRegressionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertIn("checks", payload)
+        self.assertFalse(payload["auth"]["enabled"])
         self.assertTrue(any(check["name"] == "database" for check in payload["checks"]))
 
 
@@ -506,7 +573,7 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertIn("可能缺漏", with_notice)
 
     def test_replace_transcript_section_restores_verbatim_transcript(self):
-        from backend.tasks import _replace_transcript_section
+        from backend.tasks import _extract_post_transcript_sections, _extract_transcript_section_body, _replace_transcript_section
 
         repaired_by_model = (
             "## 📋 一、討論摘要 (Discussion Summary)\n摘要\n\n"
@@ -514,6 +581,7 @@ class TaskRegressionTests(unittest.TestCase):
             "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
             "*(註：為節省篇幅，已過濾逐字稿中重複內容)*\n"
             "[38:17] **[發言者 A]**：只保留摘要化片段。\n"
+            "\n## 📎 五、補充資料與佐證 (Supplementary Evidence)\n\n### 資料：spec.pdf\n- 系統判斷：保留。\n"
         )
         full_transcript = (
             "### 【第 1 段｜00:00 – 10:00】\n"
@@ -530,6 +598,9 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertNotIn("只保留摘要化片段", result)
         self.assertEqual(result.count("## 📝 四、完整逐字稿 (Verbatim Transcript)"), 1)
         self.assertNotIn("---\n\n---", result)
+        self.assertIn("## 📎 五、補充資料與佐證", result)
+        self.assertIn("spec.pdf", _extract_post_transcript_sections(result))
+        self.assertNotIn("補充資料", _extract_transcript_section_body(result))
 
     def test_transcript_integrity_rejects_omitted_transcript_section(self):
         from backend.tasks import _replace_transcript_section, _transcript_integrity_issues
@@ -3100,6 +3171,48 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(record["quality_score"], 95)
         self.assertEqual(record["quality_report"]["segments"][0]["index"], 0)
 
+    def test_meeting_source_audio_endpoint_streams_retained_file(self):
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "source.mp3"
+            audio_path.write_bytes(b"ID3\x04\x00\x00audio")
+            record = {
+                "id": 5,
+                "title": "音檔證據",
+                "source_audio": str(audio_path),
+            }
+            with mock.patch.object(main, "get_meeting", return_value=record):
+                response = asgi_request(main.app, "GET", "/meetings/5/source-audio")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("audio/mpeg", response.headers.get("content-type", ""))
+        self.assertEqual(response.content, b"ID3\x04\x00\x00audio")
+
+    def test_webm_source_audio_endpoint_uses_recording_profile_media_type(self):
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = Path(tmpdir) / "screen.webm"
+            video_path.write_bytes(b"webm")
+            record = {
+                "id": 6,
+                "title": "錄影證據",
+                "source_audio": str(video_path),
+                "quality_report": {"recording": {"profile": "video_balanced"}},
+            }
+            with mock.patch.object(main, "get_meeting", return_value=record):
+                video_response = asgi_request(main.app, "GET", "/meetings/6/source-audio")
+
+            record["quality_report"] = {"recording": {"profile": "audio_standard"}}
+            with mock.patch.object(main, "get_meeting", return_value=record):
+                audio_response = asgi_request(main.app, "GET", "/meetings/6/source-audio")
+
+        self.assertEqual(video_response.status_code, 200)
+        self.assertIn("video/webm", video_response.headers.get("content-type", ""))
+        self.assertEqual(audio_response.status_code, 200)
+        self.assertIn("audio/webm", audio_response.headers.get("content-type", ""))
+
     def test_meeting_rerun_api_can_force_only_one_segment(self):
         import backend.main as main
 
@@ -3339,7 +3452,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             "## 一、討論摘要 (Discussion Summary)\n\n### D1. 原始摘要\n- 摘要：AI 原稿\n\n"
             "## 二、最終決議 (Final Decisions)\n\n| # | 關聯討論 | 決議 | 依據 | 狀態 |\n|---|---|---|---|---|\n| R1 | D1 | 未提及 | 未提及 | pending |\n\n"
             "## 三、待辦事項 (Action Items)\n\n| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n|---|---|---|---|---|---|---|\n| A1 | D1 | R1 | 未提及 | 未提及 | 未提及 | 中 |\n\n"
-            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n[00:00] **[發言者 A]**：逐字稿不得改變。\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n[00:00] **[發言者 A]**：逐字稿不得改變。\n\n"
+            "## 📎 五、補充資料與佐證 (Supplementary Evidence)\n\n### 資料：spec.pdf\n- 系統判斷：應保留。\n"
         )
         edited_summary = (
             "## 一、討論摘要 (Discussion Summary)\n\n### D1. 人工修訂\n- 摘要：修訂後摘要\n\n"
@@ -3372,7 +3486,56 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             _extract_transcript_section_body(saved),
             _extract_transcript_section_body(original),
         )
+        self.assertIn("## 📎 五、補充資料與佐證", saved)
+        self.assertIn("spec.pdf", saved)
         self.assertEqual(len(revisions), 1)
+        self.assertEqual(revisions[0]["content"], original)
+
+    def test_manual_transcript_edit_preserves_summary_and_revision_history(self):
+        import backend.database as database
+        import backend.main as main
+        from backend.tasks import _extract_transcript_section_body
+
+        original = (
+            "## 📋 一、討論摘要 (Discussion Summary)\n\n### D1. 原始摘要\n- 摘要：摘要不變\n\n"
+            "## ✅ 二、最終決議 (Final Decisions)\n\n| # | 關聯討論 | 決議 | 依據 | 狀態 |\n|---|---|---|---|---|\n| R1 | D1 | 保留 | 00:00 | confirmed |\n\n"
+            "## 📌 三、待辦事項 (Action Items)\n\n| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n|---|---|---|---|---|---|---|\n| A1 | D1 | R1 | 保留摘要 | 發言者 A | 未提及 | 中 |\n\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "### 【第 1 段｜00:00 – 10:00】\n[00:00] **[發言者 A]**：舊逐字稿。\n\n"
+            "## 📎 五、補充資料與佐證 (Supplementary Evidence)\n\n### 資料：photo.png\n- 系統判斷：應保留。\n"
+        )
+        edited_transcript = (
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：修正後逐字稿，保留時間戳與發言者。\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_path = root / "meeting.md"
+            output_path.write_text(original, encoding="utf-8")
+            with mock.patch.object(database, "DB_PATH", root / "meetings.db"):
+                database.init_db()
+                meeting_id = database.save_meeting(
+                    "逐字稿編輯測試", "2026/07/12", "meeting.webm", str(output_path), "摘要不變"
+                )
+                response = asgi_request(
+                    main.app,
+                    "PUT",
+                    f"/meetings/{meeting_id}/transcript",
+                    json={"transcript_markdown": edited_transcript},
+                )
+                revisions = database.list_meeting_revisions(meeting_id)
+
+            saved = output_path.read_text(encoding="utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("摘要不變", saved)
+        self.assertIn("修正後逐字稿", _extract_transcript_section_body(saved))
+        self.assertNotIn("舊逐字稿", _extract_transcript_section_body(saved))
+        self.assertIn("## 📎 五、補充資料與佐證", saved)
+        self.assertIn("photo.png", saved)
+        self.assertEqual(len(revisions), 1)
+        self.assertEqual(revisions[0]["source"], "manual_transcript_edit")
         self.assertEqual(revisions[0]["content"], original)
 
     def test_summary_only_processing_never_calls_transcription_model(self):
@@ -3446,8 +3609,18 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("summary_only: true, high_quality: highQuality", html)
         self.assertIn('id="rerun-summary-high-quality-button"', html)
         self.assertIn('id="edit-summary-button"', html)
+        self.assertIn('id="edit-transcript-button"', html)
+        self.assertIn('id="transcript-editor-modal"', html)
+        self.assertIn('id="source-media-player"', html)
+        self.assertIn("function isVideoSource", html)
+        self.assertIn("<video id=\"source-media-player\"", html)
+        self.assertIn("function enhanceTranscriptTimecodes", html)
+        self.assertIn("function seekSourceAudio", html)
+        self.assertIn("/transcript", html)
+        self.assertIn("manual_transcript_edit", html)
         self.assertIn('id="revision-history-button"', html)
         self.assertIn("function saveSummaryEdit", html)
+        self.assertIn("function saveTranscriptEdit", html)
         self.assertIn('id="rec-quality-profile"', html)
         self.assertIn("audioBitsPerSecond", html)
         self.assertIn("videoBitsPerSecond", html)

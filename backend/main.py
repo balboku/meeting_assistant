@@ -69,6 +69,7 @@ from backend.models import (
     MeetingDetail,
     MeetingRerunRequest,
     MeetingSummaryUpdateRequest,
+    MeetingTranscriptUpdateRequest,
     MeetingSummaryUpdateResponse,
     MeetingRevisionRecord,
     MeetingListResponse,
@@ -80,6 +81,7 @@ from backend.models import (
     ErrorResponse,
 )
 from backend.job_queue import enqueue_audio_job, enqueue_line_audio_job, job_worker
+from backend.auth import auth_config_payload
 from backend.cleanup import cleanup_stale_temp_files_for_jobs, cleanup_terminal_jobs
 from backend.maintenance import run_startup_health_checks, run_startup_maintenance
 from backend.media_validation import validate_media_magic
@@ -92,6 +94,7 @@ from backend.tasks import (
     SUMMARY_VERIFIER_MODEL,
     SUPPORTED_MEDIA_FORMATS,
     _extract_transcript_section_body,
+    _extract_post_transcript_sections,
     _extract_summary_preview,
     _meeting_content_quality_issues,
     _replace_transcript_section,
@@ -384,6 +387,7 @@ async def health_check():
         summary_model=SUMMARY_MODEL,
         summary_fallback_model=SUMMARY_FALLBACK_MODEL,
         summary_verifier_model=SUMMARY_VERIFIER_MODEL,
+        auth=auth_config_payload(),
         recording_profiles=RECORDING_PROFILES,
         checks=checks,
     )
@@ -425,6 +429,7 @@ async def app_config():
         summary_model=SUMMARY_MODEL,
         summary_fallback_model=SUMMARY_FALLBACK_MODEL,
         summary_verifier_model=SUMMARY_VERIFIER_MODEL,
+        auth=auth_config_payload(),
         recording_profiles=RECORDING_PROFILES,
         max_upload_mb=MAX_UPLOAD_MB,
         max_upload_bytes=MAX_UPLOAD_BYTES,
@@ -797,6 +802,38 @@ async def get_meeting_detail(meeting_id: int):
     )
 
 
+@app.get(
+    "/meetings/{meeting_id}/source-audio",
+    summary="播放或下載會議原始音檔",
+    tags=["會議記錄"],
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
+async def get_meeting_source_audio(meeting_id: int):
+    """Return the retained source audio/video file for evidence review."""
+    record = get_meeting(meeting_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
+
+    audio_path = _resolve_meeting_source_audio(record)
+    suffix = audio_path.suffix.lower()
+    quality_report = record.get("quality_report") or {}
+    recording_profile = (quality_report.get("recording") or {}).get("profile")
+    if suffix == ".webm":
+        media_type = (
+            "audio/webm"
+            if recording_profile in {"audio_standard", "audio_compact"}
+            else "video/webm"
+        )
+    else:
+        media_type = SUPPORTED_MEDIA_FORMATS.get(suffix, "application/octet-stream")
+    return FileResponse(
+        path=audio_path,
+        filename=audio_path.name,
+        media_type=media_type,
+        headers={"Accept-Ranges": "bytes"},
+    )
+
+
 @app.put(
     "/meetings/{meeting_id}/summary",
     response_model=MeetingSummaryUpdateResponse,
@@ -825,6 +862,9 @@ async def update_meeting_summary(meeting_id: int, request_body: MeetingSummaryUp
     )
     frontmatter = frontmatter_match.group(0).strip() if frontmatter_match else ""
     edited_body = _replace_transcript_section(summary_markdown, transcript)
+    post_transcript_sections = _extract_post_transcript_sections(original_content)
+    if post_transcript_sections:
+        edited_body = f"{edited_body.rstrip()}\n\n{post_transcript_sections}\n"
     edited_content = f"{frontmatter}\n\n{edited_body}" if frontmatter else edited_body
 
     issues = [
@@ -843,6 +883,60 @@ async def update_meeting_summary(meeting_id: int, request_body: MeetingSummaryUp
             edited_content,
             _extract_summary_preview(edited_content),
             source="manual_edit",
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return MeetingSummaryUpdateResponse(
+        status="success",
+        meeting_id=meeting_id,
+        revision_id=revision_id,
+        full_content=edited_content,
+    )
+
+
+@app.put(
+    "/meetings/{meeting_id}/transcript",
+    response_model=MeetingSummaryUpdateResponse,
+    summary="人工修訂完整逐字稿並保留版本",
+    tags=["會議記錄"],
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
+async def update_meeting_transcript(meeting_id: int, request_body: MeetingTranscriptUpdateRequest):
+    record = get_meeting(meeting_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
+
+    original_content = record.get("full_content") or ""
+    original_transcript = _extract_transcript_section_body(original_content)
+    if not original_transcript:
+        raise HTTPException(status_code=409, detail="原會議紀錄缺少完整逐字稿，無法安全編輯。")
+
+    transcript_markdown = request_body.transcript_markdown.strip()
+    if re.search(
+        r"^##\s*[^\n]*(?:討論摘要|最終決議|待辦事項|Discussion Summary|Final Decisions|Action Items)",
+        transcript_markdown,
+        flags=re.IGNORECASE | re.MULTILINE,
+    ):
+        raise HTTPException(status_code=400, detail="逐字稿編輯內容不可包含摘要、決議或待辦區塊。")
+
+    edited_content = _replace_transcript_section(original_content, transcript_markdown)
+    issues = [
+        *_meeting_content_quality_issues(edited_content),
+        *_transcript_integrity_issues(edited_content, transcript_markdown),
+    ]
+    if issues:
+        raise HTTPException(
+            status_code=400,
+            detail="逐字稿內容格式不完整：" + "；".join(dict.fromkeys(issues)),
+        )
+
+    try:
+        revision_id = update_meeting_content_with_revision(
+            meeting_id,
+            edited_content,
+            _extract_summary_preview(edited_content),
+            source="manual_transcript_edit",
         )
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

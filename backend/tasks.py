@@ -79,6 +79,7 @@ TRANSCRIPT_SECTION_PATTERN = re.compile(
     r"^##\s*[^\n]*(?:Verbatim Transcript|完整逐字稿|逐字稿|蝔)[^\n]*\n",
     re.MULTILINE | re.IGNORECASE,
 )
+NEXT_TOP_LEVEL_SECTION_PATTERN = re.compile(r"^##\s+", re.MULTILINE)
 SEGMENT_INCOMPLETE_MARKERS = (
     "系統提示：此處音檔包含無意義雜訊",
     "已自動過濾後續重複內容",
@@ -213,23 +214,40 @@ def _replace_transcript_section(meeting_content: str, full_transcript: str) -> s
     match = TRANSCRIPT_SECTION_PATTERN.search(content)
     if match:
         prefix = content[:match.start()].rstrip()
+        suffix = _extract_post_transcript_sections(content)
     else:
         prefix = content.rstrip()
+        suffix = ""
 
     prefix = re.sub(r"\n-{3,}\s*$", "", prefix).rstrip()
     separator = "\n\n---\n\n" if prefix else ""
-    return f"{prefix}{separator}{TRANSCRIPT_SECTION_HEADING}\n{transcript}\n"
+    result = f"{prefix}{separator}{TRANSCRIPT_SECTION_HEADING}\n{transcript}\n"
+    if suffix:
+        result = f"{result.rstrip()}\n\n{suffix.rstrip()}\n"
+    return result
 
 
 def _canonical_transcript_text(text: str) -> str:
     return "\n".join(line.rstrip() for line in (text or "").strip().splitlines()).strip()
 
 
+def _extract_post_transcript_sections(meeting_content: str) -> str:
+    match = TRANSCRIPT_SECTION_PATTERN.search(meeting_content or "")
+    if not match:
+        return ""
+    next_section = NEXT_TOP_LEVEL_SECTION_PATTERN.search(meeting_content or "", match.end())
+    if not next_section:
+        return ""
+    return (meeting_content or "")[next_section.start():].strip()
+
+
 def _extract_transcript_section_body(meeting_content: str) -> Optional[str]:
     match = TRANSCRIPT_SECTION_PATTERN.search(meeting_content or "")
     if not match:
         return None
-    return (meeting_content or "")[match.end():].strip()
+    next_section = NEXT_TOP_LEVEL_SECTION_PATTERN.search(meeting_content or "", match.end())
+    end = next_section.start() if next_section else len(meeting_content or "")
+    return (meeting_content or "")[match.end():end].strip()
 
 
 _TRANSCRIPT_SEGMENT_HEADING_PATTERN = re.compile(

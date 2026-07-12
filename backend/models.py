@@ -145,6 +145,7 @@ class AppConfigResponse(BaseModel):
     summary_model: str
     summary_fallback_model: str
     summary_verifier_model: str
+    auth: dict[str, Any] = Field(default_factory=dict)
     recording_profiles: dict[str, dict[str, Any]]
     max_upload_mb: int
     max_upload_bytes: int
@@ -193,6 +194,15 @@ class MeetingSummaryUpdateRequest(BaseModel):
     )
 
 
+class MeetingTranscriptUpdateRequest(BaseModel):
+    transcript_markdown: str = Field(
+        ...,
+        min_length=20,
+        max_length=500_000,
+        description="只包含完整逐字稿區塊內文，不含摘要、決議與待辦。",
+    )
+
+
 class MeetingSummaryUpdateResponse(BaseModel):
     status: str
     meeting_id: int
@@ -237,6 +247,7 @@ class HealthResponse(BaseModel):
     summary_model: str
     summary_fallback_model: str
     summary_verifier_model: str
+    auth: dict[str, Any] = Field(default_factory=dict)
     recording_profiles: dict[str, dict[str, Any]]
     checks: list[dict[str, str]] = Field(default_factory=list)
 
