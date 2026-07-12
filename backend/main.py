@@ -95,6 +95,7 @@ from backend.tasks import (
     SUPPORTED_MEDIA_FORMATS,
     _extract_transcript_section_body,
     _extract_post_transcript_sections,
+    _full_transcript_quality_issues,
     _extract_summary_preview,
     _meeting_content_quality_issues,
     _replace_transcript_section,
@@ -727,6 +728,50 @@ async def delete_job_record(job_id: str):
     return {"status": "success", "message": f"已刪除任務 {job_id}"}
 
 
+def _normalize_detail_turn_text(text: str) -> str:
+    normalized = re.sub(r"\s+", "", text.strip().lower())
+    return re.sub(r"[，。,.、；;：:！!？?\-—~「」『』（）()\[\]【】\"'`*_]+", "", normalized)
+
+
+def _detail_transcript_repeated_turn_warning(
+    transcript: str,
+    *,
+    limit: int = 3,
+) -> Optional[str]:
+    pattern = re.compile(
+        r"\[\d{1,3}:[0-5]\d\]\s*(?:\*\*\[[^\]]+\]\*\*|\[[^\]]+\])?\s*[：:]?\s*(?P<text>.+)"
+    )
+    max_run = 0
+    max_text = ""
+    current_text = ""
+    current_run = 0
+    for line in (transcript or "").splitlines():
+        match = pattern.search(line)
+        if not match:
+            continue
+        normalized = _normalize_detail_turn_text(match.group("text"))
+        if len(normalized) < 8:
+            current_text = ""
+            current_run = 0
+            continue
+        if normalized == current_text:
+            current_run += 1
+        else:
+            current_text = normalized
+            current_run = 1
+        if current_run > max_run:
+            max_run = current_run
+            max_text = normalized
+
+    if max_run > limit:
+        preview = max_text[:24]
+        return (
+            "逐字稿品質警示：疑似連續重複轉錄"
+            f"（同一句連續重複 {max_run} 次：{preview}），建議重跑或複核相關分段。"
+        )
+    return None
+
+
 # =============================================================================
 # 會議記錄查詢端點
 # =============================================================================
@@ -772,9 +817,10 @@ async def get_meeting_detail(meeting_id: int):
     if not record:
         raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
 
+    full_content = record.get("full_content") or ""
+    transcript = _extract_transcript_section_body(full_content) or ""
     quality_report = dict(record.get("quality_report") or {})
     if not quality_report.get("segments"):
-        transcript = _extract_transcript_section_body(record.get("full_content") or "") or ""
         recovered_segments = _transcript_segment_metadata(transcript)
         if recovered_segments:
             quality_report.update({
@@ -782,6 +828,27 @@ async def get_meeting_detail(meeting_id: int):
                 "label": quality_report.get("label") or "舊紀錄，已重建分段",
                 "warnings": quality_report.get("warnings") or [],
                 "segments": recovered_segments,
+                "timestamp_count": quality_report.get("timestamp_count") or len(re.findall(r"\[\d{1,3}:[0-5]\d\]", transcript)),
+                "speaker_labels": quality_report.get("speaker_labels") or [],
+            })
+
+    if transcript:
+        transcript_warnings = [
+            f"逐字稿品質警示：{issue}"
+            for issue in _full_transcript_quality_issues(transcript)
+        ]
+        repeated_turn_warning = _detail_transcript_repeated_turn_warning(transcript)
+        if repeated_turn_warning:
+            transcript_warnings.append(repeated_turn_warning)
+        if transcript_warnings:
+            warnings = [
+                *list(quality_report.get("warnings") or []),
+                *transcript_warnings,
+            ]
+            quality_report.update({
+                "score": quality_report.get("score"),
+                "label": quality_report.get("label") or "需複核",
+                "warnings": list(dict.fromkeys(warnings)),
                 "timestamp_count": quality_report.get("timestamp_count") or len(re.findall(r"\[\d{1,3}:[0-5]\d\]", transcript)),
                 "speaker_labels": quality_report.get("speaker_labels") or [],
             })

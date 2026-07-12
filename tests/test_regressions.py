@@ -3561,6 +3561,46 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(report["segments"][1]["start_seconds"], 600)
         self.assertIn("已重建分段", report["label"])
 
+    def test_meeting_detail_flags_unsafe_legacy_transcript_in_quality_report(self):
+        import backend.main as main
+
+        repeated_turns = "".join(
+            f"[00:{index:02d}] **[發言者 A]**：這一句不應該連續重複。\n"
+            for index in range(4)
+        )
+        record = {
+            "id": 13,
+            "title": "異常舊紀錄",
+            "date": "2026/07/08",
+            "source_audio": "bad.webm",
+            "output_path": "bad.md",
+            "summary": "摘要",
+            "job_id": None,
+            "quality_score": None,
+            "quality_label": None,
+            "created_at": "2026-07-08 10:00:00",
+            "quality_report": None,
+            "full_content": (
+                "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+                "## 二、最終決議 (Final Decisions)\n決議\n"
+                "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n"
+                "*(註：為節省篇幅，已省略逐字稿中重複內容)*\n"
+                f"{repeated_turns}"
+            ),
+        }
+        with mock.patch.object(main, "get_meeting", return_value=record):
+            response = asgi_request(main.app, "GET", "/meetings/13")
+
+        self.assertEqual(response.status_code, 200)
+        report = response.json()["quality_report"]
+        warnings = "\n".join(report["warnings"])
+        self.assertIn("逐字稿品質警示", warnings)
+        self.assertIn("省略", warnings)
+        self.assertIn("重複", warnings)
+        self.assertEqual(report["label"], "舊紀錄，已重建分段")
+
     def test_manual_summary_edit_preserves_transcript_and_ai_original(self):
         import backend.database as database
         import backend.main as main
@@ -3722,6 +3762,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("找到 ${records.length} 筆相關會議記錄", html)
         self.assertIn("function renderQualityReport", html)
         self.assertIn("quality_report", html)
+        self.assertIn("quality-warning", html)
+        self.assertIn("report.warnings", html)
         self.assertIn("rerun-segment-${index}", html)
         self.assertIn("JSON.stringify({ segments: [segmentIndex] })", html)
         self.assertIn('id="rerun-summary-button"', html)
