@@ -411,7 +411,10 @@ async def metrics():
             average_completed_seconds=average_completed_job_seconds(),
         ),
         recent_errors=list_recent_failed_jobs(limit=5),
-        meetings={"total": count_meetings()},
+        meetings={
+            "total": count_meetings(),
+            "needs_review": count_meetings(needs_review=True),
+        },
         ngrok=get_ngrok_status(expected_port=SERVER_PORT),
     )
 

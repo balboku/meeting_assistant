@@ -2152,14 +2152,27 @@ class MetricsRegressionTests(unittest.TestCase):
         database.create_job("metrics-pending")
         database.create_job("metrics-failed")
         database.update_job_status("metrics-failed", "failed", "處理失敗", error_detail="metrics error")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "needs-review.md"
+            output_path.write_text("metrics needs review", encoding="utf-8")
+            database.save_meeting(
+                title="Metrics Review",
+                date="2026/07/12",
+                source_audio="metrics-review.webm",
+                output_path=str(output_path),
+                summary="metrics needs review",
+                quality_report={"score": 91, "label": "ok", "warnings": ["review this"]},
+            )
 
-        response = asgi_request(main.app, "GET", "/metrics")
+            response = asgi_request(main.app, "GET", "/metrics")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["jobs"]["total"], 2)
         self.assertEqual(payload["jobs"]["by_status"]["pending"], 1)
         self.assertEqual(payload["jobs"]["by_status"]["failed"], 1)
+        self.assertEqual(payload["meetings"]["total"], 1)
+        self.assertEqual(payload["meetings"]["needs_review"], 1)
         self.assertEqual(payload["recent_errors"][0]["job_id"], "metrics-failed")
         self.assertEqual(payload["recent_errors"][0]["error_detail"], "metrics error")
 
@@ -3002,6 +3015,11 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("/jobs/${jobId}/retry", html)
         self.assertIn("/jobs/${jobId}", html)
         self.assertIn("維運狀態", html)
+        self.assertIn('id="ops-needs-review"', html)
+        self.assertIn("data.meetings?.needs_review", html)
+        self.assertIn("function showNeedsReviewMeetings", html)
+        self.assertIn("loadMeetings(search.value.trim())", html)
+        self.assertIn("需複核", html)
         self.assertIn('id="ops-ngrok"', html)
         self.assertIn('id="ops-ngrok-tile"', html)
         self.assertIn("ngrokTile.title = ngrokDetail", html)

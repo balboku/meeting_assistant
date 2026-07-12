@@ -288,6 +288,8 @@
     }
     .ops-tile:first-child { padding-left: 0; }
     .ops-tile:last-child { border-right: 0; padding-right: 0; }
+    .ops-tile.actionable { cursor: pointer; }
+    .ops-tile.actionable:hover .ops-value { color: var(--blue); }
     .ops-label {
       color: var(--text-dim);
       font-size: 11px;
@@ -299,6 +301,7 @@
       line-height: 1.4;
     }
     .ops-value.warn { color: var(--red); }
+    .ops-value.attention { color: var(--yellow); }
     .ops-detail { display: none; }
 
     /* ── Content Area ── */
@@ -985,6 +988,12 @@
     <div class="ops-tile">
       <div class="ops-label">失敗任務</div>
       <div class="ops-value" id="ops-failed-jobs">–</div>
+    </div>
+    <div class="ops-tile actionable" id="ops-needs-review-tile" title="顯示需複核會議" role="button" tabindex="0"
+         onclick="showNeedsReviewMeetings()"
+         onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showNeedsReviewMeetings(); }">
+      <div class="ops-label">需複核</div>
+      <div class="ops-value" id="ops-needs-review">–</div>
     </div>
     <div class="ops-tile">
       <div class="ops-label">平均秒數</div>
@@ -2125,11 +2134,12 @@ async function loadMetrics() {
   const healthEl = document.getElementById('ops-health');
   const totalEl = document.getElementById('ops-total-jobs');
   const failedEl = document.getElementById('ops-failed-jobs');
+  const needsReviewEl = document.getElementById('ops-needs-review');
   const averageEl = document.getElementById('ops-average-seconds');
   const ngrokEl = document.getElementById('ops-ngrok');
   const ngrokDetailEl = document.getElementById('ops-ngrok-detail');
   const ngrokTile = document.getElementById('ops-ngrok-tile');
-  if (!healthEl || !totalEl || !failedEl || !averageEl || !ngrokEl || !ngrokDetailEl || !ngrokTile) return;
+  if (!healthEl || !totalEl || !failedEl || !needsReviewEl || !averageEl || !ngrokEl || !ngrokDetailEl || !ngrokTile) return;
 
   try {
     const [metricsRes, healthRes] = await Promise.all([
@@ -2147,6 +2157,9 @@ async function loadMetrics() {
     totalEl.textContent = data.jobs?.total ?? 0;
     failedEl.textContent = failed;
     failedEl.classList.toggle('warn', failed > 0);
+    const needsReview = data.meetings?.needs_review ?? 0;
+    needsReviewEl.textContent = needsReview;
+    needsReviewEl.classList.toggle('attention', needsReview > 0);
     averageEl.textContent = data.jobs?.average_completed_seconds == null
       ? '–'
       : `${data.jobs.average_completed_seconds}s`;
@@ -2162,9 +2175,19 @@ async function loadMetrics() {
     healthEl.classList.add('warn');
     ngrokEl.textContent = '載入失敗';
     ngrokEl.classList.add('warn');
+    needsReviewEl.textContent = '–';
+    needsReviewEl.classList.remove('attention');
     ngrokDetailEl.textContent = '無法讀取 /metrics';
     ngrokTile.title = '無法讀取 /metrics';
   }
+}
+
+function showNeedsReviewMeetings() {
+  const filter = document.getElementById('needs-review-filter');
+  const search = document.getElementById('search-input');
+  if (!filter || !search) return;
+  if (!filter.checked) filter.checked = true;
+  loadMeetings(search.value.trim());
 }
 
 // ── 上傳與輪詢邏輯 ──────────────────────────────────────────────────
