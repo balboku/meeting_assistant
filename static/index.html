@@ -406,6 +406,26 @@
     .quality-summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .quality-score { color: var(--green); font-size: 16px; font-weight: 700; }
     .quality-warning { color: var(--yellow); font-size: 13px; line-height: 1.6; }
+    .quality-actions {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .quality-action {
+      min-height: 30px;
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(122,162,247,0.08);
+      color: var(--blue);
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .quality-action:hover {
+      border-color: var(--blue);
+      background: rgba(122,162,247,0.16);
+    }
+    .quality-action:disabled { opacity: 0.55; cursor: wait; }
     .segment-status-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
     .segment-status {
       display: inline-flex; align-items: center; gap: 7px;
@@ -1319,7 +1339,7 @@ async function deleteMeeting(event, id) {
 }
 
 // ── 重跑會議紀錄 ────────────────────────────────────────────────────
-async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQuality = false) {
+async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQuality = false, triggerButtonId = null) {
   if (!id) return;
   const segmentText = highQuality
     ? '以高品質模式重整摘要（會增加一次模型查核）'
@@ -1330,7 +1350,9 @@ async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQu
     return;
   }
 
-  const button = highQuality
+  const button = triggerButtonId
+    ? document.getElementById(triggerButtonId)
+    : highQuality
     ? document.getElementById('rerun-summary-high-quality-button')
     : summaryOnly
     ? document.getElementById('rerun-summary-button')
@@ -1368,6 +1390,28 @@ async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQu
   }
 }
 
+function renderQualityActions(meeting, warnings = []) {
+  const meetingId = Number(meeting?.id) || 0;
+  if (!meetingId || !warnings.length) return '';
+  const hasSummaryWarning = warnings.some(warning => String(warning).startsWith('摘要品質警示'));
+  const hasTranscriptWarning = warnings.some(warning => String(warning).startsWith('逐字稿品質警示'));
+  const actions = [];
+  if (hasSummaryWarning) {
+    actions.push(
+      `<button id="quality-rerun-summary-button" class="quality-action" title="沿用逐字稿，只重新產生摘要、決議與待辦" onclick="rerunMeeting(${meetingId}, null, true, false, 'quality-rerun-summary-button')">↻ 重整摘要</button>`
+    );
+    actions.push(
+      `<button id="quality-rerun-summary-high-quality-button" class="quality-action" title="沿用逐字稿，增加一次第二模型證據查核" onclick="rerunMeeting(${meetingId}, null, true, true, 'quality-rerun-summary-high-quality-button')">✓ 高品質重整</button>`
+    );
+  }
+  if (hasTranscriptWarning) {
+    actions.push(
+      `<button id="quality-rerun-full-button" class="quality-action" title="重新轉錄並重新產生完整會議紀錄" onclick="rerunMeeting(${meetingId}, null, false, false, 'quality-rerun-full-button')">🔁 完整重跑</button>`
+    );
+  }
+  return actions.length ? `<div class="quality-actions">${actions.join('')}</div>` : '';
+}
+
 function clockText(totalSeconds = 0) {
   const seconds = Math.max(0, Number(totalSeconds) || 0);
   const minutes = Math.floor(seconds / 60);
@@ -1377,9 +1421,11 @@ function clockText(totalSeconds = 0) {
 function renderQualityReport(meeting) {
   const report = meeting.quality_report;
   if (!report) return '';
-  const warnings = (report.warnings || [])
+  const warningItems = report.warnings || [];
+  const warnings = warningItems
     .map(warning => `<div class="quality-warning">${escapeHtml(warning)}</div>`)
     .join('');
+  const qualityActions = renderQualityActions(meeting, warningItems);
   const segments = (report.segments || []).map(segment => {
     const index = Number(segment.index) || 0;
     const state = segment.status === 'reused'
@@ -1405,6 +1451,7 @@ function renderQualityReport(meeting) {
       <span class="meta-chip">${escapeHtml(report.timestamp_count || 0)} 個時間戳</span>
     </div>
     ${warnings}
+    ${qualityActions}
     <div class="segment-status-list">${segments}</div>
   </div>`;
 }
