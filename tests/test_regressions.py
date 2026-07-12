@@ -3601,6 +3601,48 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("重複", warnings)
         self.assertEqual(report["label"], "舊紀錄，已重建分段")
 
+    def test_meeting_detail_flags_unlinked_legacy_summary_in_quality_report(self):
+        import backend.main as main
+
+        record = {
+            "id": 14,
+            "title": "未串聯舊紀錄",
+            "date": "2026/07/08",
+            "source_audio": "unlinked.webm",
+            "output_path": "unlinked.md",
+            "summary": "摘要",
+            "job_id": None,
+            "quality_score": None,
+            "quality_label": None,
+            "created_at": "2026-07-08 10:00:00",
+            "quality_report": None,
+            "full_content": (
+                "## 一、討論摘要 (Discussion Summary)\n"
+                "這是一段沒有 D 編號的摘要。\n"
+                "## 二、最終決議 (Final Decisions)\n"
+                "| # | 關聯討論 | 決議 | 依據 | 狀態 |\n"
+                "|---|---|---|---|---|\n"
+                "| R2 | D9 | 先執行改善 | 00:10 | confirmed |\n"
+                "## 三、待辦事項 (Action Items)\n"
+                "| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+                "|---|---|---|---|---|---|---|\n"
+                "| - | D9 | R3 | 整理追蹤表 | 發言者 A | 未提及 | 中 |\n"
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n[00:00] **[發言者 A]**：逐字稿正常。\n"
+            ),
+        }
+        with mock.patch.object(main, "get_meeting", return_value=record):
+            response = asgi_request(main.app, "GET", "/meetings/14")
+
+        self.assertEqual(response.status_code, 200)
+        report = response.json()["quality_report"]
+        warnings = "\n".join(report["warnings"])
+        self.assertIn("摘要品質警示", warnings)
+        self.assertIn("D 編號", warnings)
+        self.assertIn("A 編號", warnings)
+        self.assertIn("D9", warnings)
+        self.assertIn("R3", warnings)
+
     def test_manual_summary_edit_preserves_transcript_and_ai_original(self):
         import backend.database as database
         import backend.main as main

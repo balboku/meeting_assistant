@@ -772,6 +772,64 @@ def _detail_transcript_repeated_turn_warning(
     return None
 
 
+def _detail_section(text: str, heading_terms: tuple[str, ...], next_terms: tuple[str, ...]) -> str:
+    heading_pattern = "|".join(re.escape(term) for term in heading_terms)
+    next_pattern = "|".join(re.escape(term) for term in next_terms)
+    if next_pattern:
+        pattern = rf"^##\s*[^\n]*(?:{heading_pattern})[^\n]*\n(?P<body>.*?)(?=^##\s*[^\n]*(?:{next_pattern})|\Z)"
+    else:
+        pattern = rf"^##\s*[^\n]*(?:{heading_pattern})[^\n]*\n(?P<body>.*)\Z"
+    match = re.search(pattern, text or "", flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+    return match.group("body").strip() if match else ""
+
+
+def _detail_ids(text: str, prefix: str) -> set[str]:
+    return set(re.findall(rf"\b{re.escape(prefix)}\d+\b", text or ""))
+
+
+def _detail_summary_quality_issues(full_content: str) -> list[str]:
+    summary = _detail_section(
+        full_content,
+        ("討論摘要", "Discussion Summary"),
+        ("最終決議", "Final Decisions"),
+    )
+    decisions = _detail_section(
+        full_content,
+        ("最終決議", "Final Decisions"),
+        ("待辦事項", "Action Items"),
+    )
+    actions = _detail_section(
+        full_content,
+        ("待辦事項", "Action Items"),
+        ("完整逐字稿", "Verbatim Transcript"),
+    )
+
+    issues: list[str] = []
+    summary_ids = _detail_ids(summary, "D")
+    decision_ids = _detail_ids(decisions, "R")
+    action_ids = _detail_ids(actions, "A")
+    decision_discussion_refs = _detail_ids(decisions, "D")
+    action_discussion_refs = _detail_ids(actions, "D")
+    action_decision_refs = _detail_ids(actions, "R")
+
+    if summary.strip() and not summary_ids:
+        issues.append("討論摘要未使用 D 編號，較難與決議及待辦事項串聯")
+    if decisions.strip() and not decision_ids:
+        issues.append("最終決議未使用 R 編號，較難被待辦事項引用")
+    if actions.strip() and not action_ids:
+        issues.append("待辦事項未使用 A 編號，後續追蹤較不清楚")
+
+    missing_d_refs = sorted((decision_discussion_refs | action_discussion_refs) - summary_ids)
+    if missing_d_refs:
+        issues.append(f"決議或待辦引用不存在的討論編號：{', '.join(missing_d_refs)}")
+
+    missing_r_refs = sorted(action_decision_refs - decision_ids)
+    if missing_r_refs:
+        issues.append(f"待辦事項引用不存在的決議編號：{', '.join(missing_r_refs)}")
+
+    return issues
+
+
 # =============================================================================
 # 會議記錄查詢端點
 # =============================================================================
@@ -852,6 +910,23 @@ async def get_meeting_detail(meeting_id: int):
                 "timestamp_count": quality_report.get("timestamp_count") or len(re.findall(r"\[\d{1,3}:[0-5]\d\]", transcript)),
                 "speaker_labels": quality_report.get("speaker_labels") or [],
             })
+
+    summary_warnings = [
+        f"摘要品質警示：{issue}"
+        for issue in _detail_summary_quality_issues(full_content)
+    ]
+    if summary_warnings:
+        warnings = [
+            *list(quality_report.get("warnings") or []),
+            *summary_warnings,
+        ]
+        quality_report.update({
+            "score": quality_report.get("score"),
+            "label": quality_report.get("label") or "需複核",
+            "warnings": list(dict.fromkeys(warnings)),
+            "timestamp_count": quality_report.get("timestamp_count") or len(re.findall(r"\[\d{1,3}:[0-5]\d\]", transcript)),
+            "speaker_labels": quality_report.get("speaker_labels") or [],
+        })
 
     return MeetingDetail(
         id=record["id"],
