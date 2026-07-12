@@ -144,6 +144,7 @@ class AppConfigResponse(BaseModel):
     transcription_model: str
     summary_model: str
     summary_fallback_model: str
+    summary_verifier_model: str
     max_upload_mb: int
     max_upload_bytes: int
     supported_extensions: list[str]
@@ -234,6 +235,7 @@ class HealthResponse(BaseModel):
     transcription_model: str
     summary_model: str
     summary_fallback_model: str
+    summary_verifier_model: str
     checks: list[dict[str, str]] = Field(default_factory=list)
 
 

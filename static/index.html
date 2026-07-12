@@ -75,6 +75,10 @@
     .search-wrap {
       position: relative; max-width: 600px;
     }
+    .search-status {
+      min-height: 18px; margin-top: 6px; padding-left: 4px;
+      color: var(--text-dim); font-size: 12px;
+    }
     .search-icon {
       position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
       color: var(--text-dim); font-size: 18px; pointer-events: none;
@@ -720,6 +724,7 @@
       <input id="search-input" type="text"
              placeholder="搜尋會議標題或內容關鍵字..."
              autocomplete="off" />
+      <div id="search-status" class="search-status" aria-live="polite"></div>
     </div>
   </div>
 
@@ -912,6 +917,7 @@
 <script>
 const API = '';  // 同源請求，不需要前綴
 let debounceTimer = null;
+let activeMeetingsRequest = null;
 let currentId = null;
 let currentMeetingData = null;
 let runtimeConfig = {
@@ -965,20 +971,28 @@ async function loadRuntimeConfig() {
 // ── 主要資料載入 ──────────────────────────────────────────────────
 async function loadMeetings(query = '') {
   const listEl = document.getElementById('list-panel');
+  const statusEl = document.getElementById('search-status');
+  if (activeMeetingsRequest) activeMeetingsRequest.abort();
+  const requestController = new AbortController();
+  activeMeetingsRequest = requestController;
   listEl.innerHTML = `<div class="empty-state"><div class="loading-spinner"></div></div>`;
+  statusEl.textContent = query ? '搜尋中…' : '載入會議記錄中…';
 
   try {
     let url = query
       ? `${API}/meetings/search?q=${encodeURIComponent(query)}`
       : `${API}/meetings?limit=50`;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: requestController.signal });
     if (!res.ok) throw new Error(await apiErrorMessage(res));
     const data = await res.json();
+
+    if (requestController.signal.aborted) return;
 
     const records = data.records ?? data;  // search 回傳陣列；list 回傳物件
     const total = data.total ?? records.length;
 
     document.getElementById('total-count').textContent = total;
+    statusEl.textContent = query ? `找到 ${records.length} 筆相關會議記錄` : `共 ${total} 筆會議記錄`;
 
     if (!records.length) {
       const safeQuery = escapeHtml(query);
@@ -987,6 +1001,7 @@ async function loadMeetings(query = '') {
           <div class="icon">🗂</div>
           <p>${query ? `找不到包含「${safeQuery}」的會議記錄` : '尚無會議記錄<br>請先透過 LINE Bot 或桌面 GUI 處理一段音檔'}</p>
         </div>`;
+      statusEl.textContent = query ? `找不到包含「${query}」的會議記錄` : '目前沒有會議記錄';
       return;
     }
 
@@ -1015,11 +1030,15 @@ async function loadMeetings(query = '') {
     `).join('');
 
   } catch (err) {
+    if (err.name === 'AbortError') return;
     listEl.innerHTML = `
       <div class="empty-state">
         <div class="icon">❌</div>
         <p>載入失敗：${err.message}<br>請確認後端 API 是否正常運行</p>
       </div>`;
+    statusEl.textContent = `載入失敗：${err.message}`;
+  } finally {
+    if (activeMeetingsRequest === requestController) activeMeetingsRequest = null;
   }
 }
 

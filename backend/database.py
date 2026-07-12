@@ -11,6 +11,7 @@ import json
 import sqlite3
 import logging
 import os
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -152,23 +153,135 @@ def _build_fts_query(query: str) -> str:
     return " ".join(f'"{_escape_fts_token(token)}"' for token in tokens)
 
 
-def _ensure_meeting_fts(conn: sqlite3.Connection) -> bool:
-    """Create and refresh the FTS5 index for meeting search when available."""
+def _build_like_pattern(query: str) -> str:
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _read_meeting_markdown(output_path: str) -> str:
+    """Read the Markdown record used by the optional full-content index."""
+    if not output_path:
+        return ""
+    output_file = Path(str(output_path))
+    if not output_file.is_file():
+        return ""
+    try:
+        return output_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        logger.warning("⚠️  無法讀取會議全文索引來源 %s：%s", output_file, exc)
+        return ""
+
+
+def _create_meeting_fts_tables(conn: sqlite3.Connection) -> tuple[bool, bool]:
+    """Create metadata and full-content FTS tables when SQLite FTS5 is available."""
+    metadata_available = False
+    content_available = False
     try:
         conn.execute(
             """CREATE VIRTUAL TABLE IF NOT EXISTS meeting_fts
                USING fts5(title, source_audio, summary, output_path)"""
         )
+        metadata_available = True
+    except sqlite3.OperationalError as exc:
+        logger.warning("⚠️  SQLite metadata FTS5 index unavailable: %s", exc)
+
+    try:
+        conn.execute(
+            """CREATE VIRTUAL TABLE IF NOT EXISTS meeting_content_fts
+               USING fts5(content)"""
+        )
+        content_available = True
+    except sqlite3.OperationalError as exc:
+        logger.warning("⚠️  SQLite full-content FTS5 index unavailable: %s", exc)
+
+    return metadata_available, content_available
+
+
+def _meeting_ids(conn: sqlite3.Connection) -> set[int]:
+    return {int(row[0]) for row in conn.execute("SELECT id FROM meetings").fetchall()}
+
+
+def _fts_ids(conn: sqlite3.Connection, table: str) -> set[int]:
+    # table names are internal constants, never user input.
+    return {int(row[0]) for row in conn.execute(f"SELECT rowid FROM {table}").fetchall()}
+
+
+def _rebuild_meeting_fts(conn: sqlite3.Connection, metadata: bool, content: bool) -> None:
+    """One-time/backfill rebuild used only during startup or explicit repair."""
+    rows = conn.execute(
+        """SELECT id, title, source_audio, COALESCE(summary, '') AS summary, output_path
+             FROM meetings
+            ORDER BY id"""
+    ).fetchall()
+
+    if metadata:
         conn.execute("DELETE FROM meeting_fts")
+        conn.executemany(
+            """INSERT INTO meeting_fts(rowid, title, source_audio, summary, output_path)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (row["id"], row["title"], row["source_audio"], row["summary"], row["output_path"])
+                for row in rows
+            ],
+        )
+
+    if content:
+        conn.execute("DELETE FROM meeting_content_fts")
+        conn.executemany(
+            """INSERT INTO meeting_content_fts(rowid, content)
+               VALUES (?, ?)""",
+            [(row["id"], _read_meeting_markdown(row["output_path"])) for row in rows],
+        )
+
+
+def _ensure_meeting_fts(conn: sqlite3.Connection) -> bool:
+    """Create and backfill FTS5 indexes once; searches remain read-only."""
+    metadata, content = _create_meeting_fts_tables(conn)
+    if not metadata and not content:
+        return False
+
+    expected_ids = _meeting_ids(conn)
+    if metadata and _fts_ids(conn, "meeting_fts") != expected_ids:
+        _rebuild_meeting_fts(conn, metadata=True, content=False)
+    if content and _fts_ids(conn, "meeting_content_fts") != expected_ids:
+        _rebuild_meeting_fts(conn, metadata=False, content=True)
+    return metadata
+
+
+def _upsert_meeting_fts_row(
+    conn: sqlite3.Connection,
+    meeting_id: int,
+    title: str,
+    source_audio: str,
+    summary: Optional[str],
+    output_path: str,
+    content: Optional[str] = None,
+) -> None:
+    """Incrementally update one meeting in both FTS indexes."""
+    metadata, content_available = _create_meeting_fts_tables(conn)
+    if metadata:
+        conn.execute("DELETE FROM meeting_fts WHERE rowid=?", (meeting_id,))
         conn.execute(
             """INSERT INTO meeting_fts(rowid, title, source_audio, summary, output_path)
-               SELECT id, title, source_audio, COALESCE(summary, ''), output_path
-                 FROM meetings"""
+               VALUES (?, ?, ?, ?, ?)""",
+            (meeting_id, title, source_audio, summary or "", str(output_path)),
         )
-        return True
-    except sqlite3.OperationalError as exc:
-        logger.warning("⚠️  SQLite FTS5 index unavailable, falling back to LIKE search: %s", exc)
-        return False
+    if content_available:
+        conn.execute("DELETE FROM meeting_content_fts WHERE rowid=?", (meeting_id,))
+        conn.execute(
+            """INSERT INTO meeting_content_fts(rowid, content)
+               VALUES (?, ?)""",
+            (meeting_id, content if content is not None else _read_meeting_markdown(output_path)),
+        )
+
+
+def _remove_meeting_fts_row(conn: sqlite3.Connection, meeting_id: int) -> None:
+    """Remove one meeting from available FTS indexes."""
+    for table in ("meeting_fts", "meeting_content_fts"):
+        try:
+            conn.execute(f"DELETE FROM {table} WHERE rowid=?", (meeting_id,))
+        except sqlite3.OperationalError:
+            pass
 
 
 def _ensure_job_events_table(conn: sqlite3.Connection) -> None:
@@ -231,6 +344,7 @@ def get_db():
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row  # 讓查詢結果可用欄位名稱存取
     conn.execute("PRAGMA journal_mode=WAL")  # 提升並發性能
+    conn.execute("PRAGMA busy_timeout=5000")
     try:
         yield conn
         conn.commit()
@@ -930,13 +1044,16 @@ def save_meeting(
         )
         meeting_id = cursor.lastrowid
         try:
-            conn.execute(
-                """INSERT INTO meeting_fts(rowid, title, source_audio, summary, output_path)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (meeting_id, title, source_audio, summary or "", str(output_path)),
+            _upsert_meeting_fts_row(
+                conn,
+                int(meeting_id),
+                title,
+                source_audio,
+                summary,
+                str(output_path),
             )
         except sqlite3.OperationalError:
-            _ensure_meeting_fts(conn)
+            logger.warning("⚠️  會議已寫入，但 FTS 索引更新失敗（ID: %s）", meeting_id)
 
     logger.info(f"💾 會議記錄已寫入 SQLite（ID: {meeting_id}）")
     return meeting_id
@@ -1017,12 +1134,17 @@ def update_meeting_content_with_revision(
             revision_id = int(cursor.lastrowid)
             conn.execute("UPDATE meetings SET summary=? WHERE id=?", (summary, meeting_id))
             try:
-                conn.execute(
-                    "UPDATE meeting_fts SET summary=? WHERE rowid=?",
-                    (summary, meeting_id),
+                _upsert_meeting_fts_row(
+                    conn,
+                    int(meeting_id),
+                    record["title"],
+                    record["source_audio"],
+                    summary,
+                    record["output_path"],
+                    content=full_content,
                 )
             except sqlite3.OperationalError:
-                _ensure_meeting_fts(conn)
+                logger.warning("⚠️ 會議內容已更新，但 FTS 索引更新失敗（ID: %s）", meeting_id)
             temp_file.replace(output_file)
     finally:
         if temp_file.exists():
@@ -1047,7 +1169,10 @@ def list_meeting_revisions(meeting_id: int) -> list[dict[str, Any]]:
 
 def search_meetings(query: str, limit: int = 50) -> list[dict]:
     """
-    全文搜尋會議記錄，支援在標題、音檔名稱與摘要中搜尋關鍵字。
+    搜尋會議記錄的標題、音檔名稱、摘要與完整 Markdown 內容。
+
+    FTS5 負責快速的完整詞組搜尋，LIKE 後備則補足中文連續字串的部分匹配。
+    此函式只讀取索引，不會在每次搜尋時重建索引。
 
     Args:
         query: 搜尋關鍵字
@@ -1056,15 +1181,21 @@ def search_meetings(query: str, limit: int = 50) -> list[dict]:
     Returns:
         符合條件的會議記錄列表
     """
-    query = query.strip()
+    query = unicodedata.normalize("NFKC", str(query or "")).strip()
     if not query:
         return []
 
+    limit = min(max(int(limit), 1), 100)
     fts_query = _build_fts_query(query)
-    pattern = f"%{query}%"
+    pattern = _build_like_pattern(query)
+    records_by_id: dict[int, dict] = {}
+
+    def add_rows(rows: list[sqlite3.Row]) -> None:
+        for row in rows:
+            records_by_id.setdefault(int(row["id"]), dict(row))
+
     with get_db() as conn:
         try:
-            _ensure_meeting_fts(conn)
             rows = conn.execute(
                 """SELECT m.id, m.title, m.date, m.source_audio, m.output_path,
                           substr(m.summary, 1, 200) as summary_preview,
@@ -1076,21 +1207,61 @@ def search_meetings(query: str, limit: int = 50) -> list[dict]:
                     LIMIT ?""",
                 (fts_query, limit),
             ).fetchall()
-        except sqlite3.OperationalError:
+            add_rows(rows)
+        except sqlite3.OperationalError as exc:
+            logger.debug("metadata FTS search unavailable: %s", exc)
+
+        try:
+            rows = conn.execute(
+                """SELECT m.id, m.title, m.date, m.source_audio, m.output_path,
+                          substr(m.summary, 1, 200) as summary_preview,
+                          m.created_at
+                     FROM meeting_content_fts
+                     JOIN meetings AS m ON m.id = meeting_content_fts.rowid
+                    WHERE meeting_content_fts MATCH ?
+                    ORDER BY bm25(meeting_content_fts), m.created_at DESC
+                    LIMIT ?""",
+                (fts_query, limit),
+            ).fetchall()
+            add_rows(rows)
+        except sqlite3.OperationalError as exc:
+            logger.debug("full-content FTS search unavailable: %s", exc)
+
+        try:
+            rows = conn.execute(
+                """SELECT m.id, m.title, m.date, m.source_audio, m.output_path,
+                          substr(m.summary, 1, 200) as summary_preview,
+                          m.created_at
+                     FROM meetings AS m
+                     LEFT JOIN meeting_content_fts AS c ON c.rowid = m.id
+                    WHERE m.title LIKE ? ESCAPE '\\'
+                       OR COALESCE(m.summary, '') LIKE ? ESCAPE '\\'
+                       OR m.source_audio LIKE ? ESCAPE '\\'
+                       OR m.output_path LIKE ? ESCAPE '\\'
+                       OR COALESCE(c.content, '') LIKE ? ESCAPE '\\'
+                    ORDER BY m.created_at DESC
+                    LIMIT ?""",
+                (pattern, pattern, pattern, pattern, pattern, limit),
+            ).fetchall()
+            add_rows(rows)
+        except sqlite3.OperationalError as exc:
+            logger.debug("full-content LIKE search unavailable, using metadata only: %s", exc)
             rows = conn.execute(
                 """SELECT id, title, date, source_audio, output_path,
                           substr(summary, 1, 200) as summary_preview,
                           created_at
                    FROM meetings
                    WHERE title LIKE ?
-                      OR summary LIKE ?
-                      OR source_audio LIKE ?
-                      OR output_path LIKE ?
+                      OR COALESCE(summary, '') LIKE ? ESCAPE '\\'
+                      OR source_audio LIKE ? ESCAPE '\\'
+                      OR output_path LIKE ? ESCAPE '\\'
                    ORDER BY created_at DESC
                    LIMIT ?""",
                 (pattern, pattern, pattern, pattern, limit),
             ).fetchall()
-        return [dict(r) for r in rows]
+            add_rows(rows)
+
+    return list(records_by_id.values())[:limit]
 
 
 def delete_meeting(meeting_id: int) -> bool:
@@ -1117,7 +1288,7 @@ def delete_meeting(meeting_id: int) -> bool:
     with get_db() as conn:
         _ensure_meeting_revisions_table(conn)
         conn.execute("DELETE FROM meeting_revisions WHERE meeting_id=?", (meeting_id,))
-        conn.execute("DELETE FROM meeting_fts WHERE rowid=?", (meeting_id,))
+        _remove_meeting_fts_row(conn, meeting_id)
         conn.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
         logger.info(f"🗑️  已從資料庫移除會議記錄（ID: {meeting_id}）")
 

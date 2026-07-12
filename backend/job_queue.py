@@ -24,7 +24,13 @@ from backend.database import (
     requeue_interrupted_jobs,
     update_job_status,
 )
-from backend.tasks import GEMINI_MODEL, SUMMARY_FALLBACK_MODEL, SUMMARY_MODEL, process_audio_task
+from backend.tasks import (
+    GEMINI_MODEL,
+    SUMMARY_FALLBACK_MODEL,
+    SUMMARY_MODEL,
+    SUMMARY_VERIFIER_MODEL,
+    process_audio_task,
+)
 
 logger = logging.getLogger("MeetingAssistant.JobQueue")
 
@@ -42,6 +48,7 @@ def enqueue_audio_job(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     summary_model: Optional[str] = None,
     summary_fallback_model: Optional[str] = None,
+    summary_verifier_model: Optional[str] = None,
     force_segment_indices: Optional[list[int]] = None,
     summary_source_path: Optional[Path] = None,
     transcript_reuse_source_path: Optional[Path] = None,
@@ -50,6 +57,7 @@ def enqueue_audio_job(
     """Persist an uploaded audio job for the local worker."""
     selected_summary_model = summary_model or SUMMARY_MODEL
     selected_summary_fallback_model = summary_fallback_model or SUMMARY_FALLBACK_MODEL
+    selected_summary_verifier_model = summary_verifier_model or SUMMARY_VERIFIER_MODEL
     create_job(
         job_id,
         task_type="audio_processing",
@@ -60,6 +68,7 @@ def enqueue_audio_job(
             "model": model,
             "summary_model": selected_summary_model,
             "summary_fallback_model": selected_summary_fallback_model,
+            "summary_verifier_model": selected_summary_verifier_model,
             "meeting_title": meeting_title,
             "force_segment_indices": sorted(set(force_segment_indices or [])),
             "summary_source_path": str(summary_source_path) if summary_source_path else None,
@@ -190,6 +199,7 @@ class JobQueueWorker:
         model = payload.get("model") or GEMINI_MODEL
         summary_model = payload.get("summary_model") or SUMMARY_MODEL
         summary_fallback_model = payload.get("summary_fallback_model") or SUMMARY_FALLBACK_MODEL
+        summary_verifier_model = payload.get("summary_verifier_model") or SUMMARY_VERIFIER_MODEL
         meeting_title = payload.get("meeting_title")
         force_segment_indices = payload.get("force_segment_indices") or []
         summary_source_path = payload.get("summary_source_path")
@@ -205,6 +215,7 @@ class JobQueueWorker:
             cleanup_source_audio=False,
             summary_model=summary_model,
             summary_fallback_model=summary_fallback_model,
+            summary_verifier_model=summary_verifier_model,
             force_segment_indices=force_segment_indices,
             summary_source_path=Path(summary_source_path) if summary_source_path else None,
             transcript_reuse_source_path=(

@@ -63,6 +63,7 @@ GEMINI_API_KEY=your_gemini_api_key_here
 TRANSCRIPTION_MODEL=gemini-3.1-flash-lite
 SUMMARY_MODEL=gemma-4-31b-it
 SUMMARY_FALLBACK_MODEL=gemini-3.1-flash-lite
+SUMMARY_VERIFIER_MODEL=gemini-3.5-flash
 LINE_CHANNEL_SECRET=your_line_channel_secret_here
 LINE_CHANNEL_ACCESS_TOKEN=your_line_channel_access_token_here
 APP_API_KEY=change_me_to_a_long_random_value
@@ -117,6 +118,7 @@ BASE_URL=http://127.0.0.1:8001 scripts/smoke_e2e.sh
 | `TRANSCRIPTION_MODEL` | `gemini-3.1-flash-lite` | 音訊轉逐字稿使用的模型。若未設定，會沿用舊的 `GEMINI_MODEL` 或預設值。 |
 | `SUMMARY_MODEL` | `gemma-4-31b-it` | 根據完整逐字稿產生討論摘要、最終決議與待辦事項的文字模型。 |
 | `SUMMARY_FALLBACK_MODEL` | `gemini-3.1-flash-lite` | 摘要模型失敗時自動改用的備援模型，避免整體任務直接失敗。 |
+| `SUMMARY_VERIFIER_MODEL` | `gemini-3.5-flash` | 使用「高品質重整」時，第二階段的證據查核模型。 |
 | `DB_PATH` | `./meetings.db` | SQLite 資料庫位置，測試或部署時可換到獨立磁碟路徑。 |
 | `MEETING_TEMP_DIR` | `./temp` | 分段與處理中的暫存檔資料夾；過期暫存會自動清理。 |
 | `MEETING_OUTPUT_DIR` | `./output` | 生成 Markdown 會議記錄的輸出資料夾。 |

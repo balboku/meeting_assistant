@@ -55,6 +55,7 @@ TRANSCRIPTION_MODEL     = _env_model("TRANSCRIPTION_MODEL", _env_model("GEMINI_M
 GEMINI_MODEL            = TRANSCRIPTION_MODEL
 SUMMARY_MODEL           = _env_model("SUMMARY_MODEL", "gemma-4-31b-it")
 SUMMARY_FALLBACK_MODEL  = _env_model("SUMMARY_FALLBACK_MODEL", GEMINI_MODEL)
+SUMMARY_VERIFIER_MODEL  = _env_model("SUMMARY_VERIFIER_MODEL", "gemini-3.5-flash")
 # 增加處理的等待時間上限 (10分鐘)
 MAX_UPLOAD_WAIT_SECONDS = 600
 POLLING_INTERVAL        = 3
@@ -2292,6 +2293,7 @@ def _generate_meeting_content_from_transcript(
     job_id: str,
     summary_primary_model: str,
     summary_secondary_model: str,
+    summary_verifier_model: Optional[str] = None,
     meeting_date: Optional[date] = None,
     high_quality: bool = False,
 ) -> tuple[str, str]:
@@ -2354,9 +2356,10 @@ Return JSON only, without Markdown fences, using exactly these top-level keys:
   "action_items": [{{"id":"A1","related_discussions":["D1"],"related_decisions":["R1"],"task":"可驗收任務","owner":"負責人或未提及","due":"期限或未提及","due_source":"期限原句或未提及","priority":"高|中|低","source_timecodes":["00:00"]}}]
 }}
 """.strip()
+        verification_model_name = (summary_verifier_model or summary_secondary_model).strip()
         verification_response, verification_model = _generate_text_with_fallback(
             client,
-            primary_model=summary_secondary_model,
+            primary_model=verification_model_name,
             fallback_model=summary_model_used,
             contents=[verification_prompt],
             config=types.GenerateContentConfig(
@@ -2418,6 +2421,7 @@ def process_audio_task(
     cleanup_source_audio: bool = False,
     summary_model: Optional[str] = None,
     summary_fallback_model: Optional[str] = None,
+    summary_verifier_model: Optional[str] = None,
     force_segment_indices: Optional[list[int]] = None,
     summary_source_path: Optional[Path] = None,
     transcript_reuse_source_path: Optional[Path] = None,
@@ -2442,6 +2446,7 @@ def process_audio_task(
         summary_model=summary_model,
         summary_fallback_model=summary_fallback_model,
     )
+    summary_verifier_model = (summary_verifier_model or SUMMARY_VERIFIER_MODEL).strip()
     summary_model_used = model
     actual_meeting_date = _infer_meeting_date(meeting_title, audio_path)
 
@@ -2541,6 +2546,7 @@ def process_audio_task(
                 job_id=job_id,
                 summary_primary_model=summary_primary_model,
                 summary_secondary_model=summary_secondary_model,
+                summary_verifier_model=summary_verifier_model,
                 meeting_date=actual_meeting_date,
                 high_quality=high_quality_summary,
             )
@@ -2649,6 +2655,7 @@ def process_audio_task(
                 job_id=job_id,
                 summary_primary_model=summary_primary_model,
                 summary_secondary_model=summary_secondary_model,
+                summary_verifier_model=summary_verifier_model,
                 meeting_date=actual_meeting_date,
                 high_quality=high_quality_summary,
             )
@@ -2716,6 +2723,7 @@ def process_audio_task(
                 job_id=job_id,
                 summary_primary_model=summary_primary_model,
                 summary_secondary_model=summary_secondary_model,
+                summary_verifier_model=summary_verifier_model,
                 meeting_date=actual_meeting_date,
                 high_quality=high_quality_summary,
             )
@@ -2757,6 +2765,7 @@ generated_by: AI 語音會議助理 Backend{seg_note}
 transcription_model: {model}
 summary_model: {summary_model_used}
 summary_fallback_model: {summary_secondary_model}
+summary_verifier_model: {summary_verifier_model}
 summary_quality_mode: {'high' if high_quality_summary else 'standard'}
 job_id: {job_id}
 quality_score: {quality_report['score']}

@@ -89,6 +89,7 @@ from backend.tasks import (
     GEMINI_MODEL,
     SUMMARY_FALLBACK_MODEL,
     SUMMARY_MODEL,
+    SUMMARY_VERIFIER_MODEL,
     SUPPORTED_MEDIA_FORMATS,
     _extract_transcript_section_body,
     _extract_summary_preview,
@@ -347,6 +348,7 @@ async def health_check():
         transcription_model=GEMINI_MODEL,
         summary_model=SUMMARY_MODEL,
         summary_fallback_model=SUMMARY_FALLBACK_MODEL,
+        summary_verifier_model=SUMMARY_VERIFIER_MODEL,
         checks=checks,
     )
 
@@ -386,6 +388,7 @@ async def app_config():
         transcription_model=GEMINI_MODEL,
         summary_model=SUMMARY_MODEL,
         summary_fallback_model=SUMMARY_FALLBACK_MODEL,
+        summary_verifier_model=SUMMARY_VERIFIER_MODEL,
         max_upload_mb=MAX_UPLOAD_MB,
         max_upload_bytes=MAX_UPLOAD_BYTES,
         supported_extensions=sorted(SUPPORTED_MEDIA_FORMATS.keys()),
@@ -704,7 +707,7 @@ async def list_all_meetings(
     tags=["會議記錄"]
 )
 async def api_search_meetings(q: str):
-    """根據標題或摘要進行全文搜尋"""
+    """搜尋標題、音檔、摘要與完整 Markdown 逐字稿內容"""
     records = search_meetings(q)
     return records
 

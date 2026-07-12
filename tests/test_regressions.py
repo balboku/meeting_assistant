@@ -210,6 +210,7 @@ class ConfigRegressionTests(unittest.TestCase):
         self.assertEqual(payload["transcription_model"], main.GEMINI_MODEL)
         self.assertEqual(payload["summary_model"], main.SUMMARY_MODEL)
         self.assertEqual(payload["summary_fallback_model"], main.SUMMARY_FALLBACK_MODEL)
+        self.assertEqual(payload["summary_verifier_model"], main.SUMMARY_VERIFIER_MODEL)
         self.assertIn(".mp3", payload["supported_extensions"])
         self.assertIn(".mp4", payload["supported_extensions"])
 
@@ -2028,6 +2029,53 @@ class SearchRegressionTests(unittest.TestCase):
             ).fetchone()
         self.assertIsNotNone(table)
 
+    def test_search_meetings_matches_chinese_substrings_and_full_transcript(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "content-indexed-meeting.md"
+        output_path.write_text(
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "這份 transcriptneedle 只存在於完整逐字稿內容。\n",
+            encoding="utf-8",
+        )
+
+        meeting_id = database.save_meeting(
+            title="不合格品會議20260708",
+            date="2026/07/08",
+            source_audio="quality-review.webm",
+            output_path=str(output_path),
+            summary="供應商外觀檢驗結果討論",
+        )
+
+        self.assertEqual([meeting_id], [row["id"] for row in database.search_meetings("不合格品")])
+        self.assertEqual([meeting_id], [row["id"] for row in database.search_meetings("供應商")])
+        self.assertEqual([meeting_id], [row["id"] for row in database.search_meetings("transcriptneedle")])
+
+        with database.get_db() as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='meeting_content_fts'"
+            ).fetchone()
+        self.assertIsNotNone(table)
+
+    def test_repeated_searches_do_not_rebuild_or_grow_the_database(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "stable-search.md"
+        output_path.write_text("stable-search-content", encoding="utf-8")
+        database.save_meeting(
+            title="Stable Search",
+            date="2026/07/08",
+            source_audio="stable.wav",
+            output_path=str(output_path),
+            summary="stable-search-summary",
+        )
+
+        database.search_meetings("stable")
+        before = database.DB_PATH.stat().st_size
+        for _ in range(20):
+            database.search_meetings("stable")
+        after = database.DB_PATH.stat().st_size
+
+        self.assertEqual(before, after)
+
 
 class MeetingEvidenceRegressionTests(unittest.TestCase):
     def _isolated_database(self):
@@ -3163,14 +3211,15 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                 job_id="high-quality-job",
                 summary_primary_model="gemma-primary",
                 summary_secondary_model="gemini-verifier",
+                summary_verifier_model="gemini-3.5-flash",
                 meeting_date=datetime(2026, 7, 10).date(),
                 high_quality=True,
             )
 
-        self.assertEqual([call["model"] for call in fake_client.models.calls], ["gemma-primary", "gemini-verifier"])
+        self.assertEqual([call["model"] for call in fake_client.models.calls], ["gemma-primary", "gemini-3.5-flash"])
         self.assertIn("第二模型已查核", content)
         self.assertNotIn("第一階段", content)
-        self.assertEqual(used_model, "gemma-primary+verified:gemini-verifier")
+        self.assertEqual(used_model, "gemma-primary+verified:gemini-3.5-flash")
 
     def test_partial_rerun_reuses_unselected_segments_from_existing_record(self):
         from backend import tasks
@@ -3372,6 +3421,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
     def test_web_ui_shows_quality_report_and_segment_rerun_controls(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
+        self.assertIn('id="search-status"', html)
+        self.assertIn("AbortController", html)
+        self.assertIn("找到 ${records.length} 筆相關會議記錄", html)
         self.assertIn("function renderQualityReport", html)
         self.assertIn("quality_report", html)
         self.assertIn("rerun-segment-${index}", html)

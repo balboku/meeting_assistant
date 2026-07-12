@@ -126,11 +126,12 @@ meeting_assistant/
 | 資料表 | 用途 |
 |--------|------|
 | `meetings` | 保存會議標題、日期、原始音檔名稱、Markdown 輸出路徑、摘要與建立時間。 |
-| `meeting_fts` | SQLite FTS5 虛擬表，索引 `title`、`source_audio`、`summary`、`output_path`，支援比 `LIKE` 更快的全文搜尋。 |
+| `meeting_fts` | SQLite FTS5 虛擬表，索引 `title`、`source_audio`、`summary`、`output_path`，支援快速的欄位搜尋。 |
+| `meeting_content_fts` | SQLite FTS5 虛擬表，索引每筆會議的完整 Markdown 內容，支援逐字稿搜尋。 |
 | `jobs` | 持久化音檔處理佇列，保存狀態、payload、attempts、取消旗標與進度欄位。 |
 | `job_events` | 任務事件時間線，記錄建立、worker claim、狀態轉換、retry、取消等事件，供維運與 UI 觀察流程。 |
 
-搜尋流程優先查詢 `meeting_fts`；若部署環境的 SQLite 不支援 FTS5，API 會退回 `LIKE` 搜尋 `title`、`summary`、`source_audio` 與 `output_path`。
+搜尋流程依序合併欄位 FTS、完整內容 FTS 與參數化 `LIKE` 後備搜尋；後備搜尋補足 SQLite `unicode61` 對中文連續字串部分匹配的限制。兩個 FTS 索引在新增、編輯、刪除會議時增量更新，啟動時只對缺漏的既有資料進行一次性補建，搜尋本身維持唯讀。若部署環境的 SQLite 不支援 FTS5，API 仍可使用 `LIKE` 搜尋欄位與完整內容。
 
 ---
 
