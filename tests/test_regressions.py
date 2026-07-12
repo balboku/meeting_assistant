@@ -2667,6 +2667,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("/jobs/${jobId}", html)
         self.assertIn("維運狀態", html)
         self.assertIn('id="ops-ngrok"', html)
+        self.assertIn('id="ops-ngrok-tile"', html)
+        self.assertIn("ngrokTile.title = ngrokDetail", html)
         self.assertIn("LINE/ngrok", html)
         self.assertIn("data.ngrok", html)
 

@@ -253,39 +253,37 @@
 
     /* ── Ops Dashboard ── */
     .ops-dashboard {
-      padding: 12px 32px;
+      padding: 6px 32px;
       background: var(--bg);
       border-bottom: 1px solid var(--border);
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 8px;
+      display: flex;
+      align-items: center;
+      overflow-x: auto;
     }
     .ops-tile {
-      min-width: 0;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 10px 12px;
-      background: var(--bg-card);
+      min-width: max-content;
+      flex: 1 0 auto;
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      border-right: 1px solid var(--border);
+      padding: 2px 14px;
+      white-space: nowrap;
     }
+    .ops-tile:first-child { padding-left: 0; }
+    .ops-tile:last-child { border-right: 0; padding-right: 0; }
     .ops-label {
       color: var(--text-dim);
       font-size: 11px;
-      margin-bottom: 4px;
     }
     .ops-value {
       color: var(--text);
-      font-size: 16px;
+      font-size: 13px;
       font-weight: 700;
-      line-height: 1.2;
+      line-height: 1.4;
     }
     .ops-value.warn { color: var(--red); }
-    .ops-detail {
-      margin-top: 4px;
-      color: var(--text-dim);
-      font-size: 11px;
-      line-height: 1.35;
-      overflow-wrap: anywhere;
-    }
+    .ops-detail { display: none; }
 
     /* ── Content Area ── */
     .content {
@@ -799,7 +797,7 @@
       <div class="ops-label">維運狀態</div>
       <div class="ops-value" id="ops-health">載入中</div>
     </div>
-    <div class="ops-tile">
+    <div class="ops-tile" id="ops-ngrok-tile" title="載入中">
       <div class="ops-label">LINE/ngrok</div>
       <div class="ops-value" id="ops-ngrok">載入中</div>
       <div class="ops-detail" id="ops-ngrok-detail">–</div>
@@ -1644,7 +1642,8 @@ async function loadMetrics() {
   const averageEl = document.getElementById('ops-average-seconds');
   const ngrokEl = document.getElementById('ops-ngrok');
   const ngrokDetailEl = document.getElementById('ops-ngrok-detail');
-  if (!healthEl || !totalEl || !failedEl || !averageEl || !ngrokEl || !ngrokDetailEl) return;
+  const ngrokTile = document.getElementById('ops-ngrok-tile');
+  if (!healthEl || !totalEl || !failedEl || !averageEl || !ngrokEl || !ngrokDetailEl || !ngrokTile) return;
 
   try {
     const [metricsRes, healthRes] = await Promise.all([
@@ -1669,13 +1668,16 @@ async function loadMetrics() {
     const ngrok = data.ngrok || {};
     ngrokEl.textContent = ngrok.running ? '已連線' : '未連線';
     ngrokEl.classList.toggle('warn', !ngrok.running);
-    ngrokDetailEl.textContent = ngrok.webhook_url || ngrok.message || '尚無 tunnel 資訊';
+    const ngrokDetail = ngrok.webhook_url || ngrok.message || '尚無 tunnel 資訊';
+    ngrokDetailEl.textContent = ngrokDetail;
+    ngrokTile.title = ngrokDetail;
   } catch (err) {
     healthEl.textContent = '載入失敗';
     healthEl.classList.add('warn');
     ngrokEl.textContent = '載入失敗';
     ngrokEl.classList.add('warn');
     ngrokDetailEl.textContent = '無法讀取 /metrics';
+    ngrokTile.title = '無法讀取 /metrics';
   }
 }
 
