@@ -130,6 +130,41 @@ MULTIPART_OVERHEAD_ALLOWANCE_BYTES = 1024 * 1024
 JOB_RETENTION_DAYS = int(os.getenv("JOB_RETENTION_DAYS", "30"))
 DB_BACKUP_KEEP = int(os.getenv("DB_BACKUP_KEEP", "5"))
 
+
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+RECORDING_PROFILES = {
+    "audio_standard": {
+        "label": "標準語音",
+        "audio_bps": _positive_int_env("RECORDING_AUDIO_BITRATE", 48_000),
+        "audio_sample_rate": _positive_int_env("RECORDING_AUDIO_SAMPLE_RATE", 24_000),
+        "audio_channels": _positive_int_env("RECORDING_AUDIO_CHANNELS", 1),
+        "video_bps": 0,
+        "video_fps": 0,
+    },
+    "audio_compact": {
+        "label": "省容量語音",
+        "audio_bps": _positive_int_env("RECORDING_COMPACT_AUDIO_BITRATE", 32_000),
+        "audio_sample_rate": _positive_int_env("RECORDING_COMPACT_AUDIO_SAMPLE_RATE", 16_000),
+        "audio_channels": 1,
+        "video_bps": 0,
+        "video_fps": 0,
+    },
+    "video_balanced": {
+        "label": "螢幕/視訊平衡",
+        "audio_bps": _positive_int_env("RECORDING_AUDIO_BITRATE", 48_000),
+        "audio_sample_rate": _positive_int_env("RECORDING_AUDIO_SAMPLE_RATE", 24_000),
+        "audio_channels": _positive_int_env("RECORDING_AUDIO_CHANNELS", 1),
+        "video_bps": _positive_int_env("RECORDING_VIDEO_BITRATE", 1_000_000),
+        "video_fps": _positive_int_env("RECORDING_VIDEO_FPS", 15),
+    },
+}
+
 # 確保目錄存在
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -349,6 +384,7 @@ async def health_check():
         summary_model=SUMMARY_MODEL,
         summary_fallback_model=SUMMARY_FALLBACK_MODEL,
         summary_verifier_model=SUMMARY_VERIFIER_MODEL,
+        recording_profiles=RECORDING_PROFILES,
         checks=checks,
     )
 
@@ -389,6 +425,7 @@ async def app_config():
         summary_model=SUMMARY_MODEL,
         summary_fallback_model=SUMMARY_FALLBACK_MODEL,
         summary_verifier_model=SUMMARY_VERIFIER_MODEL,
+        recording_profiles=RECORDING_PROFILES,
         max_upload_mb=MAX_UPLOAD_MB,
         max_upload_bytes=MAX_UPLOAD_BYTES,
         supported_extensions=sorted(SUPPORTED_MEDIA_FORMATS.keys()),
@@ -410,6 +447,7 @@ async def upload_audio(
     file: UploadFile = File(..., description="要處理的音檔或影片（支援 mp3/wav/m4a/mp4/mov 等）"),
     model: Optional[str] = Form(default=None, description=f"指定 Gemini 模型（預設：{GEMINI_MODEL}）"),
     title: Optional[str] = Form(default=None, description="自訂會議標題（預設使用檔案名稱）"),
+    recording_profile: Optional[str] = Form(default=None, description="瀏覽器錄音品質 profile"),
     content_length: Optional[int] = Header(default=None, alias="Content-Length"),
 ):
     """
@@ -496,6 +534,9 @@ async def upload_audio(
 
     # --- 寫入持久化任務佇列 ---
     selected_model = model or GEMINI_MODEL
+    selected_recording_profile = (recording_profile or "").strip()
+    if selected_recording_profile not in RECORDING_PROFILES:
+        selected_recording_profile = None
     try:
         enqueue_audio_job(
             job_id=job_id,
@@ -503,6 +544,7 @@ async def upload_audio(
             output_dir=OUTPUT_DIR,
             model=selected_model,
             meeting_title=title,
+            recording_profile=selected_recording_profile,
         )
     except Exception as e:
         if created_new_source_audio and source_audio_path.exists():

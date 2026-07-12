@@ -49,6 +49,7 @@ def enqueue_audio_job(
     summary_model: Optional[str] = None,
     summary_fallback_model: Optional[str] = None,
     summary_verifier_model: Optional[str] = None,
+    recording_profile: Optional[str] = None,
     force_segment_indices: Optional[list[int]] = None,
     summary_source_path: Optional[Path] = None,
     transcript_reuse_source_path: Optional[Path] = None,
@@ -69,6 +70,7 @@ def enqueue_audio_job(
             "summary_model": selected_summary_model,
             "summary_fallback_model": selected_summary_fallback_model,
             "summary_verifier_model": selected_summary_verifier_model,
+            "recording_profile": recording_profile,
             "meeting_title": meeting_title,
             "force_segment_indices": sorted(set(force_segment_indices or [])),
             "summary_source_path": str(summary_source_path) if summary_source_path else None,
@@ -200,6 +202,7 @@ class JobQueueWorker:
         summary_model = payload.get("summary_model") or SUMMARY_MODEL
         summary_fallback_model = payload.get("summary_fallback_model") or SUMMARY_FALLBACK_MODEL
         summary_verifier_model = payload.get("summary_verifier_model") or SUMMARY_VERIFIER_MODEL
+        recording_profile = payload.get("recording_profile")
         meeting_title = payload.get("meeting_title")
         force_segment_indices = payload.get("force_segment_indices") or []
         summary_source_path = payload.get("summary_source_path")
@@ -216,6 +219,7 @@ class JobQueueWorker:
             summary_model=summary_model,
             summary_fallback_model=summary_fallback_model,
             summary_verifier_model=summary_verifier_model,
+            recording_profile=recording_profile,
             force_segment_indices=force_segment_indices,
             summary_source_path=Path(summary_source_path) if summary_source_path else None,
             transcript_reuse_source_path=(

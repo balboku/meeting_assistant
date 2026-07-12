@@ -1322,6 +1322,21 @@ def _prepare_audio_for_transcription(
         "preprocessed": False,
         "warnings": [],
     }
+    try:
+        file_size_bytes = audio_path.stat().st_size
+        report["file_size_bytes"] = file_size_bytes
+        report["estimated_bitrate_kbps"] = round(
+            file_size_bytes * 8 / max(1, duration_seconds) / 1000,
+            1,
+        )
+    except OSError:
+        report["file_size_bytes"] = None
+        report["estimated_bitrate_kbps"] = None
+
+    if audio.channels > 2:
+        report["warnings"].append("錄音聲道多於 2 聲道，會增加容量但不一定提升會議轉錄品質。")
+    if audio.frame_rate < 12_000:
+        report["warnings"].append("取樣率低於 12 kHz，可能影響人聲與專有名詞辨識。")
 
     if (
         not math.isfinite(dbfs)
@@ -2422,6 +2437,7 @@ def process_audio_task(
     summary_model: Optional[str] = None,
     summary_fallback_model: Optional[str] = None,
     summary_verifier_model: Optional[str] = None,
+    recording_profile: Optional[str] = None,
     force_segment_indices: Optional[list[int]] = None,
     summary_source_path: Optional[Path] = None,
     transcript_reuse_source_path: Optional[Path] = None,
@@ -2447,6 +2463,7 @@ def process_audio_task(
         summary_fallback_model=summary_fallback_model,
     )
     summary_verifier_model = (summary_verifier_model or SUMMARY_VERIFIER_MODEL).strip()
+    recording_profile = (recording_profile or "legacy_upload").strip()
     summary_model_used = model
     actual_meeting_date = _infer_meeting_date(meeting_title, audio_path)
 
@@ -2754,6 +2771,19 @@ def process_audio_task(
         output_path = output_dir / output_filename
         quality_report = _build_quality_report(audio_report, segment_report, full_transcript)
         quality_report["summary_quality_mode"] = "high" if high_quality_summary else "standard"
+        try:
+            source_audio_size = audio_path.stat().st_size
+            source_audio_sha256 = _sha256_file(audio_path)
+        except OSError:
+            source_audio_size = None
+            source_audio_sha256 = None
+        quality_report["recording"] = {
+            "profile": recording_profile,
+            "source_audio_name": audio_path.name,
+            "source_audio_size_bytes": source_audio_size,
+            "source_audio_sha256": source_audio_sha256,
+            "source_audio_suffix": audio_path.suffix.lower(),
+        }
 
         seg_note = f"（分 {total_segs} 段處理）" if is_segmented else ""
         frontmatter = f"""---
@@ -2766,6 +2796,9 @@ transcription_model: {model}
 summary_model: {summary_model_used}
 summary_fallback_model: {summary_secondary_model}
 summary_verifier_model: {summary_verifier_model}
+recording_profile: {recording_profile}
+source_audio_size_bytes: {quality_report['recording']['source_audio_size_bytes']}
+source_audio_sha256: {quality_report['recording']['source_audio_sha256'] or 'unavailable'}
 summary_quality_mode: {'high' if high_quality_summary else 'standard'}
 job_id: {job_id}
 quality_score: {quality_report['score']}

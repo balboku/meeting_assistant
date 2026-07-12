@@ -64,6 +64,13 @@ TRANSCRIPTION_MODEL=gemini-3.1-flash-lite
 SUMMARY_MODEL=gemma-4-31b-it
 SUMMARY_FALLBACK_MODEL=gemini-3.1-flash-lite
 SUMMARY_VERIFIER_MODEL=gemini-3.5-flash
+RECORDING_AUDIO_BITRATE=48000
+RECORDING_AUDIO_SAMPLE_RATE=24000
+RECORDING_AUDIO_CHANNELS=1
+RECORDING_COMPACT_AUDIO_BITRATE=32000
+RECORDING_COMPACT_AUDIO_SAMPLE_RATE=16000
+RECORDING_VIDEO_BITRATE=1000000
+RECORDING_VIDEO_FPS=15
 LINE_CHANNEL_SECRET=your_line_channel_secret_here
 LINE_CHANNEL_ACCESS_TOKEN=your_line_channel_access_token_here
 APP_API_KEY=change_me_to_a_long_random_value
@@ -119,6 +126,13 @@ BASE_URL=http://127.0.0.1:8001 scripts/smoke_e2e.sh
 | `SUMMARY_MODEL` | `gemma-4-31b-it` | 根據完整逐字稿產生討論摘要、最終決議與待辦事項的文字模型。 |
 | `SUMMARY_FALLBACK_MODEL` | `gemini-3.1-flash-lite` | 摘要模型失敗時自動改用的備援模型，避免整體任務直接失敗。 |
 | `SUMMARY_VERIFIER_MODEL` | `gemini-3.5-flash` | 使用「高品質重整」時，第二階段的證據查核模型。 |
+| `RECORDING_AUDIO_BITRATE` | `48000` | 標準瀏覽器錄音的 Opus 位元率（bps）。 |
+| `RECORDING_AUDIO_SAMPLE_RATE` | `24000` | 標準錄音取樣率（Hz）。 |
+| `RECORDING_AUDIO_CHANNELS` | `1` | 錄音聲道數，會議語音建議單聲道。 |
+| `RECORDING_COMPACT_AUDIO_BITRATE` | `32000` | 省容量語音 profile 的 Opus 位元率（bps）。 |
+| `RECORDING_COMPACT_AUDIO_SAMPLE_RATE` | `16000` | 省容量語音 profile 的取樣率（Hz）。 |
+| `RECORDING_VIDEO_BITRATE` | `1000000` | 螢幕/視訊平衡 profile 的影像位元率（bps）。 |
+| `RECORDING_VIDEO_FPS` | `15` | 螢幕/視訊平衡 profile 的目標幀率。 |
 | `DB_PATH` | `./meetings.db` | SQLite 資料庫位置，測試或部署時可換到獨立磁碟路徑。 |
 | `MEETING_TEMP_DIR` | `./temp` | 分段與處理中的暫存檔資料夾；過期暫存會自動清理。 |
 | `MEETING_OUTPUT_DIR` | `./output` | 生成 Markdown 會議記錄的輸出資料夾。 |

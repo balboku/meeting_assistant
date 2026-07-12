@@ -652,6 +652,15 @@
       background: var(--bg-card2);
     }
     .rec-screen-options.show { display: block; }
+    .rec-quality-box {
+      margin: -4px 0 18px;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg-card2);
+    }
+    .rec-quality-box .form-label { margin-bottom: 6px; }
+    .rec-size-estimate { margin-top: 7px; color: var(--text-dim); font-size: 12px; }
     .rec-check {
       display: flex; align-items: center; gap: 10px;
       color: var(--text); font-size: 14px; cursor: pointer;
@@ -914,6 +923,15 @@
         <span>同時錄麥克風，錄製中可關閉</span>
       </label>
     </div>
+    <div class="rec-quality-box">
+      <label class="form-label" for="rec-quality-profile">錄製品質</label>
+      <select id="rec-quality-profile" class="form-input" onchange="updateRecordingEstimate()">
+        <option value="audio_standard">標準語音（推薦）</option>
+        <option value="audio_compact">省容量語音</option>
+        <option value="video_balanced">螢幕/視訊平衡</option>
+      </select>
+      <div class="rec-size-estimate" id="rec-size-estimate">每小時預估容量：載入中…</div>
+    </div>
 
     <!-- 視訊預覽（錄影模式才顯示） -->
     <video id="rec-preview" class="rec-preview" autoplay muted playsinline></video>
@@ -969,7 +987,12 @@ let runtimeConfig = {
   model: '',
   max_upload_mb: 500,
   max_upload_bytes: 500 * 1024 * 1024,
-  supported_extensions: ['.mp3', '.wav', '.m4a', '.aac', '.flac']
+  supported_extensions: ['.mp3', '.wav', '.m4a', '.aac', '.flac'],
+  recording_profiles: {
+    audio_standard: { audio_bps: 48000, audio_sample_rate: 24000, audio_channels: 1, video_bps: 0, video_fps: 0 },
+    audio_compact: { audio_bps: 32000, audio_sample_rate: 16000, audio_channels: 1, video_bps: 0, video_fps: 0 },
+    video_balanced: { audio_bps: 48000, audio_sample_rate: 24000, audio_channels: 1, video_bps: 1000000, video_fps: 15 }
+  }
 };
 
 function formatBytes(bytes = 0) {
@@ -1011,6 +1034,59 @@ async function loadRuntimeConfig() {
     console.warn('載入執行期設定失敗，使用預設值。', err);
   }
   updateUploadLimitHint();
+  updateRecordingEstimate();
+}
+
+function isVideoRecordingMode() {
+  return recMode === 'video' || recMode === 'screen';
+}
+
+function getRecordingProfileId() {
+  const select = document.getElementById('rec-quality-profile');
+  const selected = select?.value || 'audio_standard';
+  if (isVideoRecordingMode()) return 'video_balanced';
+  return selected === 'audio_compact' ? 'audio_compact' : 'audio_standard';
+}
+
+function getRecordingProfile() {
+  const profiles = runtimeConfig.recording_profiles || {};
+  return profiles[getRecordingProfileId()] || profiles.audio_standard || {
+    audio_bps: 48000,
+    audio_sample_rate: 24000,
+    audio_channels: 1,
+    video_bps: 0,
+    video_fps: 0,
+  };
+}
+
+function syncRecordingProfileOptions() {
+  const select = document.getElementById('rec-quality-profile');
+  if (!select) return;
+  const videoMode = isVideoRecordingMode();
+  Array.from(select.options).forEach(option => {
+    const allowed = videoMode
+      ? option.value === 'video_balanced'
+      : option.value !== 'video_balanced';
+    option.hidden = !allowed;
+    option.disabled = !allowed;
+  });
+  const desired = videoMode
+    ? 'video_balanced'
+    : (select.value === 'audio_compact' ? 'audio_compact' : 'audio_standard');
+  if (select.value !== desired) select.value = desired;
+  updateRecordingEstimate();
+}
+
+function updateRecordingEstimate() {
+  const hint = document.getElementById('rec-size-estimate');
+  if (!hint) return;
+  const profile = getRecordingProfile();
+  const bitsPerSecond = Number(profile.audio_bps || 0)
+    + (isVideoRecordingMode() ? Number(profile.video_bps || 0) : 0);
+  const bytesPerHour = bitsPerSecond * 3600 / 8;
+  const currentBytes = bitsPerSecond * Math.max(0, recSeconds || 0) / 8;
+  const current = currentBytes > 0 ? `目前約 ${formatBytes(currentBytes)}；` : '';
+  hint.textContent = `${current}每小時預估容量：${formatBytes(bytesPerHour)}`;
 }
 
 // ── 主要資料載入 ──────────────────────────────────────────────────
@@ -2013,6 +2089,7 @@ function resetRecorder() {
   recPreview.srcObject = null;
   if (recIncludeMic) recIncludeMic.checked = true;
   updateRecordingModeOptions();
+  syncRecordingProfileOptions();
   document.getElementById('rec-title').value = '';
   // 清空 canvas
   const ctx = recVis.getContext('2d');
@@ -2029,6 +2106,7 @@ function switchRecMode(mode) {
   document.getElementById('tab-video').classList.toggle('active', mode === 'video');
   document.getElementById('tab-screen').classList.toggle('active', mode === 'screen');
   updateRecordingModeOptions();
+  syncRecordingProfileOptions();
 }
 
 function stopStreamTracks(stream) {
@@ -2049,16 +2127,34 @@ function releaseRecordingStreams() {
   recMicMuted = false;
 }
 
-async function mixAudioTracks(audioTracks) {
-  if (audioTracks.length <= 1 || !(window.AudioContext || window.webkitAudioContext)) {
+async function mixAudioTracks(audioTracks, sampleRate) {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!audioTracks.length || !AudioContextClass) {
     return audioTracks;
   }
 
-  recMixAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  recMixAudioCtx = new AudioContextClass({ sampleRate });
   const destination = recMixAudioCtx.createMediaStreamDestination();
+  try {
+    destination.channelCount = 1;
+    destination.channelCountMode = 'explicit';
+  } catch (err) {
+    console.debug('無法強制混音輸出為單聲道，沿用瀏覽器設定。', err);
+  }
+  const compressor = recMixAudioCtx.createDynamicsCompressor();
+  compressor.threshold.value = -18;
+  compressor.knee.value = 12;
+  compressor.ratio.value = 4;
+  compressor.attack.value = 0.003;
+  compressor.release.value = 0.25;
+  if (audioTracks.length > 1) compressor.connect(destination);
+  const trackGain = 1 / Math.max(1, audioTracks.length);
+  const outputNode = audioTracks.length > 1 ? compressor : destination;
   audioTracks.forEach(track => {
     const source = recMixAudioCtx.createMediaStreamSource(new MediaStream([track]));
-    source.connect(destination);
+    const gain = recMixAudioCtx.createGain();
+    gain.gain.value = trackGain;
+    source.connect(gain).connect(outputNode);
   });
   if (recMixAudioCtx.state === 'suspended') {
     await recMixAudioCtx.resume();
@@ -2131,6 +2227,14 @@ function startAudioVisualizer(stream) {
 }
 
 async function createRecordingStream() {
+  const profile = getRecordingProfile();
+  const microphoneConstraints = {
+    channelCount: profile.audio_channels,
+    sampleRate: profile.audio_sample_rate,
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  };
   if (recMode === 'screen') {
     if (!navigator.mediaDevices.getDisplayMedia) {
       throw new Error('此瀏覽器不支援螢幕錄製，請改用 Chrome 或 Edge。');
@@ -2138,7 +2242,7 @@ async function createRecordingStream() {
 
     recStatusEl.textContent = '請選擇要分享的螢幕、視窗或分頁...';
     const displayStream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: 30 },
+      video: { frameRate: { ideal: profile.video_fps || 15, max: 30 } },
       audio: true,
     });
     recSourceStreams.push(displayStream);
@@ -2151,7 +2255,7 @@ async function createRecordingStream() {
 
       if (includeMic) {
         try {
-          const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const micStream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints });
           recSourceStreams.push(micStream);
           micAudioTracks = micStream.getAudioTracks();
           recMicAudioTracks = micAudioTracks;
@@ -2171,7 +2275,7 @@ async function createRecordingStream() {
         throw new Error('目前沒有可錄製的聲音。請改選 Chrome 分頁並勾選「分享分頁音訊」，或勾選「同時錄麥克風」。');
       }
 
-      const mixedAudioTracks = await mixAudioTracks(rawAudioTracks);
+      const mixedAudioTracks = await mixAudioTracks(rawAudioTracks, profile.audio_sample_rate);
       const combinedStream = new MediaStream([
         ...displayStream.getVideoTracks(),
         ...mixedAudioTracks,
@@ -2185,8 +2289,15 @@ async function createRecordingStream() {
   }
 
   const constraints = recMode === 'video'
-    ? { audio: true, video: { width: 1280, height: 720 } }
-    : { audio: true };
+    ? {
+        audio: microphoneConstraints,
+        video: {
+          width: { ideal: 1280, max: 1280 },
+          height: { ideal: 720, max: 720 },
+          frameRate: { ideal: profile.video_fps || 15, max: 30 },
+        },
+      }
+    : { audio: microphoneConstraints };
   return navigator.mediaDevices.getUserMedia(constraints);
 }
 
@@ -2210,7 +2321,20 @@ async function startRecording() {
       : ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
     const mimeType = mimeTypes.find(t => MediaRecorder.isTypeSupported(t)) || '';
 
-    mediaRecorder = new MediaRecorder(recStream, mimeType ? { mimeType } : {});
+    const profile = getRecordingProfile();
+    const recorderOptions = {
+      ...(mimeType ? { mimeType } : {}),
+      audioBitsPerSecond: Number(profile.audio_bps || 48000),
+    };
+    if (isVideoRecordingMode()) {
+      recorderOptions.videoBitsPerSecond = Number(profile.video_bps || 1000000);
+    }
+    try {
+      mediaRecorder = new MediaRecorder(recStream, recorderOptions);
+    } catch (err) {
+      console.warn('瀏覽器不接受指定錄製位元率，改用瀏覽器預設值。', err);
+      mediaRecorder = new MediaRecorder(recStream, mimeType ? { mimeType } : {});
+    }
     mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
     mediaRecorder.onstop = onRecordingStopped;
     mediaRecorder.start(1000);  // 每秒收一次 chunk
@@ -2221,6 +2345,7 @@ async function startRecording() {
       const m = String(Math.floor(recSeconds / 60)).padStart(2, '0');
       const s = String(recSeconds % 60).padStart(2, '0');
       recTimerEl.textContent = `${m}:${s}`;
+      updateRecordingEstimate();
     }, 1000);
 
     // UI 更新
@@ -2228,6 +2353,7 @@ async function startRecording() {
     btnRecStop.classList.add('show');
     recStatusEl.textContent = recMode === 'screen' ? screenRecordingStatusText() : '🔴 錄製中...';
     updateRecordingMicToggle();
+    updateRecordingEstimate();
     recTimerEl.style.color = 'var(--red)';
 
   } catch (err) {
@@ -2266,7 +2392,7 @@ async function onRecordingStopped() {
 
   recResult.classList.add('show');
   recProg.classList.add('show');
-  recProgMsg.textContent = '正在上傳...';
+  recProgMsg.textContent = `錄音完成（${formatBytes(file.size)}），正在上傳...`;
 
   // 關閉錄製按鈕，禁止關閉
   document.getElementById('rec-close-btn').disabled = true;
@@ -2274,6 +2400,7 @@ async function onRecordingStopped() {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('title', title);
+  formData.append('recording_profile', getRecordingProfileId());
 
   try {
     const res = await fetch(`${API}/upload-audio`, { method: 'POST', body: formData });

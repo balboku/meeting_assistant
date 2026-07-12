@@ -9,7 +9,7 @@ backend/models.py — Pydantic 資料模型定義
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 
@@ -145,6 +145,7 @@ class AppConfigResponse(BaseModel):
     summary_model: str
     summary_fallback_model: str
     summary_verifier_model: str
+    recording_profiles: dict[str, dict[str, Any]]
     max_upload_mb: int
     max_upload_bytes: int
     supported_extensions: list[str]
@@ -236,6 +237,7 @@ class HealthResponse(BaseModel):
     summary_model: str
     summary_fallback_model: str
     summary_verifier_model: str
+    recording_profiles: dict[str, dict[str, Any]]
     checks: list[dict[str, str]] = Field(default_factory=list)
 
 

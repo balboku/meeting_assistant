@@ -211,6 +211,8 @@ class ConfigRegressionTests(unittest.TestCase):
         self.assertEqual(payload["summary_model"], main.SUMMARY_MODEL)
         self.assertEqual(payload["summary_fallback_model"], main.SUMMARY_FALLBACK_MODEL)
         self.assertEqual(payload["summary_verifier_model"], main.SUMMARY_VERIFIER_MODEL)
+        self.assertEqual(payload["recording_profiles"]["audio_standard"]["audio_bps"], 48000)
+        self.assertEqual(payload["recording_profiles"]["video_balanced"]["video_fps"], 15)
         self.assertIn(".mp3", payload["supported_extensions"])
         self.assertIn(".mp4", payload["supported_extensions"])
 
@@ -1231,6 +1233,8 @@ class TaskRegressionTests(unittest.TestCase):
             self.assertIn("transcription_model: gemini-test", content)
             self.assertIn("summary_model: gemini-test", content)
             self.assertIn("summary_fallback_model: gemini-test", content)
+            self.assertIn("recording_profile: legacy_upload", content)
+            self.assertIn("source_audio_size_bytes:", content)
 
     def test_segmented_audio_task_rejects_fresh_incomplete_segment(self):
         import backend.tasks as tasks
@@ -1552,6 +1556,7 @@ class UploadQueueRegressionTests(unittest.TestCase):
                     "POST",
                     "/upload-audio",
                     files={"file": ("meeting.mp3", BytesIO(b"ID3" + b"\0" * 32), "audio/mpeg")},
+                    data={"recording_profile": "audio_compact"},
                 )
 
             self.assertEqual(response.status_code, 202)
@@ -1559,6 +1564,7 @@ class UploadQueueRegressionTests(unittest.TestCase):
             self.assertEqual(len(saved_audio), 1)
             self.assertEqual(captured["audio_path"], saved_audio[0])
             self.assertEqual(captured["output_dir"], output_dir)
+            self.assertEqual(captured["recording_profile"], "audio_compact")
             self.assertTrue(saved_audio[0].read_bytes().startswith(b"ID3"))
 
     def test_upload_route_reuses_existing_audio_with_same_sha256(self):
@@ -2733,7 +2739,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("audio: true", html)
         self.assertIn("const includeMic = Boolean(recIncludeMic?.checked)", html)
         self.assertIn("if (includeMic)", html)
-        self.assertIn("getUserMedia({ audio: true })", html)
+        self.assertIn("getUserMedia({ audio: microphoneConstraints })", html)
+        self.assertIn("sampleRate: profile.audio_sample_rate", html)
         self.assertIn("recMicAudioTracks = micAudioTracks", html)
         self.assertIn("track.enabled = !recMicMuted", html)
         self.assertIn("麥克風已關閉", html)
@@ -3441,6 +3448,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('id="edit-summary-button"', html)
         self.assertIn('id="revision-history-button"', html)
         self.assertIn("function saveSummaryEdit", html)
+        self.assertIn('id="rec-quality-profile"', html)
+        self.assertIn("audioBitsPerSecond", html)
+        self.assertIn("videoBitsPerSecond", html)
+        self.assertIn("recording_profile", html)
 
 
 if __name__ == "__main__":
