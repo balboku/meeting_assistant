@@ -1197,6 +1197,7 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
     record = dict(row)
     quality_report_json = record.pop("quality_report_json", None)
     warning_count = 0
+    warning_preview = None
     try:
         quality_report = json.loads(quality_report_json) if quality_report_json else None
     except json.JSONDecodeError:
@@ -1205,9 +1206,14 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         warnings = quality_report.get("warnings") or []
         if isinstance(warnings, list):
             warning_count = len(warnings)
+            if warnings:
+                warning_preview = str(warnings[0]).strip() or None
     if not warning_count and record.get("quality_score") is None and not record.get("quality_label"):
         warning_count = _legacy_markdown_quality_warning_count(str(record.get("output_path") or ""))
+        if warning_count:
+            warning_preview = f"舊紀錄需複核：已偵測到 {warning_count} 個品質警示"
     record["quality_warning_count"] = warning_count
+    record["quality_warning_preview"] = warning_preview
     return record
 
 

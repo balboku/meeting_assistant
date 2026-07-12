@@ -2302,9 +2302,11 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(listed["quality_score"], 72)
         self.assertEqual(listed["quality_label"], "需複核")
         self.assertEqual(listed["quality_warning_count"], 2)
+        self.assertEqual(listed["quality_warning_preview"], "錄音音量偏低")
         self.assertEqual(searched["quality_score"], 72)
         self.assertEqual(searched["quality_label"], "需複核")
         self.assertEqual(searched["quality_warning_count"], 2)
+        self.assertEqual(searched["quality_warning_preview"], "錄音音量偏低")
 
     def test_legacy_meeting_list_infers_quality_warning_count_from_markdown(self):
         database, tmp_path = self._isolated_database()
@@ -2341,7 +2343,9 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertIsNone(listed["quality_score"])
         self.assertIsNone(listed["quality_label"])
         self.assertGreaterEqual(listed["quality_warning_count"], 5)
+        self.assertIn("舊紀錄需複核", listed["quality_warning_preview"])
         self.assertEqual(searched["quality_warning_count"], listed["quality_warning_count"])
+        self.assertEqual(searched["quality_warning_preview"], listed["quality_warning_preview"])
 
     def test_needs_review_filter_scans_beyond_regular_list_limit(self):
         database, tmp_path = self._isolated_database()
@@ -3980,7 +3984,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('id="needs-review-filter"', html)
         self.assertIn("review-filter", html)
         self.assertIn("quality_warning_count", html)
+        self.assertIn("quality_warning_preview", html)
         self.assertIn("card-quality-chip", html)
+        self.assertIn("card-review-reason", html)
+        self.assertIn("原因：${escapeHtml(warningPreview)}", html)
         self.assertIn("需複核 ${warningCount}", html)
         self.assertIn("const reviewParam = reviewOnly ? '&needs_review=true' : ''", html)
         self.assertIn("/meetings/search?q=${encodeURIComponent(query)}&limit=100${reviewParam}", html)
