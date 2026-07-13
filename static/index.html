@@ -1107,6 +1107,13 @@
     .rec-tab.active {
       border-color: var(--blue); background: rgba(122,162,247,0.1); color: var(--blue); font-weight: 600;
     }
+    .rec-tab:disabled,
+    .btn-rec-start:disabled,
+    #rec-quality-profile:disabled,
+    #rec-include-mic:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
     .rec-screen-options {
       display: none;
       margin: -12px 0 18px;
@@ -3575,6 +3582,8 @@ let audioCtx = null;
 let analyser = null;
 let activeRecordingJobId = null;
 let activeRecordingPoll = null;
+let activeRecordingMode = null;
+let activeRecordingProfileId = null;
 
 const recModal    = document.getElementById('record-modal');
 const recPreview  = document.getElementById('rec-preview');
@@ -3633,6 +3642,9 @@ async function cancelActiveRecording() {
   }
   clearActiveRecordingPoll();
   activeRecordingJobId = null;
+  activeRecordingMode = null;
+  activeRecordingProfileId = null;
+  setRecordingConfigurationLocked(false);
   recProgMsg.textContent = '已取消處理。';
   closeBtn.disabled = false;
   loadJobs();
@@ -3642,6 +3654,8 @@ async function cancelActiveRecording() {
 function resetRecorder() {
   clearActiveRecordingPoll();
   activeRecordingJobId = null;
+  activeRecordingMode = null;
+  activeRecordingProfileId = null;
   mediaRecorder = null;
   recordedChunks = [];
   recScreenAudioCaptured = false;
@@ -3661,6 +3675,7 @@ function resetRecorder() {
   recPreview.classList.remove('show');
   recPreview.srcObject = null;
   if (recIncludeMic) recIncludeMic.checked = true;
+  setRecordingConfigurationLocked(false);
   updateRecordingModeOptions();
   syncRecordingProfileOptions();
   document.getElementById('rec-title').value = '';
@@ -3673,7 +3688,17 @@ function updateRecordingModeOptions() {
   recScreenOptions?.classList.toggle('show', recMode === 'screen');
 }
 
+function setRecordingConfigurationLocked(locked) {
+  document.getElementById('tab-audio').disabled = locked;
+  document.getElementById('tab-video').disabled = locked;
+  document.getElementById('tab-screen').disabled = locked;
+  document.getElementById('rec-quality-profile').disabled = locked;
+  if (recIncludeMic) recIncludeMic.disabled = locked;
+  btnRecStart.disabled = locked;
+}
+
 function switchRecMode(mode) {
+  if (document.getElementById('rec-quality-profile').disabled) return;
   recMode = mode;
   document.getElementById('tab-audio').classList.toggle('active', mode === 'audio');
   document.getElementById('tab-video').classList.toggle('active', mode === 'video');
@@ -3906,6 +3931,9 @@ async function createRecordingStream() {
 async function startRecording() {
   try {
     recordedChunks = [];
+    activeRecordingMode = recMode;
+    activeRecordingProfileId = getRecordingProfileId();
+    setRecordingConfigurationLocked(true);
     recStream = await createRecordingStream();
 
     // 錄影預覽
@@ -3962,6 +3990,9 @@ async function startRecording() {
 
   } catch (err) {
     releaseRecordingStreams();
+    activeRecordingMode = null;
+    activeRecordingProfileId = null;
+    setRecordingConfigurationLocked(false);
     alert(`無法開始錄製：${err.message}\n\n${recordingPermissionHint()}`);
   }
 }
@@ -3985,31 +4016,40 @@ function stopRecording() {
 }
 
 async function onRecordingStopped() {
+  const completedMode = activeRecordingMode || recMode;
+  const completedProfileId = activeRecordingProfileId || getRecordingProfileId();
+  const completedModeLabel = recordingModeLabel(completedMode);
   // 決定副檔名
-  const ext = (recMode === 'video' || recMode === 'screen') ? 'webm' : 'webm';
+  const ext = (completedMode === 'video' || completedMode === 'screen') ? 'webm' : 'webm';
   const title = document.getElementById('rec-title').value.trim()
     || `現場錄製_${new Date().toLocaleString('zh-TW').replace(/[/:]/g, '-')}`;
 
   const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
   const file = new File([blob], `recording.${ext}`, { type: blob.type });
   if (!recordedChunks.length || file.size <= 0) {
-    setRecordingResult(`❌ ${recordingModeLabel()}失敗`, 'error');
+    setRecordingResult(`❌ ${completedModeLabel}失敗`, 'error');
     recProg.classList.add('show');
-    recProgMsg.textContent = `❌ ${recordingModeLabel()}失敗：沒有取得任何錄製資料，請重新錄製並確認瀏覽器權限。`;
+    recProgMsg.textContent = `❌ ${completedModeLabel}失敗：沒有取得任何錄製資料，請重新錄製並確認瀏覽器權限。`;
     document.getElementById('rec-close-btn').disabled = false;
+    activeRecordingMode = null;
+    activeRecordingProfileId = null;
+    setRecordingConfigurationLocked(false);
     return;
   }
   if (file.size > runtimeConfig.max_upload_bytes) {
-    setRecordingResult(`❌ ${recordingModeLabel()}檔案過大`, 'error');
+    setRecordingResult(`❌ ${completedModeLabel}檔案過大`, 'error');
     recProg.classList.add('show');
-    recProgMsg.textContent = `❌ ${recordingModeLabel()}檔案超過上限 ${formatBytes(runtimeConfig.max_upload_bytes)}，請縮短錄製時間。`;
+    recProgMsg.textContent = `❌ ${completedModeLabel}檔案超過上限 ${formatBytes(runtimeConfig.max_upload_bytes)}，請縮短錄製時間。`;
     document.getElementById('rec-close-btn').disabled = false;
+    activeRecordingMode = null;
+    activeRecordingProfileId = null;
+    setRecordingConfigurationLocked(false);
     return;
   }
 
-  setRecordingResult(`✅ ${recordingModeLabel()}完成！正在送出 AI 分析，請稍候...`);
+  setRecordingResult(`✅ ${completedModeLabel}完成！正在送出 AI 分析，請稍候...`);
   recProg.classList.add('show');
-  recProgMsg.textContent = `${recordingModeLabel()}完成（${formatBytes(file.size)}），正在上傳...`;
+  recProgMsg.textContent = `${completedModeLabel}完成（${formatBytes(file.size)}），正在上傳...`;
 
   // 關閉錄製按鈕，禁止關閉
   document.getElementById('rec-close-btn').disabled = true;
@@ -4017,7 +4057,7 @@ async function onRecordingStopped() {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('title', title);
-  formData.append('recording_profile', getRecordingProfileId());
+  formData.append('recording_profile', completedProfileId);
 
   try {
     const res = await fetch(`${API}/upload-media`, { method: 'POST', body: formData });
@@ -4031,9 +4071,12 @@ async function onRecordingStopped() {
     // 開始輪詢
     pollRecStatus(data.job_id);
   } catch (err) {
-    setRecordingResult(`❌ ${recordingModeLabel()}上傳失敗`, 'error');
+    setRecordingResult(`❌ ${completedModeLabel}上傳失敗`, 'error');
     recProgMsg.textContent = `❌ 上傳失敗：${err.message}`;
     document.getElementById('rec-close-btn').disabled = false;
+    activeRecordingMode = null;
+    activeRecordingProfileId = null;
+    setRecordingConfigurationLocked(false);
   }
 }
 
@@ -4056,6 +4099,9 @@ async function pollRecStatus(jobId) {
       if (data.status === 'done') {
         clearActiveRecordingPoll();
         activeRecordingJobId = null;
+        activeRecordingMode = null;
+        activeRecordingProfileId = null;
+        setRecordingConfigurationLocked(false);
         setRecordingResult('✅ AI 分析完成！');
         recProgMsg.textContent = '✅ AI 分析完成！';
         document.getElementById('rec-close-btn').disabled = false;
@@ -4072,6 +4118,9 @@ async function pollRecStatus(jobId) {
       } else if (data.status === 'failed') {
         clearActiveRecordingPoll();
         activeRecordingJobId = null;
+        activeRecordingMode = null;
+        activeRecordingProfileId = null;
+        setRecordingConfigurationLocked(false);
         setRecordingResult('❌ AI 分析失敗', 'error');
         recProgMsg.textContent = `❌ AI 分析失敗：${data.message || '未知錯誤'}`;
         document.getElementById('rec-close-btn').disabled = false;
@@ -4080,6 +4129,9 @@ async function pollRecStatus(jobId) {
       } else if (data.status === 'cancelled') {
         clearActiveRecordingPoll();
         activeRecordingJobId = null;
+        activeRecordingMode = null;
+        activeRecordingProfileId = null;
+        setRecordingConfigurationLocked(false);
         setRecordingResult('已取消處理。', 'error');
         recProgMsg.textContent = '已取消處理。';
         document.getElementById('rec-close-btn').disabled = false;
