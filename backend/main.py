@@ -934,6 +934,7 @@ async def app_config():
         max_upload_mb=MAX_UPLOAD_MB,
         max_upload_bytes=MAX_UPLOAD_BYTES,
         supported_extensions=sorted(SUPPORTED_MEDIA_FORMATS.keys()),
+        source_media_archive_retention_days=SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS,
     )
 
 

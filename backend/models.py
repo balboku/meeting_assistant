@@ -220,6 +220,7 @@ class AppConfigResponse(BaseModel):
     max_upload_mb: int
     max_upload_bytes: int
     supported_extensions: list[str]
+    source_media_archive_retention_days: int
 
 
 # =============================================================================

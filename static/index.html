@@ -1374,6 +1374,7 @@ let runtimeConfig = {
   model: '',
   max_upload_mb: 500,
   max_upload_bytes: 500 * 1024 * 1024,
+  source_media_archive_retention_days: 90,
   supported_extensions: ['.mp3', '.wav', '.m4a', '.aac', '.flac'],
   recording_profiles: {
     audio_standard: { audio_bps: 48000, audio_sample_rate: 24000, audio_channels: 1, video_bps: 0, video_fps: 0 },
@@ -1390,6 +1391,13 @@ function formatBytes(bytes = 0) {
   return `${value} B`;
 }
 
+function sourceArchiveRetentionLabel(days = runtimeConfig.source_media_archive_retention_days) {
+  const retentionDays = Number(days || 0);
+  return retentionDays > 0
+    ? `已移除備份保留 ${retentionDays} 天`
+    : '已移除備份自動清理停用';
+}
+
 function sourceStorageTitle(sourceFiles = 0, sourceBytes = 0, unlinkedFiles = 0, unlinkedBytes = 0, largestFiles = [], archivedFiles = 0, archivedBytes = 0) {
   const lines = [`原始錄音/錄影：${sourceFiles} 個檔案，${formatBytes(sourceBytes)}`];
   if (unlinkedFiles > 0) {
@@ -1398,6 +1406,7 @@ function sourceStorageTitle(sourceFiles = 0, sourceBytes = 0, unlinkedFiles = 0,
   if (archivedFiles > 0) {
     lines.push(`已移除備份：${archivedFiles} 個 / ${formatBytes(archivedBytes)}`);
   }
+  lines.push(`備份政策：${sourceArchiveRetentionLabel()}`);
   const largest = Array.isArray(largestFiles) ? largestFiles.slice(0, 5) : [];
   if (largest.length) {
     lines.push('最大檔案：');
@@ -1562,11 +1571,13 @@ async function openSourceStorageInventory() {
     const archivePayload = await archiveRes.json();
     const files = Array.isArray(payload.files) ? payload.files : [];
     const archivedFiles = Array.isArray(archivePayload.files) ? archivePayload.files : [];
+    const archiveRetentionLabel = sourceArchiveRetentionLabel();
     const summary = `<div class="source-storage-summary">
       <span class="source-storage-badge">總檔案 ${Number(payload.total_files || 0)} 個</span>
       <span class="source-storage-badge">總容量 ${formatBytes(payload.total_bytes)}</span>
       <span class="source-storage-badge unlinked">未連結 ${Number(payload.unlinked_files || 0)} 個 / ${formatBytes(payload.unlinked_bytes)}</span>
       <span class="source-storage-badge">已移除備份 ${Number(archivePayload.total_files || 0)} 個 / ${formatBytes(archivePayload.total_bytes)}</span>
+      <span class="source-storage-badge">${escapeHtml(archiveRetentionLabel)}</span>
     </div>`;
     const rows = files.length
       ? files.map(renderSourceStorageFile).join('')
