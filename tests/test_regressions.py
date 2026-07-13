@@ -3880,6 +3880,41 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("...micAudioTracks", html)
         self.assertIn("createMediaStreamDestination", html)
 
+    def test_web_ui_modal_focus_and_escape_controls(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("const MODAL_FOCUS_SELECTOR", html)
+        self.assertIn("let modalReturnFocusTarget", html)
+        self.assertIn("function getFocusableModalElement", html)
+        self.assertIn("function openAccessibleModal", html)
+        self.assertIn("function closeAccessibleModal", html)
+        self.assertIn("function activeModalOverlay", html)
+        self.assertIn("function handleModalEscapeKeydown", html)
+        self.assertIn("document.addEventListener('keydown', handleModalEscapeKeydown)", html)
+        self.assertIn("if (event.key !== 'Escape') return;", html)
+        self.assertIn("'upload-modal': closeUploadModal", html)
+        self.assertIn("'summary-editor-modal': closeSummaryEditor", html)
+        self.assertIn("'transcript-editor-modal': closeTranscriptEditor", html)
+        self.assertIn("'revision-modal': closeRevisionHistory", html)
+        self.assertIn("'source-storage-modal': closeSourceStorageInventory", html)
+        self.assertIn("'record-modal': closeRecordModal", html)
+        self.assertIn("openAccessibleModal(uploadModal, dropZone)", html)
+        self.assertIn("closeAccessibleModal(uploadModal)", html)
+        self.assertIn("openAccessibleModal(modal, document.getElementById('source-storage-search'))", html)
+        self.assertIn("closeAccessibleModal(document.getElementById('source-storage-modal'))", html)
+        self.assertIn("openAccessibleModal(document.getElementById('summary-editor-modal'), editor)", html)
+        self.assertIn("closeAccessibleModal(document.getElementById('summary-editor-modal'))", html)
+        self.assertIn("openAccessibleModal(document.getElementById('transcript-editor-modal'), editor)", html)
+        self.assertIn("closeAccessibleModal(document.getElementById('transcript-editor-modal'))", html)
+        self.assertIn("openAccessibleModal(document.getElementById('revision-modal'))", html)
+        self.assertIn("closeAccessibleModal(document.getElementById('revision-modal'))", html)
+        self.assertIn("openAccessibleModal(recModal, document.getElementById('rec-title'))", html)
+        self.assertIn("closeAccessibleModal(recModal)", html)
+        self.assertIn(".modal-close:focus-visible", html)
+        self.assertIn(".source-media-action:focus-visible", html)
+        self.assertIn(".quality-action:focus-visible", html)
+        self.assertIn(".job-action:focus-visible", html)
+
     def test_frontend_smoke_script_checks_static_ui_and_upload_guard(self):
         smoke_script = ROOT / "scripts" / "smoke_e2e.sh"
 

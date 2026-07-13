@@ -1042,6 +1042,20 @@
       font-size: 24px; cursor: pointer;
     }
     .modal-close:hover { color: var(--text); }
+    .modal-close:focus-visible,
+    .btn-primary:focus-visible,
+    .btn-secondary:focus-visible,
+    .btn-record:focus-visible,
+    .rec-tab:focus-visible,
+    .btn-rec-start:focus-visible,
+    .btn-rec-stop:focus-visible,
+    .btn-rec-mic:focus-visible,
+    .source-media-action:focus-visible,
+    .quality-action:focus-visible,
+    .job-action:focus-visible {
+      outline: 2px solid var(--blue);
+      outline-offset: 2px;
+    }
 
     .upload-area {
       border: 2px dashed var(--border); border-radius: 12px;
@@ -1574,6 +1588,8 @@ const DEFAULT_RECORDING_PROFILE_LABELS = {
 };
 const FALLBACK_UPLOAD_EXTENSIONS = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.webm', '.mp4', '.mov', '.avi', '.mkv', '.mpeg', '.mpg', '.wmv'];
 const FALLBACK_UPLOAD_ACCEPT = FALLBACK_UPLOAD_EXTENSIONS.join(',');
+const MODAL_FOCUS_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+let modalReturnFocusTarget = null;
 let sourceStorageInventoryState = {
   files: [],
   archivedFiles: [],
@@ -1583,6 +1599,62 @@ let sourceStorageInventoryState = {
   loaded: false
 };
 const SOURCE_STORAGE_FETCH_LIMIT = 500;
+
+function getFocusableModalElement(modal) {
+  return Array.from(modal?.querySelectorAll(MODAL_FOCUS_SELECTOR) || [])
+    .find(el => !el.disabled && el.offsetParent !== null);
+}
+
+function openAccessibleModal(modal, focusTarget = null) {
+  if (!modal) return;
+  modalReturnFocusTarget = document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
+  modal.classList.add('show');
+  window.setTimeout(() => {
+    const target = focusTarget || getFocusableModalElement(modal);
+    target?.focus?.();
+  }, 0);
+}
+
+function closeAccessibleModal(modal, restoreFocus = true) {
+  if (!modal) return;
+  modal.classList.remove('show');
+  if (
+    restoreFocus &&
+    modalReturnFocusTarget &&
+    document.body.contains(modalReturnFocusTarget) &&
+    typeof modalReturnFocusTarget.focus === 'function'
+  ) {
+    modalReturnFocusTarget.focus();
+  }
+  modalReturnFocusTarget = null;
+}
+
+function activeModalOverlay() {
+  const modals = Array.from(document.querySelectorAll('.modal-overlay.show'));
+  return modals.length ? modals[modals.length - 1] : null;
+}
+
+function handleModalEscapeKeydown(event) {
+  if (event.key !== 'Escape') return;
+  const modal = activeModalOverlay();
+  if (!modal) return;
+  const handlers = {
+    'upload-modal': closeUploadModal,
+    'summary-editor-modal': closeSummaryEditor,
+    'transcript-editor-modal': closeTranscriptEditor,
+    'revision-modal': closeRevisionHistory,
+    'source-storage-modal': closeSourceStorageInventory,
+    'record-modal': closeRecordModal
+  };
+  const close = handlers[modal.id];
+  if (!close) return;
+  event.preventDefault();
+  close();
+}
+
+document.addEventListener('keydown', handleModalEscapeKeydown);
 
 function formatBytes(bytes = 0) {
   const value = Number(bytes) || 0;
@@ -1624,7 +1696,7 @@ function sourceStorageTitle(sourceFiles = 0, sourceBytes = 0, unlinkedFiles = 0,
 
 function closeSourceStorageInventory() {
   closeSourceMediaPreview();
-  document.getElementById('source-storage-modal')?.classList.remove('show');
+  closeAccessibleModal(document.getElementById('source-storage-modal'));
 }
 
 function closeSourceMediaPreview() {
@@ -2062,7 +2134,7 @@ async function openSourceStorageInventory() {
   const modal = document.getElementById('source-storage-modal');
   const list = document.getElementById('source-storage-list');
   if (!modal || !list) return;
-  modal.classList.add('show');
+  openAccessibleModal(modal, document.getElementById('source-storage-search'));
   closeSourceMediaPreview();
   sourceStorageInventoryState.loaded = false;
   list.innerHTML = '<div class="detail-placeholder"><div class="loading-spinner"></div><p>載入原始檔清單...</p></div>';
@@ -2797,12 +2869,13 @@ function enhanceSourceStoragePreviewPlayer(preview = document.getElementById('so
 
 function openSummaryEditor() {
   if (!currentMeetingData) return;
-  document.getElementById('summary-editor').value = extractEditableSummaryMarkdown(currentMeetingData.full_content);
-  document.getElementById('summary-editor-modal').classList.add('show');
+  const editor = document.getElementById('summary-editor');
+  editor.value = extractEditableSummaryMarkdown(currentMeetingData.full_content);
+  openAccessibleModal(document.getElementById('summary-editor-modal'), editor);
 }
 
 function closeSummaryEditor() {
-  document.getElementById('summary-editor-modal').classList.remove('show');
+  closeAccessibleModal(document.getElementById('summary-editor-modal'));
 }
 
 async function saveSummaryEdit() {
@@ -2843,12 +2916,13 @@ function openTranscriptEditor() {
     alert('這筆會議紀錄沒有可編輯的完整逐字稿。');
     return;
   }
-  document.getElementById('transcript-editor').value = transcript;
-  document.getElementById('transcript-editor-modal').classList.add('show');
+  const editor = document.getElementById('transcript-editor');
+  editor.value = transcript;
+  openAccessibleModal(document.getElementById('transcript-editor-modal'), editor);
 }
 
 function closeTranscriptEditor() {
-  document.getElementById('transcript-editor-modal').classList.remove('show');
+  closeAccessibleModal(document.getElementById('transcript-editor-modal'));
 }
 
 async function saveTranscriptEdit() {
@@ -2886,7 +2960,7 @@ async function openRevisionHistory() {
   if (!currentId) return;
   const list = document.getElementById('revision-list');
   list.innerHTML = '<div class="detail-placeholder"><div class="loading-spinner"></div></div>';
-  document.getElementById('revision-modal').classList.add('show');
+  openAccessibleModal(document.getElementById('revision-modal'));
   try {
     const res = await fetch(`${API}/meetings/${currentId}/revisions`);
     if (!res.ok) throw new Error(await apiErrorMessage(res));
@@ -2915,7 +2989,7 @@ async function openRevisionHistory() {
 }
 
 function closeRevisionHistory() {
-  document.getElementById('revision-modal').classList.remove('show');
+  closeAccessibleModal(document.getElementById('revision-modal'));
 }
 
 // ── 上傳補充資料 ────────────────────────────────────────────────────
@@ -3377,8 +3451,8 @@ function clearActiveUploadPoll() {
 }
 
 function openUploadModal() {
-  uploadModal.classList.add('show');
   resetUploadForm();
+  openAccessibleModal(uploadModal, dropZone);
 }
 
 function closeUploadModal() {
@@ -3387,7 +3461,7 @@ function closeUploadModal() {
     return;
   }
   if (uploadBusy) return; // 檔案仍在上傳中，尚未取得可取消的 job id
-  uploadModal.classList.remove('show');
+  closeAccessibleModal(uploadModal);
 }
 
 async function cancelUploadOrClose() {
@@ -3664,7 +3738,7 @@ const recIncludeMic = document.getElementById('rec-include-mic');
 
 function openRecordModal() {
   resetRecorder();
-  recModal.classList.add('show');
+  openAccessibleModal(recModal, document.getElementById('rec-title'));
 }
 
 function closeRecordModal() {
@@ -3677,14 +3751,14 @@ function closeRecordModal() {
       return;
     }
     discardActiveLocalRecording();
-    recModal.classList.remove('show');
+    closeAccessibleModal(recModal);
     return;
   }
   releaseRecordingStreams();
   if (recTimerInterval) clearInterval(recTimerInterval);
   if (recAnimFrame) cancelAnimationFrame(recAnimFrame);
   if (audioCtx) { audioCtx.close(); audioCtx = null; }
-  recModal.classList.remove('show');
+  closeAccessibleModal(recModal);
 }
 
 function clearActiveRecordingPoll() {
