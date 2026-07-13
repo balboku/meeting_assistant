@@ -1324,6 +1324,18 @@ def count_meetings(needs_review: bool = False) -> int:
         return conn.execute("SELECT COUNT(*) FROM meetings").fetchone()[0]
 
 
+def list_meeting_source_audio_refs() -> list[dict]:
+    """Return lightweight meeting references keyed by retained source media."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT id, title, source_audio, created_at
+               FROM meetings
+               WHERE COALESCE(source_audio, '') <> ''
+               ORDER BY created_at DESC, id DESC"""
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def get_meeting(meeting_id: int) -> Optional[dict]:
     """查詢特定會議的完整資訊"""
     with get_db() as conn:

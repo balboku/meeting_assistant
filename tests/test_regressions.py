@@ -2178,7 +2178,7 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertIn("storage", payload)
 
     def test_metrics_endpoint_reports_storage_usage(self):
-        self._isolated_database()
+        database = self._isolated_database()
         import backend.main as main
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2195,6 +2195,20 @@ class MetricsRegressionTests(unittest.TestCase):
             (output_dir / "meeting-a.md").write_text("note-a", encoding="utf-8")
             (output_dir / "meeting-b.md").write_text("note-bb", encoding="utf-8")
             (output_dir / "meetings.db").write_bytes(b"ignore-db")
+            audio_meeting_id = database.save_meeting(
+                title="Audio A",
+                date="2026/07/13",
+                source_audio=str(source_dir / "meeting-a.mp3"),
+                output_path=str(output_dir / "meeting-a.md"),
+                summary="audio summary",
+            )
+            video_meeting_id = database.save_meeting(
+                title="Video B",
+                date="2026/07/13",
+                source_audio="meeting-b.webm",
+                output_path=str(output_dir / "meeting-b.md"),
+                summary="video summary",
+            )
 
             with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
                  mock.patch.object(main, "OUTPUT_DIR", output_dir):
@@ -2204,11 +2218,17 @@ class MetricsRegressionTests(unittest.TestCase):
         storage = response.json()["storage"]
         self.assertEqual(storage["source_media_files"], 3)
         self.assertEqual(storage["source_media_bytes"], len(b"audio-a") + len(b"video-bb") + len(b"ccc"))
+        self.assertEqual(storage["source_media_unlinked_files"], 1)
+        self.assertEqual(storage["source_media_unlinked_bytes"], len(b"ccc"))
         self.assertEqual(
             [item["name"] for item in storage["source_media_largest_files"][:3]],
             ["meeting-b.webm", "meeting-a.mp3", "meeting-c.m4a"],
         )
         self.assertEqual(storage["source_media_largest_files"][0]["bytes"], len(b"video-bb"))
+        self.assertEqual(storage["source_media_largest_files"][0]["linked_meeting_id"], video_meeting_id)
+        self.assertEqual(storage["source_media_largest_files"][0]["linked_meeting_title"], "Video B")
+        self.assertEqual(storage["source_media_largest_files"][1]["linked_meeting_id"], audio_meeting_id)
+        self.assertIsNone(storage["source_media_largest_files"][2]["linked_meeting_id"])
         self.assertEqual(storage["meeting_markdown_files"], 2)
         self.assertEqual(storage["meeting_markdown_bytes"], len("note-a".encode("utf-8")) + len("note-bb".encode("utf-8")))
 
@@ -3138,9 +3158,13 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("data.storage", html)
         self.assertIn("storage.source_media_files", html)
         self.assertIn("storage.source_media_bytes", html)
+        self.assertIn("storage.source_media_unlinked_files", html)
+        self.assertIn("storage.source_media_unlinked_bytes", html)
         self.assertIn("storage.source_media_largest_files", html)
         self.assertIn("function sourceStorageTitle", html)
         self.assertIn("最大檔案：", html)
+        self.assertIn("未連結原始檔：", html)
+        self.assertIn("file.linked_meeting_title", html)
         self.assertIn("formatBytes(sourceBytes)", html)
         self.assertIn("原始檔", html)
         self.assertIn("function showNeedsReviewMeetings", html)

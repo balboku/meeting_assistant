@@ -56,6 +56,7 @@ from backend.database import (
     list_job_events,
     list_meetings,
     count_meetings,
+    list_meeting_source_audio_refs,
     get_meeting,
     search_meetings,
     delete_meeting,
@@ -409,17 +410,20 @@ def _directory_file_stats(
     allowed_suffixes: set[str],
     *,
     largest_limit: int = 0,
-) -> tuple[int, int, list[StorageFileMetric]]:
+) -> tuple[int, int, list[StorageFileMetric], int, int]:
     """Return file count, bytes, and optional largest files for a shallow scan."""
     count = 0
     total_bytes = 0
+    unlinked_count = 0
+    unlinked_bytes = 0
     files: list[StorageFileMetric] = []
     try:
         entries = list(path.iterdir())
     except OSError:
-        return 0, 0, []
+        return 0, 0, [], 0, 0
 
     normalized_suffixes = {suffix.lower() for suffix in allowed_suffixes}
+    source_refs = _source_audio_refs_by_name() if path == SOURCE_AUDIO_DIR else None
     for entry in entries:
         if entry.name.startswith("."):
             continue
@@ -433,28 +437,51 @@ def _directory_file_stats(
             continue
         count += 1
         total_bytes += int(stat.st_size)
+        linked_ref = source_refs.get(entry.name) if source_refs is not None else None
+        if source_refs is not None and linked_ref is None:
+            unlinked_count += 1
+            unlinked_bytes += int(stat.st_size)
         if largest_limit > 0:
             files.append(
                 StorageFileMetric(
                     name=entry.name,
                     bytes=int(stat.st_size),
                     modified_at=datetime.fromtimestamp(stat.st_mtime),
+                    linked_meeting_id=int(linked_ref["id"]) if linked_ref else None,
+                    linked_meeting_title=str(linked_ref["title"]) if linked_ref else None,
                 )
             )
     largest_files = sorted(files, key=lambda item: item.bytes, reverse=True)[:largest_limit]
-    return count, total_bytes, largest_files
+    return count, total_bytes, largest_files, unlinked_count, unlinked_bytes
+
+
+def _source_audio_refs_by_name() -> dict[str, dict]:
+    refs: dict[str, dict] = {}
+    for row in list_meeting_source_audio_refs():
+        source_name = Path(str(row.get("source_audio") or "")).name
+        if source_name:
+            refs.setdefault(source_name, row)
+    return refs
 
 
 def _storage_metrics() -> StorageMetrics:
-    source_count, source_bytes, source_largest_files = _directory_file_stats(
+    (
+        source_count,
+        source_bytes,
+        source_largest_files,
+        source_unlinked_count,
+        source_unlinked_bytes,
+    ) = _directory_file_stats(
         SOURCE_AUDIO_DIR,
         set(SUPPORTED_MEDIA_FORMATS),
         largest_limit=5,
     )
-    markdown_count, markdown_bytes, _ = _directory_file_stats(OUTPUT_DIR, {".md"})
+    markdown_count, markdown_bytes, _, _, _ = _directory_file_stats(OUTPUT_DIR, {".md"})
     return StorageMetrics(
         source_media_files=source_count,
         source_media_bytes=source_bytes,
+        source_media_unlinked_files=source_unlinked_count,
+        source_media_unlinked_bytes=source_unlinked_bytes,
         source_media_largest_files=source_largest_files,
         meeting_markdown_files=markdown_count,
         meeting_markdown_bytes=markdown_bytes,

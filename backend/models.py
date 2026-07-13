@@ -124,12 +124,16 @@ class StorageFileMetric(BaseModel):
     name: str
     bytes: int
     modified_at: Optional[datetime] = None
+    linked_meeting_id: Optional[int] = None
+    linked_meeting_title: Optional[str] = None
 
 
 class StorageMetrics(BaseModel):
     """本機檔案容量摘要"""
     source_media_files: int
     source_media_bytes: int
+    source_media_unlinked_files: int = 0
+    source_media_unlinked_bytes: int = 0
     source_media_largest_files: list[StorageFileMetric] = Field(default_factory=list)
     meeting_markdown_files: int
     meeting_markdown_bytes: int
