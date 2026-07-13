@@ -600,7 +600,7 @@
     }
     .source-storage-controls {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+      grid-template-columns: minmax(0, 1fr) minmax(150px, 200px) minmax(150px, 200px);
       gap: 10px;
       margin-bottom: 12px;
     }
@@ -1318,6 +1318,12 @@
         <option value="linked">已連結會議</option>
         <option value="archive">已移除備份</option>
       </select>
+      <select id="source-storage-media-filter" class="form-input" onchange="renderSourceStorageInventory()">
+        <option value="all">全部類型</option>
+        <option value="video">只看錄影</option>
+        <option value="audio">只看音訊</option>
+        <option value="unknown">未知類型</option>
+      </select>
     </div>
     <div id="source-storage-preview" class="source-storage-preview" aria-live="polite"></div>
     <div id="source-storage-list" class="source-storage-list" aria-live="polite"></div>
@@ -1623,6 +1629,14 @@ function sourceStorageLiveFilterMatches(file, filter) {
   return filter !== 'archive';
 }
 
+function sourceStorageMediaTypeMatches(file, mediaFilter) {
+  const mediaType = String(file.source_media_type || '').toLowerCase();
+  if (mediaFilter === 'audio') return mediaType === 'audio';
+  if (mediaFilter === 'video') return mediaType === 'video';
+  if (mediaFilter === 'unknown') return !['audio', 'video'].includes(mediaType);
+  return true;
+}
+
 function sourceStorageRowsHtml(title, rows, renderer, emptyIcon, emptyText) {
   const body = rows.length
     ? rows.map(renderer).join('')
@@ -1635,13 +1649,17 @@ function renderSourceStorageInventory() {
   if (!list || !sourceStorageInventoryState.loaded) return;
   const searchValue = document.getElementById('source-storage-search')?.value || '';
   const filter = document.getElementById('source-storage-filter')?.value || 'all';
+  const mediaFilter = document.getElementById('source-storage-media-filter')?.value || 'all';
   const payload = sourceStorageInventoryState.payload || {};
   const archivePayload = sourceStorageInventoryState.archivePayload || {};
   const liveFiles = sourceStorageInventoryState.files
     .filter(file => sourceStorageFileMatches(file, searchValue))
-    .filter(file => sourceStorageLiveFilterMatches(file, filter));
+    .filter(file => sourceStorageLiveFilterMatches(file, filter))
+    .filter(file => sourceStorageMediaTypeMatches(file, mediaFilter));
   const archivedFiles = ['all', 'archive'].includes(filter)
-    ? sourceStorageInventoryState.archivedFiles.filter(file => sourceStorageFileMatches(file, searchValue))
+    ? sourceStorageInventoryState.archivedFiles
+        .filter(file => sourceStorageFileMatches(file, searchValue))
+        .filter(file => sourceStorageMediaTypeMatches(file, mediaFilter))
     : [];
   const archiveRetentionLabel = sourceArchiveRetentionLabel();
   const shownCount = liveFiles.length + archivedFiles.length;

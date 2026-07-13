@@ -3315,6 +3315,7 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn('id="source-storage-list"', html)
         self.assertIn('id="source-storage-search"', html)
         self.assertIn('id="source-storage-filter"', html)
+        self.assertIn('id="source-storage-media-filter"', html)
         self.assertIn('oninput="renderSourceStorageInventory()"', html)
         self.assertIn('onchange="renderSourceStorageInventory()"', html)
         self.assertIn("data.storage", html)
@@ -3349,9 +3350,11 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("function sourceStorageSearchText", html)
         self.assertIn("function sourceStorageFileMatches", html)
         self.assertIn("function sourceStorageLiveFilterMatches", html)
+        self.assertIn("function sourceStorageMediaTypeMatches", html)
         self.assertIn("function renderSourceStorageInventory", html)
         self.assertIn("sourceStorageInventoryState = {", html)
         self.assertIn("renderSourceStorageInventory();", html)
+        self.assertIn("sourceStorageMediaTypeMatches(file, mediaFilter)", html)
         self.assertIn("目前顯示 ${shownCount} 個", html)
         self.assertIn("function deleteUnlinkedSourceMedia", html)
         self.assertIn("const sourceUrl = `${API}/source-media/inventory/${encodeURIComponent(filename)}`", html)
@@ -3455,6 +3458,7 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn(".source-storage-item", html)
         self.assertIn("align-items: stretch;", html)
         self.assertIn(".source-storage-controls", html)
+        self.assertIn("grid-template-columns: minmax(0, 1fr) minmax(150px, 200px) minmax(150px, 200px);", html)
         self.assertIn("grid-template-columns: 1fr;", html)
 
     def test_web_ui_can_record_screen_audio_with_toggleable_microphone(self):
