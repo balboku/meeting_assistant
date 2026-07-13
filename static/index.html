@@ -600,7 +600,7 @@
     }
     .source-storage-controls {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) repeat(3, minmax(140px, 180px)) auto;
+      grid-template-columns: minmax(0, 1fr) repeat(3, minmax(140px, 180px)) auto auto;
       gap: 10px;
       margin-bottom: 12px;
     }
@@ -609,6 +609,7 @@
       padding: 9px 12px;
       margin: 0;
     }
+    .source-storage-refresh,
     .source-storage-reset {
       min-height: 38px;
       align-self: stretch;
@@ -1335,6 +1336,7 @@
         <option value="name_asc">檔名 A-Z</option>
         <option value="name_desc">檔名 Z-A</option>
       </select>
+      <button id="source-storage-refresh" type="button" class="source-media-action source-storage-refresh" onclick="refreshSourceStorageInventory()">更新</button>
       <button id="source-storage-reset" type="button" class="source-media-action source-storage-reset" onclick="resetSourceStorageFilters()">清除</button>
     </div>
     <div id="source-storage-preview" class="source-storage-preview" aria-live="polite"></div>
@@ -1675,6 +1677,24 @@ function resetSourceStorageFilters() {
   if (mediaFilter) mediaFilter.value = 'all';
   if (sort) sort.value = 'modified_desc';
   renderSourceStorageInventory();
+}
+
+async function refreshSourceStorageInventory() {
+  const refresh = document.getElementById('source-storage-refresh');
+  const previousLabel = refresh?.textContent || '更新';
+  if (refresh) {
+    refresh.disabled = true;
+    refresh.textContent = '更新中';
+  }
+  try {
+    await openSourceStorageInventory();
+    await loadMetrics();
+  } finally {
+    if (refresh) {
+      refresh.disabled = false;
+      refresh.textContent = previousLabel;
+    }
+  }
 }
 
 function sourceStorageRowsHtml(title, rows, renderer, emptyIcon, emptyText) {
