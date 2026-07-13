@@ -2583,7 +2583,12 @@ function primeSourceVideoPreview(video) {
     if (video.dataset.previewPrimed === '1' || !video.paused || video.currentTime > 0.1) return;
     video.dataset.previewPrimed = '1';
     const finiteDuration = Number.isFinite(video.duration) && video.duration > 0;
-    const previewSecond = finiteDuration ? Math.min(1, Math.max(0.25, video.duration * 0.01)) : 0.25;
+    const preferredPreviewSecond = finiteDuration
+      ? Math.min(1, Math.max(0.25, video.duration * 0.01))
+      : 0.25;
+    const previewSecond = finiteDuration
+      ? Math.min(preferredPreviewSecond, Math.max(0, video.duration - 0.05))
+      : preferredPreviewSecond;
     try {
       video.currentTime = previewSecond;
     } catch (err) {

@@ -4698,6 +4698,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function enhanceSourceMediaPlayer", html)
         self.assertIn("video.dataset.previewPrimed", html)
         self.assertIn("loadedmetadata", html)
+        self.assertIn("preferredPreviewSecond", html)
+        self.assertIn("Math.max(0, video.duration - 0.05)", html)
         self.assertIn("video.currentTime = previewSecond;", html)
         self.assertIn("enhanceSourceMediaPlayer();", html)
         self.assertIn("source_media_type", html)
