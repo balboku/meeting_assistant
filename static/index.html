@@ -1191,6 +1191,11 @@
       border-radius: 10px; color: var(--green); font-size: 14px;
     }
     .rec-result.show { display: block; }
+    .rec-result.error {
+      background: rgba(247,118,142,0.08);
+      border-color: var(--red);
+      color: var(--red);
+    }
 
     /* ── Scrollbar ── */
     ::-webkit-scrollbar { width: 6px; }
@@ -1503,7 +1508,7 @@
 
     <!-- 完成提示 -->
     <div class="rec-result" id="rec-result">
-      ✅ 錄製完成！正在送出 AI 分析，請稍候...
+      錄製結果會顯示於此
     </div>
 
     <!-- 進度 -->
@@ -3619,7 +3624,7 @@ function resetRecorder() {
   btnRecMic.classList.remove('show');
   btnRecMic.setAttribute('aria-pressed', 'false');
   btnRecMic.textContent = '🎙 關閉麥克風';
-  recResult.classList.remove('show');
+  setRecordingResult();
   recProg.classList.remove('show');
   recPreview.classList.remove('show');
   recPreview.srcObject = null;
@@ -3712,6 +3717,12 @@ function recordingModeLabel(mode = recMode) {
   if (mode === 'screen') return '螢幕錄製';
   if (mode === 'video') return '錄影';
   return '錄音';
+}
+
+function setRecordingResult(message = '', level = 'success') {
+  recResult.textContent = message;
+  recResult.classList.toggle('error', level === 'error' && Boolean(message));
+  recResult.classList.toggle('show', Boolean(message));
 }
 
 function screenRecordingStatusText() {
@@ -3938,20 +3949,21 @@ async function onRecordingStopped() {
   const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
   const file = new File([blob], `recording.${ext}`, { type: blob.type });
   if (!recordedChunks.length || file.size <= 0) {
-    recResult.classList.add('show');
+    setRecordingResult(`❌ ${recordingModeLabel()}失敗`, 'error');
     recProg.classList.add('show');
     recProgMsg.textContent = `❌ ${recordingModeLabel()}失敗：沒有取得任何錄製資料，請重新錄製並確認瀏覽器權限。`;
     document.getElementById('rec-close-btn').disabled = false;
     return;
   }
   if (file.size > runtimeConfig.max_upload_bytes) {
+    setRecordingResult(`❌ ${recordingModeLabel()}檔案過大`, 'error');
     recProg.classList.add('show');
     recProgMsg.textContent = `❌ ${recordingModeLabel()}檔案超過上限 ${formatBytes(runtimeConfig.max_upload_bytes)}，請縮短錄製時間。`;
     document.getElementById('rec-close-btn').disabled = false;
     return;
   }
 
-  recResult.classList.add('show');
+  setRecordingResult(`✅ ${recordingModeLabel()}完成！正在送出 AI 分析，請稍候...`);
   recProg.classList.add('show');
   recProgMsg.textContent = `${recordingModeLabel()}完成（${formatBytes(file.size)}），正在上傳...`;
 
@@ -3975,6 +3987,7 @@ async function onRecordingStopped() {
     // 開始輪詢
     pollRecStatus(data.job_id);
   } catch (err) {
+    setRecordingResult(`❌ ${recordingModeLabel()}上傳失敗`, 'error');
     recProgMsg.textContent = `❌ 上傳失敗：${err.message}`;
     document.getElementById('rec-close-btn').disabled = false;
   }
@@ -3999,6 +4012,7 @@ async function pollRecStatus(jobId) {
       if (data.status === 'done') {
         clearActiveRecordingPoll();
         activeRecordingJobId = null;
+        setRecordingResult('✅ AI 分析完成！');
         recProgMsg.textContent = '✅ AI 分析完成！';
         document.getElementById('rec-close-btn').disabled = false;
         loadJobs();
@@ -4014,6 +4028,7 @@ async function pollRecStatus(jobId) {
       } else if (data.status === 'failed') {
         clearActiveRecordingPoll();
         activeRecordingJobId = null;
+        setRecordingResult('❌ AI 分析失敗', 'error');
         recProgMsg.textContent = `❌ AI 分析失敗：${data.message || '未知錯誤'}`;
         document.getElementById('rec-close-btn').disabled = false;
         loadJobs();
@@ -4021,6 +4036,7 @@ async function pollRecStatus(jobId) {
       } else if (data.status === 'cancelled') {
         clearActiveRecordingPoll();
         activeRecordingJobId = null;
+        setRecordingResult('已取消處理。', 'error');
         recProgMsg.textContent = '已取消處理。';
         document.getElementById('rec-close-btn').disabled = false;
         loadJobs();
