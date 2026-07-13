@@ -1022,6 +1022,10 @@
       <div class="ops-label">需複核</div>
       <div class="ops-value" id="ops-needs-review">–</div>
     </div>
+    <div class="ops-tile" id="ops-source-storage-tile" title="原始錄音/錄影保留容量">
+      <div class="ops-label">原始檔</div>
+      <div class="ops-value" id="ops-source-storage">–</div>
+    </div>
     <div class="ops-tile">
       <div class="ops-label">平均秒數</div>
       <div class="ops-value" id="ops-average-seconds">–</div>
@@ -2210,11 +2214,13 @@ async function loadMetrics() {
   const totalEl = document.getElementById('ops-total-jobs');
   const failedEl = document.getElementById('ops-failed-jobs');
   const needsReviewEl = document.getElementById('ops-needs-review');
+  const sourceStorageEl = document.getElementById('ops-source-storage');
+  const sourceStorageTile = document.getElementById('ops-source-storage-tile');
   const averageEl = document.getElementById('ops-average-seconds');
   const ngrokEl = document.getElementById('ops-ngrok');
   const ngrokDetailEl = document.getElementById('ops-ngrok-detail');
   const ngrokTile = document.getElementById('ops-ngrok-tile');
-  if (!healthEl || !totalEl || !failedEl || !needsReviewEl || !averageEl || !ngrokEl || !ngrokDetailEl || !ngrokTile) return;
+  if (!healthEl || !totalEl || !failedEl || !needsReviewEl || !sourceStorageEl || !sourceStorageTile || !averageEl || !ngrokEl || !ngrokDetailEl || !ngrokTile) return;
 
   try {
     const [metricsRes, healthRes] = await Promise.all([
@@ -2235,6 +2241,11 @@ async function loadMetrics() {
     const needsReview = data.meetings?.needs_review ?? 0;
     needsReviewEl.textContent = needsReview;
     needsReviewEl.classList.toggle('attention', needsReview > 0);
+    const storage = data.storage || {};
+    const sourceFiles = Number(storage.source_media_files || 0);
+    const sourceBytes = Number(storage.source_media_bytes || 0);
+    sourceStorageEl.textContent = `${sourceFiles} / ${formatBytes(sourceBytes)}`;
+    sourceStorageTile.title = `原始錄音/錄影：${sourceFiles} 個檔案，${formatBytes(sourceBytes)}`;
     averageEl.textContent = data.jobs?.average_completed_seconds == null
       ? '–'
       : `${data.jobs.average_completed_seconds}s`;
@@ -2252,6 +2263,8 @@ async function loadMetrics() {
     ngrokEl.classList.add('warn');
     needsReviewEl.textContent = '–';
     needsReviewEl.classList.remove('attention');
+    sourceStorageEl.textContent = '–';
+    sourceStorageTile.title = '無法讀取 /metrics';
     ngrokDetailEl.textContent = '無法讀取 /metrics';
     ngrokTile.title = '無法讀取 /metrics';
   }

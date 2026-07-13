@@ -2175,6 +2175,36 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual(payload["meetings"]["needs_review"], 1)
         self.assertEqual(payload["recent_errors"][0]["job_id"], "metrics-failed")
         self.assertEqual(payload["recent_errors"][0]["error_detail"], "metrics error")
+        self.assertIn("storage", payload)
+
+    def test_metrics_endpoint_reports_storage_usage(self):
+        self._isolated_database()
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_dir = root / "source_audio"
+            output_dir = root / "output"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            (source_dir / "meeting-a.mp3").write_bytes(b"audio-a")
+            (source_dir / "meeting-b.webm").write_bytes(b"video-bb")
+            (source_dir / ".upload_tmp.mp3").write_bytes(b"ignore")
+            (source_dir / "note.txt").write_text("ignore", encoding="utf-8")
+            (output_dir / "meeting-a.md").write_text("note-a", encoding="utf-8")
+            (output_dir / "meeting-b.md").write_text("note-bb", encoding="utf-8")
+            (output_dir / "meetings.db").write_bytes(b"ignore-db")
+
+            with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
+                 mock.patch.object(main, "OUTPUT_DIR", output_dir):
+                response = asgi_request(main.app, "GET", "/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        storage = response.json()["storage"]
+        self.assertEqual(storage["source_media_files"], 2)
+        self.assertEqual(storage["source_media_bytes"], len(b"audio-a") + len(b"video-bb"))
+        self.assertEqual(storage["meeting_markdown_files"], 2)
+        self.assertEqual(storage["meeting_markdown_bytes"], len("note-a".encode("utf-8")) + len("note-bb".encode("utf-8")))
 
     def test_metrics_endpoint_reports_ngrok_status(self):
         self._isolated_database()
@@ -3097,6 +3127,13 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("維運狀態", html)
         self.assertIn('id="ops-needs-review"', html)
         self.assertIn("data.meetings?.needs_review", html)
+        self.assertIn('id="ops-source-storage"', html)
+        self.assertIn('id="ops-source-storage-tile"', html)
+        self.assertIn("data.storage", html)
+        self.assertIn("storage.source_media_files", html)
+        self.assertIn("storage.source_media_bytes", html)
+        self.assertIn("formatBytes(sourceBytes)", html)
+        self.assertIn("原始檔", html)
         self.assertIn("function showNeedsReviewMeetings", html)
         self.assertIn("loadMeetings(search.value.trim())", html)
         self.assertIn("需複核", html)

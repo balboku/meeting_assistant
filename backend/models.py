@@ -119,6 +119,14 @@ class NgrokStatus(BaseModel):
     api_url: Optional[str] = None
 
 
+class StorageMetrics(BaseModel):
+    """本機檔案容量摘要"""
+    source_media_files: int
+    source_media_bytes: int
+    meeting_markdown_files: int
+    meeting_markdown_bytes: int
+
+
 class RecentJobError(BaseModel):
     """最近失敗任務摘要"""
     job_id: str
@@ -135,6 +143,7 @@ class MetricsResponse(BaseModel):
     jobs: JobMetrics
     recent_errors: list[RecentJobError]
     meetings: dict[str, int]
+    storage: StorageMetrics
     ngrok: NgrokStatus
 
 

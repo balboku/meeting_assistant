@@ -79,6 +79,7 @@ from backend.models import (
     MeetingEvidenceResponse,
     HealthResponse,
     JobMetrics,
+    StorageMetrics,
     MetricsResponse,
     AppConfigResponse,
     ErrorResponse,
@@ -402,6 +403,46 @@ async def health_check():
     )
 
 
+def _directory_file_stats(path: Path, allowed_suffixes: set[str]) -> tuple[int, int]:
+    """Return file count and bytes for a shallow directory scan."""
+    count = 0
+    total_bytes = 0
+    try:
+        entries = list(path.iterdir())
+    except OSError:
+        return 0, 0
+
+    normalized_suffixes = {suffix.lower() for suffix in allowed_suffixes}
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        try:
+            if not entry.is_file():
+                continue
+            if normalized_suffixes and entry.suffix.lower() not in normalized_suffixes:
+                continue
+            stat = entry.stat()
+        except OSError:
+            continue
+        count += 1
+        total_bytes += int(stat.st_size)
+    return count, total_bytes
+
+
+def _storage_metrics() -> StorageMetrics:
+    source_count, source_bytes = _directory_file_stats(
+        SOURCE_AUDIO_DIR,
+        set(SUPPORTED_MEDIA_FORMATS),
+    )
+    markdown_count, markdown_bytes = _directory_file_stats(OUTPUT_DIR, {".md"})
+    return StorageMetrics(
+        source_media_files=source_count,
+        source_media_bytes=source_bytes,
+        meeting_markdown_files=markdown_count,
+        meeting_markdown_bytes=markdown_bytes,
+    )
+
+
 @app.get(
     "/metrics",
     response_model=MetricsResponse,
@@ -423,6 +464,7 @@ async def metrics():
             "total": count_meetings(),
             "needs_review": count_meetings(needs_review=True),
         },
+        storage=_storage_metrics(),
         ngrok=get_ngrok_status(expected_port=SERVER_PORT),
     )
 
