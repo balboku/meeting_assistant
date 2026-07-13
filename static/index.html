@@ -1600,9 +1600,13 @@ let sourceStorageInventoryState = {
 };
 const SOURCE_STORAGE_FETCH_LIMIT = 500;
 
-function getFocusableModalElement(modal) {
+function getFocusableModalElements(modal) {
   return Array.from(modal?.querySelectorAll(MODAL_FOCUS_SELECTOR) || [])
-    .find(el => !el.disabled && el.offsetParent !== null);
+    .filter(el => !el.disabled && el.offsetParent !== null);
+}
+
+function getFocusableModalElement(modal) {
+  return getFocusableModalElements(modal)[0] || null;
 }
 
 function openAccessibleModal(modal, focusTarget = null) {
@@ -1636,10 +1640,37 @@ function activeModalOverlay() {
   return modals.length ? modals[modals.length - 1] : null;
 }
 
+function trapModalFocus(event, modal) {
+  if (event.key !== 'Tab' || !modal) return false;
+  const focusable = getFocusableModalElements(modal);
+  if (!focusable.length) return false;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+
+  if (!modal.contains(active)) {
+    event.preventDefault();
+    first.focus();
+    return true;
+  }
+  if (event.shiftKey && active === first) {
+    event.preventDefault();
+    last.focus();
+    return true;
+  }
+  if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus();
+    return true;
+  }
+  return false;
+}
+
 function handleModalEscapeKeydown(event) {
-  if (event.key !== 'Escape') return;
   const modal = activeModalOverlay();
   if (!modal) return;
+  if (trapModalFocus(event, modal)) return;
+  if (event.key !== 'Escape') return;
   const handlers = {
     'upload-modal': closeUploadModal,
     'summary-editor-modal': closeSummaryEditor,
