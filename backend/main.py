@@ -1775,9 +1775,21 @@ async def get_meeting_detail(meeting_id: int):
     tags=["會議記錄"],
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
 )
+@app.head(
+    "/meetings/{meeting_id}/source-media",
+    summary="檢查會議原始媒體檔標頭",
+    tags=["會議記錄"],
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
 @app.get(
     "/meetings/{meeting_id}/source-audio",
     summary="播放或下載會議原始音檔",
+    tags=["會議記錄"],
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
+@app.head(
+    "/meetings/{meeting_id}/source-audio",
+    summary="檢查會議原始音檔標頭",
     tags=["會議記錄"],
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
 )

@@ -4095,15 +4095,25 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                 response = asgi_request(main.app, "GET", "/meetings/5/source-audio")
                 download_response = asgi_request(main.app, "GET", "/meetings/5/source-audio?download=1")
                 media_response = asgi_request(main.app, "GET", "/meetings/5/source-media")
+                media_head_response = asgi_request(main.app, "HEAD", "/meetings/5/source-media")
+                media_download_head_response = asgi_request(main.app, "HEAD", "/meetings/5/source-media?download=1")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("audio/mpeg", response.headers.get("content-type", ""))
         self.assertIn("inline", response.headers.get("content-disposition", ""))
+        self.assertEqual(response.headers.get("accept-ranges"), "bytes")
         self.assertEqual(response.content, b"ID3\x04\x00\x00audio")
         self.assertEqual(download_response.status_code, 200)
         self.assertIn("attachment", download_response.headers.get("content-disposition", ""))
         self.assertEqual(media_response.status_code, 200)
         self.assertEqual(media_response.content, response.content)
+        self.assertEqual(media_head_response.status_code, 200)
+        self.assertIn("audio/mpeg", media_head_response.headers.get("content-type", ""))
+        self.assertIn("inline", media_head_response.headers.get("content-disposition", ""))
+        self.assertEqual(media_head_response.headers.get("accept-ranges"), "bytes")
+        self.assertEqual(media_head_response.content, b"")
+        self.assertEqual(media_download_head_response.status_code, 200)
+        self.assertIn("attachment", media_download_head_response.headers.get("content-disposition", ""))
 
     def test_webm_source_audio_endpoint_uses_recording_profile_media_type(self):
         import backend.main as main
@@ -4119,6 +4129,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             }
             with mock.patch.object(main, "get_meeting", return_value=record):
                 video_response = asgi_request(main.app, "GET", "/meetings/6/source-audio")
+                video_head_response = asgi_request(main.app, "HEAD", "/meetings/6/source-media")
 
             record["quality_report"] = {"recording": {"profile": "audio_standard"}}
             with mock.patch.object(main, "get_meeting", return_value=record):
@@ -4126,6 +4137,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
 
         self.assertEqual(video_response.status_code, 200)
         self.assertIn("video/webm", video_response.headers.get("content-type", ""))
+        self.assertEqual(video_head_response.status_code, 200)
+        self.assertIn("video/webm", video_head_response.headers.get("content-type", ""))
+        self.assertEqual(video_head_response.content, b"")
         self.assertEqual(audio_response.status_code, 200)
         self.assertIn("audio/webm", audio_response.headers.get("content-type", ""))
 
