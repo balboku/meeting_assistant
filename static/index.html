@@ -355,6 +355,11 @@
       background: var(--bg-hover);
       box-shadow: 0 0 0 2px rgba(122,162,247,0.2);
     }
+    .card:focus-visible {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(122,162,247,0.18);
+      outline: none;
+    }
     .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
     .card-title {
       font-size: 15px; font-weight: 600; color: var(--text);
@@ -2275,6 +2280,13 @@ function sourceMediaIcon(record) {
   return isVideoSource(record) ? '🎥' : '🔊';
 }
 
+function handleMeetingCardKeydown(event, id) {
+  if (event.target !== event.currentTarget) return;
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  openDetail(id);
+}
+
 // ── 主要資料載入 ──────────────────────────────────────────────────
 async function loadMeetings(query = '') {
   const listEl = document.getElementById('list-panel');
@@ -2325,13 +2337,16 @@ async function loadMeetings(query = '') {
 
     listEl.innerHTML = records.map(r => `
       <div class="card ${r.id === currentId ? 'active' : ''}"
-           data-id="${r.id}" data-title="${escapeHtml(r.title)}" onclick="openDetail(${r.id})">
+           data-id="${r.id}" data-title="${escapeHtml(r.title)}" role="button" tabindex="0"
+           aria-label="開啟會議 ${escapeHtml(r.title)}" onclick="openDetail(${r.id})"
+           onkeydown="handleMeetingCardKeydown(event, ${r.id})">
         <div class="card-header">
           <div class="card-title">${escapeHtml(r.title)}</div>
           <div style="display: flex; gap: 8px; align-items: center;">
             <div class="card-id">#${r.id}</div>
             <button onclick="deleteMeeting(event, ${r.id})"
                     title="刪除會議記錄"
+                    aria-label="刪除會議記錄 ${escapeHtml(r.title)}"
                     style="background: transparent; border: none; cursor: pointer; font-size: 16px; opacity: 0.5; transition: opacity 0.2s;"
                     onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.5">
               🗑️
