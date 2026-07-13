@@ -1592,7 +1592,7 @@ function previewSourceMedia(url = '', mediaType = '', name = '') {
   const isVideo = resolvedMediaType === 'video';
   const mediaTitle = isVideo ? '原始錄影' : resolvedMediaType === 'audio' ? '原始音檔' : '原始檔案';
   const player = isVideo
-    ? `<video controls preload="metadata" src="${safeUrl}"></video>`
+    ? `<video controls preload="metadata" playsinline class="source-storage-media-player" src="${safeUrl}"></video>`
     : resolvedMediaType === 'audio'
       ? `<audio controls preload="metadata" src="${safeUrl}"></audio>`
       : `<div class="source-storage-preview-unsupported">無法判斷此檔案是否可直接預覽，請使用「新分頁」或「下載」開啟。</div>`;
@@ -1607,6 +1607,7 @@ function previewSourceMedia(url = '', mediaType = '', name = '') {
     </div>
     ${player}`;
   preview.classList.add('show');
+  enhanceSourceStoragePreviewPlayer(preview);
   preview.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
@@ -2604,6 +2605,11 @@ function primeSourceVideoPreview(video) {
 
 function enhanceSourceMediaPlayer() {
   const player = document.getElementById('source-media-player');
+  if (player?.tagName === 'VIDEO') primeSourceVideoPreview(player);
+}
+
+function enhanceSourceStoragePreviewPlayer(preview = document.getElementById('source-storage-preview')) {
+  const player = preview?.querySelector('video.source-storage-media-player');
   if (player?.tagName === 'VIDEO') primeSourceVideoPreview(player);
 }
 
