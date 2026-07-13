@@ -3417,7 +3417,7 @@ async function startUpload() {
   if (customTitle) formData.append('title', customTitle);
 
   try {
-    const res = await fetch(`${API}/upload-audio`, { method: 'POST', body: formData });
+    const res = await fetch(`${API}/upload-media`, { method: 'POST', body: formData });
     if (!res.ok) {
       throw new Error(await apiErrorMessage(res));
     }
@@ -3976,7 +3976,7 @@ async function onRecordingStopped() {
   formData.append('recording_profile', getRecordingProfileId());
 
   try {
-    const res = await fetch(`${API}/upload-audio`, { method: 'POST', body: formData });
+    const res = await fetch(`${API}/upload-media`, { method: 'POST', body: formData });
     if (!res.ok) throw new Error(await apiErrorMessage(res));
     const data = await res.json();
     activeRecordingJobId = data.job_id;

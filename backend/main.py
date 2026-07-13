@@ -1089,13 +1089,21 @@ async def app_config():
 # =============================================================================
 
 @app.post(
-    "/upload-audio",
+    "/upload-media",
     response_model=JobResponse,
     summary="上傳音訊或影片並觸發 AI 處理",
     tags=["媒體處理"],
-    status_code=202  # 202 Accepted：已接收，處理中
+    status_code=202,
 )
-async def upload_audio(
+@app.post(
+    "/upload-audio",
+    response_model=JobResponse,
+    summary="上傳音訊或影片並觸發 AI 處理（相容舊路徑）",
+    tags=["媒體處理"],
+    status_code=202,  # 202 Accepted：已接收，處理中
+    deprecated=True,
+)
+async def upload_media(
     file: UploadFile = File(..., description="要處理的媒體檔（音訊或影片，支援 mp3/wav/m4a/mp4/mov 等）"),
     model: Optional[str] = Form(default=None, description=f"指定 Gemini 模型（預設：{GEMINI_MODEL}）"),
     title: Optional[str] = Form(default=None, description="自訂會議標題（預設使用檔案名稱）"),

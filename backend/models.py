@@ -31,7 +31,7 @@ class JobStatus(str, Enum):
 # =============================================================================
 
 class JobResponse(BaseModel):
-    """POST /upload-audio 的回應格式"""
+    """POST /upload-media（或舊路徑 /upload-audio）的回應格式"""
     job_id: str = Field(..., description="任務唯一識別碼 (UUID)")
     status: JobStatus = Field(..., description="當前任務狀態")
     message: str = Field(..., description="人類可讀的狀態描述")

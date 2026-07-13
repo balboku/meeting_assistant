@@ -33,7 +33,7 @@ graph TB
     end
 
     LINE -- "音檔 Webhook" --> FASTAPI
-    GUI -- "HTTP POST /upload-audio" --> FASTAPI
+    GUI -- "HTTP POST /upload-media" --> FASTAPI
     FASTAPI --> PREPROCESS
     FASTAPI --> SOURCE
     PREPROCESS --> TEMP
@@ -83,7 +83,7 @@ graph TB
 
 | 子模組 | 技術 | 功能 |
 |--------|------|------|
-| **API 網關** | FastAPI | 開出 `/upload-audio`（桌面端上傳）與 `/line-webhook`（LINE 傳遞）端點 |
+| **API 網關** | FastAPI | 開出 `/upload-media`（桌面端上傳；`/upload-audio` 保留相容）與 `/line-webhook`（LINE 傳遞）端點 |
 | **媒體預處理** | Pydub | 必要時抽取/轉換音訊並切割，保留原始音訊或影片作為證據檔 |
 | **任務佇列** | Background Tasks | 背景非同步執行，讓前端不卡住；進階版可升級至 Celery + Redis |
 
@@ -153,7 +153,7 @@ sequenceDiagram
     participant DB as 儲存層
     participant LINE as LINE Bot
 
-    U->>API: POST /upload-audio (媒體檔)
+    U->>API: POST /upload-media (媒體檔)
     API-->>U: {"status": "processing"} 立即回應
     API->>PROC: 存入 Temp，格式檢查
     PROC->>AI: 上傳媒體檔 (File API)
@@ -174,7 +174,7 @@ sequenceDiagram
 | 階段 | 功能 | 狀態 |
 |------|------|------|
 | **Phase 0** | 單檔處理 CLI 腳本（MVP） | ✅ **已完成並驗證** |
-| **Phase 1** | FastAPI 後端 + `/upload-audio` 端點 | ✅ **已完成** |
+| **Phase 1** | FastAPI 後端 + `/upload-media` 端點（`/upload-audio` 相容舊整合） | ✅ **已完成** |
 | **Phase 2** | 桌面錄音 GUI（sounddevice + Tkinter） | ✅ **已完成** |
 | **Phase 3** | LINE Bot Webhook 整合 | ✅ **已完成** |
 | **Phase 4** | SQLite 歷史記錄 + 搜尋功能 | ✅ **已完成** |

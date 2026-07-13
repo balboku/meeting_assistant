@@ -119,7 +119,7 @@ class SecurityRegressionTests(unittest.TestCase):
             response = asgi_request(
                 main.app,
                 "POST",
-                "/upload-audio",
+                "/upload-media",
                 files={"file": ("large.mp3", BytesIO(b"0" * 12), "audio/mpeg")},
             )
         finally:
@@ -217,6 +217,20 @@ class ConfigRegressionTests(unittest.TestCase):
         self.assertEqual(payload["recording_profiles"]["video_balanced"]["video_fps"], 15)
         self.assertIn(".mp3", payload["supported_extensions"])
         self.assertIn(".mp4", payload["supported_extensions"])
+
+    def test_upload_media_is_primary_and_upload_audio_is_deprecated_alias(self):
+        import backend.main as main
+
+        response = asgi_request(main.app, "GET", "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        paths = response.json()["paths"]
+        self.assertIn("/upload-media", paths)
+        self.assertIn("/upload-audio", paths)
+        self.assertEqual(paths["/upload-media"]["post"]["summary"], "上傳音訊或影片並觸發 AI 處理")
+        self.assertFalse(paths["/upload-media"]["post"].get("deprecated", False))
+        self.assertTrue(paths["/upload-audio"]["post"]["deprecated"])
+        self.assertIn("相容舊路徑", paths["/upload-audio"]["post"]["summary"])
 
 
 class AuthAuditRegressionTests(unittest.TestCase):
@@ -620,7 +634,7 @@ class MediaValidationRegressionTests(unittest.TestCase):
         response = asgi_request(
             main.app,
             "POST",
-            "/upload-audio",
+            "/upload-media",
             files={"file": ("fake.mp3", BytesIO(b"<html>not audio</html>"), "audio/mpeg")},
         )
 
@@ -1766,7 +1780,7 @@ class UploadQueueRegressionTests(unittest.TestCase):
     def test_upload_route_enqueues_audio_job_instead_of_inline_background_task(self):
         source = (ROOT / "backend" / "main.py").read_text(encoding="utf-8")
         upload_body = source[
-            source.index("async def upload_audio") :
+            source.index("async def upload_media") :
             source.index("# =============================================================================\n# 任務狀態查詢端點")
         ]
 
@@ -1793,7 +1807,7 @@ class UploadQueueRegressionTests(unittest.TestCase):
                 response = asgi_request(
                     main.app,
                     "POST",
-                    "/upload-audio",
+                    "/upload-media",
                     files={"file": ("meeting.mp3", BytesIO(b"ID3" + b"\0" * 32), "audio/mpeg")},
                     data={"recording_profile": "audio_compact"},
                 )
@@ -1830,7 +1844,7 @@ class UploadQueueRegressionTests(unittest.TestCase):
                 response = asgi_request(
                     main.app,
                     "POST",
-                    "/upload-audio",
+                    "/upload-media",
                     files={"file": ("meeting.mp3", BytesIO(media_bytes), "audio/mpeg")},
                 )
 
@@ -1858,7 +1872,7 @@ class UploadQueueRegressionTests(unittest.TestCase):
                 response = asgi_request(
                     main.app,
                     "POST",
-                    "/upload-audio",
+                    "/upload-media",
                     files={"file": ("meeting.mp3", BytesIO(media_bytes), "audio/mpeg")},
                 )
 
@@ -1866,6 +1880,34 @@ class UploadQueueRegressionTests(unittest.TestCase):
             self.assertTrue(existing_audio.exists())
             self.assertEqual(list(source_audio_dir.glob("*.mp3")), [existing_audio])
             self.assertFalse(list(source_audio_dir.glob(".upload_*")))
+
+    def test_legacy_upload_audio_route_remains_supported(self):
+        import backend.main as main
+
+        captured = {}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            source_audio_dir = tmpdir_path / "source_audio"
+            output_dir = tmpdir_path / "output"
+            source_audio_dir.mkdir()
+            output_dir.mkdir()
+
+            def fake_enqueue_audio_job(**kwargs):
+                captured.update(kwargs)
+
+            with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_audio_dir), \
+                 mock.patch.object(main, "OUTPUT_DIR", output_dir), \
+                 mock.patch.object(main, "enqueue_audio_job", side_effect=fake_enqueue_audio_job):
+                response = asgi_request(
+                    main.app,
+                    "POST",
+                    "/upload-audio",
+                    files={"file": ("meeting.mp3", BytesIO(b"ID3" + b"\0" * 32), "audio/mpeg")},
+                )
+
+            self.assertEqual(response.status_code, 202)
+            self.assertIn("媒體檔已接收", response.json()["message"])
+            self.assertTrue(captured["audio_path"].is_file())
 
 
 class TempCleanupRegressionTests(unittest.TestCase):
@@ -3578,6 +3620,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("Promise.allSettled", html)
         self.assertIn("initializeDashboard()", html)
         self.assertIn("/config", html)
+        self.assertIn("/upload-media", html)
+        self.assertNotIn("${API}/upload-audio", html)
         self.assertIn("source_media_archive_retention_days", html)
         self.assertIn("selectedFile.size > runtimeConfig.max_upload_bytes", html)
         self.assertIn("formatBytes(runtimeConfig.max_upload_bytes)", html)
