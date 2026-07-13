@@ -914,7 +914,12 @@ async def get_source_media_inventory_file(
 ):
     """Return a retained source media file from the maintenance inventory."""
     source_path = _source_media_file_by_name(filename)
-    media_type = _source_media_content_type({"source_audio": source_path.name, "quality_report": {}}, source_path)
+    linked_ref = _source_audio_refs_by_name().get(source_path.name)
+    record = {
+        "source_audio": str(linked_ref.get("source_audio") if linked_ref else source_path.name),
+        "quality_report": linked_ref.get("quality_report") if linked_ref else {},
+    }
+    media_type = _source_media_content_type(record, source_path)
     return FileResponse(
         path=source_path,
         filename=source_path.name,
