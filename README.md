@@ -189,7 +189,7 @@ BASE_URL=http://127.0.0.1:8001 scripts/smoke_e2e.sh
 .venv/bin/python start.py
 ```
 
-一鍵啟動也會自動嘗試啟動 ngrok，並在同一個終端機列出 tunnel / LINE webhook test 狀態。網頁介面的「維運狀態」列會顯示 `LINE/ngrok` 是否已連線、目前 `/line-webhook` 公開 URL，以及已保留原始錄音/錄影的檔案數與容量。ngrok log 與 PID 會放在 `logs/ngrok.log`、`logs/ngrok.pid`。
+一鍵啟動也會自動嘗試啟動 ngrok，並在同一個終端機列出 tunnel / LINE webhook test 狀態。網頁介面的「維運狀態」列會顯示 `LINE/ngrok` 是否已連線、目前 `/line-webhook` 公開 URL，以及已保留原始錄音/錄影的檔案數與容量；滑過原始檔欄位可查看目前最大的幾個保留檔。ngrok log 與 PID 會放在 `logs/ngrok.log`、`logs/ngrok.pid`。
 
 ### 手機 / 平板開啟 Web 介面
 

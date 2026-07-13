@@ -2189,6 +2189,7 @@ class MetricsRegressionTests(unittest.TestCase):
             output_dir.mkdir()
             (source_dir / "meeting-a.mp3").write_bytes(b"audio-a")
             (source_dir / "meeting-b.webm").write_bytes(b"video-bb")
+            (source_dir / "meeting-c.m4a").write_bytes(b"ccc")
             (source_dir / ".upload_tmp.mp3").write_bytes(b"ignore")
             (source_dir / "note.txt").write_text("ignore", encoding="utf-8")
             (output_dir / "meeting-a.md").write_text("note-a", encoding="utf-8")
@@ -2201,8 +2202,13 @@ class MetricsRegressionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         storage = response.json()["storage"]
-        self.assertEqual(storage["source_media_files"], 2)
-        self.assertEqual(storage["source_media_bytes"], len(b"audio-a") + len(b"video-bb"))
+        self.assertEqual(storage["source_media_files"], 3)
+        self.assertEqual(storage["source_media_bytes"], len(b"audio-a") + len(b"video-bb") + len(b"ccc"))
+        self.assertEqual(
+            [item["name"] for item in storage["source_media_largest_files"][:3]],
+            ["meeting-b.webm", "meeting-a.mp3", "meeting-c.m4a"],
+        )
+        self.assertEqual(storage["source_media_largest_files"][0]["bytes"], len(b"video-bb"))
         self.assertEqual(storage["meeting_markdown_files"], 2)
         self.assertEqual(storage["meeting_markdown_bytes"], len("note-a".encode("utf-8")) + len("note-bb".encode("utf-8")))
 
@@ -3132,6 +3138,9 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("data.storage", html)
         self.assertIn("storage.source_media_files", html)
         self.assertIn("storage.source_media_bytes", html)
+        self.assertIn("storage.source_media_largest_files", html)
+        self.assertIn("function sourceStorageTitle", html)
+        self.assertIn("最大檔案：", html)
         self.assertIn("formatBytes(sourceBytes)", html)
         self.assertIn("原始檔", html)
         self.assertIn("function showNeedsReviewMeetings", html)

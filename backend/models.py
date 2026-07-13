@@ -119,10 +119,18 @@ class NgrokStatus(BaseModel):
     api_url: Optional[str] = None
 
 
+class StorageFileMetric(BaseModel):
+    """單一檔案容量摘要"""
+    name: str
+    bytes: int
+    modified_at: Optional[datetime] = None
+
+
 class StorageMetrics(BaseModel):
     """本機檔案容量摘要"""
     source_media_files: int
     source_media_bytes: int
+    source_media_largest_files: list[StorageFileMetric] = Field(default_factory=list)
     meeting_markdown_files: int
     meeting_markdown_bytes: int
 

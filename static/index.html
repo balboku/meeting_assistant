@@ -1225,6 +1225,18 @@ function formatBytes(bytes = 0) {
   return `${value} B`;
 }
 
+function sourceStorageTitle(sourceFiles = 0, sourceBytes = 0, largestFiles = []) {
+  const lines = [`原始錄音/錄影：${sourceFiles} 個檔案，${formatBytes(sourceBytes)}`];
+  const largest = Array.isArray(largestFiles) ? largestFiles.slice(0, 5) : [];
+  if (largest.length) {
+    lines.push('最大檔案：');
+    largest.forEach(file => {
+      lines.push(`${file.name || '未命名'} (${formatBytes(file.bytes)})`);
+    });
+  }
+  return lines.join('\n');
+}
+
 async function apiErrorMessage(res) {
   const fallback = `HTTP ${res.status}`;
   const copy = res.clone();
@@ -2244,8 +2256,9 @@ async function loadMetrics() {
     const storage = data.storage || {};
     const sourceFiles = Number(storage.source_media_files || 0);
     const sourceBytes = Number(storage.source_media_bytes || 0);
+    const sourceLargestFiles = storage.source_media_largest_files || [];
     sourceStorageEl.textContent = `${sourceFiles} / ${formatBytes(sourceBytes)}`;
-    sourceStorageTile.title = `原始錄音/錄影：${sourceFiles} 個檔案，${formatBytes(sourceBytes)}`;
+    sourceStorageTile.title = sourceStorageTitle(sourceFiles, sourceBytes, sourceLargestFiles);
     averageEl.textContent = data.jobs?.average_completed_seconds == null
       ? '–'
       : `${data.jobs.average_completed_seconds}s`;

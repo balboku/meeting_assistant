@@ -79,6 +79,7 @@ from backend.models import (
     MeetingEvidenceResponse,
     HealthResponse,
     JobMetrics,
+    StorageFileMetric,
     StorageMetrics,
     MetricsResponse,
     AppConfigResponse,
@@ -403,14 +404,20 @@ async def health_check():
     )
 
 
-def _directory_file_stats(path: Path, allowed_suffixes: set[str]) -> tuple[int, int]:
-    """Return file count and bytes for a shallow directory scan."""
+def _directory_file_stats(
+    path: Path,
+    allowed_suffixes: set[str],
+    *,
+    largest_limit: int = 0,
+) -> tuple[int, int, list[StorageFileMetric]]:
+    """Return file count, bytes, and optional largest files for a shallow scan."""
     count = 0
     total_bytes = 0
+    files: list[StorageFileMetric] = []
     try:
         entries = list(path.iterdir())
     except OSError:
-        return 0, 0
+        return 0, 0, []
 
     normalized_suffixes = {suffix.lower() for suffix in allowed_suffixes}
     for entry in entries:
@@ -426,18 +433,29 @@ def _directory_file_stats(path: Path, allowed_suffixes: set[str]) -> tuple[int, 
             continue
         count += 1
         total_bytes += int(stat.st_size)
-    return count, total_bytes
+        if largest_limit > 0:
+            files.append(
+                StorageFileMetric(
+                    name=entry.name,
+                    bytes=int(stat.st_size),
+                    modified_at=datetime.fromtimestamp(stat.st_mtime),
+                )
+            )
+    largest_files = sorted(files, key=lambda item: item.bytes, reverse=True)[:largest_limit]
+    return count, total_bytes, largest_files
 
 
 def _storage_metrics() -> StorageMetrics:
-    source_count, source_bytes = _directory_file_stats(
+    source_count, source_bytes, source_largest_files = _directory_file_stats(
         SOURCE_AUDIO_DIR,
         set(SUPPORTED_MEDIA_FORMATS),
+        largest_limit=5,
     )
-    markdown_count, markdown_bytes = _directory_file_stats(OUTPUT_DIR, {".md"})
+    markdown_count, markdown_bytes, _ = _directory_file_stats(OUTPUT_DIR, {".md"})
     return StorageMetrics(
         source_media_files=source_count,
         source_media_bytes=source_bytes,
+        source_media_largest_files=source_largest_files,
         meeting_markdown_files=markdown_count,
         meeting_markdown_bytes=markdown_bytes,
     )
