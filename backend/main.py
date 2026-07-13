@@ -559,6 +559,18 @@ def _source_media_inventory(limit: int = 100) -> SourceMediaInventoryResponse:
     )
 
 
+def _source_media_delete_backup_path(source_path: Path) -> Path:
+    deleted_dir = BACKUP_DIR / "source_media_deleted" / datetime.now().strftime("%Y%m%d")
+    deleted_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%H%M%S_%f")
+    candidate = deleted_dir / f"{timestamp}_{source_path.name}"
+    counter = 1
+    while candidate.exists():
+        candidate = deleted_dir / f"{timestamp}_{counter}_{source_path.name}"
+        counter += 1
+    return candidate
+
+
 def _delete_unlinked_source_media(filename: str) -> SourceMediaDeleteResponse:
     source_path = _source_media_file_by_name(filename)
     linked_ref = _source_audio_refs_by_name().get(source_path.name)
@@ -569,10 +581,16 @@ def _delete_unlinked_source_media(filename: str) -> SourceMediaDeleteResponse:
         )
     try:
         file_bytes = source_path.stat().st_size
-        source_path.unlink()
+        backup_path = _source_media_delete_backup_path(source_path)
+        shutil.move(str(source_path), str(backup_path))
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"刪除原始檔失敗：{exc}")
-    return SourceMediaDeleteResponse(deleted=True, name=source_path.name, bytes=int(file_bytes))
+    return SourceMediaDeleteResponse(
+        deleted=True,
+        name=source_path.name,
+        bytes=int(file_bytes),
+        backup_path=str(backup_path),
+    )
 
 
 def _storage_metrics() -> StorageMetrics:

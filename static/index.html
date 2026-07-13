@@ -1371,6 +1371,10 @@ async function deleteUnlinkedSourceMedia(filename = '') {
   try {
     const res = await fetch(`${API}/source-media/inventory/${encodeURIComponent(filename)}`, { method: 'DELETE' });
     if (!res.ok) throw new Error(await apiErrorMessage(res));
+    const payload = await res.json().catch(() => ({}));
+    if (payload.backup_path) {
+      alert(`已從清單移除，並移至備份：\n${payload.backup_path}`);
+    }
     await openSourceStorageInventory();
     await loadMetrics();
   } catch (err) {

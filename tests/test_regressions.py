@@ -2212,7 +2212,8 @@ class MetricsRegressionTests(unittest.TestCase):
             )
 
             with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
-                 mock.patch.object(main, "OUTPUT_DIR", output_dir):
+                 mock.patch.object(main, "OUTPUT_DIR", output_dir), \
+                 mock.patch.object(main, "BACKUP_DIR", root / "backups"):
                 response = asgi_request(main.app, "GET", "/metrics")
                 inventory_response = asgi_request(main.app, "GET", "/source-media/inventory?limit=2")
                 inventory_media_response = asgi_request(main.app, "GET", "/source-media/inventory/meeting-c.m4a")
@@ -2223,6 +2224,9 @@ class MetricsRegressionTests(unittest.TestCase):
                 delete_response = asgi_request(main.app, "DELETE", "/source-media/inventory/meeting-c.m4a")
                 post_delete_inventory_response = asgi_request(main.app, "GET", "/source-media/inventory?limit=10")
                 deleted_file_exists = (source_dir / "meeting-c.m4a").exists()
+                deleted_backup_path = Path(delete_response.json().get("backup_path", ""))
+                deleted_backup_exists = deleted_backup_path.is_file()
+                deleted_backup_content = deleted_backup_path.read_bytes() if deleted_backup_exists else b""
 
         self.assertEqual(response.status_code, 200)
         storage = response.json()["storage"]
@@ -2266,6 +2270,9 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual(hidden_delete_response.status_code, 400)
         self.assertEqual(delete_response.status_code, 200)
         self.assertEqual(delete_response.json()["name"], "meeting-c.m4a")
+        self.assertIn("source_media_deleted", delete_response.json()["backup_path"])
+        self.assertTrue(deleted_backup_exists)
+        self.assertEqual(deleted_backup_content, b"ccc")
         self.assertFalse(deleted_file_exists)
         post_delete_inventory = post_delete_inventory_response.json()
         self.assertEqual(post_delete_inventory["total_files"], 2)
@@ -3220,6 +3227,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("/source-media/inventory?limit=100", html)
         self.assertIn("/source-media/inventory/${encodeURIComponent(filename)}", html)
         self.assertIn("method: 'DELETE'", html)
+        self.assertIn("payload.backup_path", html)
+        self.assertIn("已從清單移除", html)
         self.assertIn('target="_blank"', html)
         self.assertIn("download>下載</a>", html)
         self.assertIn("openMeetingFromSourceStorage", html)

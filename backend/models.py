@@ -155,6 +155,7 @@ class SourceMediaDeleteResponse(BaseModel):
     deleted: bool
     name: str
     bytes: int = 0
+    backup_path: Optional[str] = None
 
 
 class RecentJobError(BaseModel):
