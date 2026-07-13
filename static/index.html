@@ -681,6 +681,16 @@
     .source-storage-preview video {
       max-height: min(46vh, 520px);
     }
+    .source-storage-preview-unsupported {
+      padding: 12px;
+      border: 1px dashed rgba(122,162,247,0.34);
+      border-radius: 6px;
+      background: rgba(122,162,247,0.06);
+      color: var(--text-mid);
+      font-size: 13px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
     .source-storage-section-title {
       margin: 14px 0 8px;
       color: var(--text-main);
@@ -1570,13 +1580,17 @@ function previewSourceMedia(url = '', mediaType = '', name = '') {
   if (!preview || !url) return;
   const safeUrl = escapeHtml(url);
   const safeName = escapeHtml(name || '原始檔');
-  const isVideo = sourceStorageMediaType({ name, source_media_type: mediaType }) === 'video';
+  const resolvedMediaType = sourceStorageMediaType({ name, source_media_type: mediaType });
+  const isVideo = resolvedMediaType === 'video';
+  const mediaTitle = isVideo ? '原始錄影' : resolvedMediaType === 'audio' ? '原始音檔' : '原始檔案';
   const player = isVideo
     ? `<video controls preload="metadata" src="${safeUrl}"></video>`
-    : `<audio controls preload="metadata" src="${safeUrl}"></audio>`;
+    : resolvedMediaType === 'audio'
+      ? `<audio controls preload="metadata" src="${safeUrl}"></audio>`
+      : `<div class="source-storage-preview-unsupported">無法判斷此檔案是否可直接預覽，請使用「新分頁」或「下載」開啟。</div>`;
   preview.innerHTML = `
     <div class="source-storage-preview-header">
-      <div class="source-storage-preview-title">${isVideo ? '原始錄影' : '原始音檔'}：${safeName}</div>
+      <div class="source-storage-preview-title">${mediaTitle}：${safeName}</div>
       <div class="source-storage-preview-actions">
         <a class="source-media-action" href="${safeUrl}" target="_blank" rel="noopener noreferrer">新分頁</a>
         <button type="button" class="source-media-action" onclick="closeSourceMediaPreview()">關閉</button>
