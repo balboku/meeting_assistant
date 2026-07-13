@@ -94,7 +94,7 @@ from backend.models import (
 from backend.job_queue import enqueue_audio_job, enqueue_line_audio_job, job_worker
 from backend.auth import auth_config_payload
 from backend.cleanup import cleanup_stale_temp_files_for_jobs, cleanup_terminal_jobs
-from backend.maintenance import run_startup_health_checks, run_startup_maintenance
+from backend.maintenance import cleanup_source_media_archives, run_startup_health_checks, run_startup_maintenance
 from backend.media_validation import validate_media_magic
 from backend.ngrok_status import get_ngrok_status
 from backend.source_audio import finalize_source_audio_upload
@@ -147,8 +147,18 @@ SERVER_PORT = int(os.getenv("MEETING_ASSISTANT_PORT", "8001"))
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 MULTIPART_OVERHEAD_ALLOWANCE_BYTES = 1024 * 1024
+
+
+def _nonnegative_int_env(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
 JOB_RETENTION_DAYS = int(os.getenv("JOB_RETENTION_DAYS", "30"))
 DB_BACKUP_KEEP = int(os.getenv("DB_BACKUP_KEEP", "5"))
+SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS = _nonnegative_int_env("SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS", 90)
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -206,6 +216,17 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 AI 語音會議助理 Backend 啟動中...")
     init_db()
     run_startup_maintenance(DB_PATH, BACKUP_DIR, backup_keep=DB_BACKUP_KEEP)
+    archive_cleanup = cleanup_source_media_archives(
+        BACKUP_DIR / "source_media_deleted",
+        retention_days=SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS,
+    )
+    if int(archive_cleanup["deleted_files"]) > 0:
+        logger.info(
+            "🧹 已清理過期原始檔備份：%s 個日期目錄、%s 個檔案、%s bytes",
+            archive_cleanup["deleted_dirs"],
+            archive_cleanup["deleted_files"],
+            archive_cleanup["deleted_bytes"],
+        )
     cleanup_stale_temp_files_for_jobs(TEMP_DIR)
     cleanup_terminal_jobs(max_age_days=JOB_RETENTION_DAYS)
     job_worker.start()

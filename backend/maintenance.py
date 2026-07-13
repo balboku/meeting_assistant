@@ -9,9 +9,10 @@ without starting Uvicorn.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Mapping
 
@@ -55,6 +56,62 @@ def maintain_database(db_path: Path) -> dict[str, bool]:
         conn.close()
 
     return {"wal_checkpoint": True, "vacuum": True}
+
+
+def cleanup_source_media_archives(
+    archive_root: Path,
+    retention_days: int = 90,
+    now: datetime | None = None,
+) -> dict[str, int | bool]:
+    """Delete date-bucketed removed source-media backups older than retention."""
+    result: dict[str, int | bool] = {
+        "enabled": retention_days > 0,
+        "deleted_dirs": 0,
+        "deleted_files": 0,
+        "deleted_bytes": 0,
+    }
+    if retention_days <= 0 or not archive_root.exists():
+        return result
+
+    cutoff_date = (now or datetime.now()).date() - timedelta(days=retention_days)
+    try:
+        date_dirs = list(archive_root.iterdir())
+    except OSError:
+        return result
+
+    for date_dir in date_dirs:
+        if date_dir.is_symlink() or not date_dir.is_dir() or not re.fullmatch(r"\d{8}", date_dir.name):
+            continue
+        try:
+            archive_date = datetime.strptime(date_dir.name, "%Y%m%d").date()
+        except ValueError:
+            continue
+        if archive_date >= cutoff_date:
+            continue
+
+        deleted_files = 0
+        deleted_bytes = 0
+        try:
+            entries = list(date_dir.rglob("*"))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if not entry.is_file():
+                    continue
+                deleted_files += 1
+                deleted_bytes += int(entry.stat().st_size)
+            except OSError:
+                continue
+        try:
+            shutil.rmtree(date_dir)
+        except OSError:
+            continue
+        result["deleted_dirs"] = int(result["deleted_dirs"]) + 1
+        result["deleted_files"] = int(result["deleted_files"]) + deleted_files
+        result["deleted_bytes"] = int(result["deleted_bytes"]) + deleted_bytes
+
+    return result
 
 
 def _path_check(name: str, path: Path, must_contain: tuple[str, ...] = ()) -> dict[str, str]:

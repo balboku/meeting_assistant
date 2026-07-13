@@ -155,6 +155,7 @@ BASE_URL=http://127.0.0.1:8001 scripts/smoke_e2e.sh
 | `MEETING_BACKUP_DIR` | `./backups` | 啟動維護時保存 SQLite 備份的位置。 |
 | `MEETING_DOCX_TEMPLATE_PATH` | `./4-QA-005 V01 會議紀錄.docx` | Word 匯出使用的本機範本路徑。公司表單範本請保留在本機，不提交到 Git。 |
 | `DB_BACKUP_KEEP` | `5` | 保留最近幾份資料庫備份。 |
+| `SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS` | `90` | 手動移除原始錄音/錄影後，`backups/source_media_deleted/` 備份保留天數；設為 `0` 可停用自動清理。 |
 | `JOB_RETENTION_DAYS` | `30` | 已完成、失敗或取消任務的保留天數。 |
 | `JOB_QUEUE_MAX_ATTEMPTS` | `5` | 自動處理任務最多嘗試次數；用於降低 503/暫時性服務忙碌造成的失敗。 |
 | `JOB_QUEUE_TRANSIENT_RETRY_DELAY_SECONDS` | `30` | 偵測到 503、429、UNAVAILABLE、timeout 等暫時性錯誤時，下一次重試前等待秒數。 |
@@ -189,7 +190,7 @@ BASE_URL=http://127.0.0.1:8001 scripts/smoke_e2e.sh
 .venv/bin/python start.py
 ```
 
-一鍵啟動也會自動嘗試啟動 ngrok，並在同一個終端機列出 tunnel / LINE webhook test 狀態。網頁介面的「維運狀態」列會顯示 `LINE/ngrok` 是否已連線、目前 `/line-webhook` 公開 URL，以及已保留原始錄音/錄影的檔案數與容量；此容量會一併納入已移除備份，避免備份長期累積卻不易察覺。滑過原始檔欄位可查看目前最大的幾個保留檔、對應會議與未連結檔案數，點擊「原始檔」可開啟完整維運清單、開啟或下載保留檔、直接跳到已連結的會議，或手動移除確認不再需要的未連結檔案。手動移除會先搬到 `backups/source_media_deleted/`，不會直接永久刪除；同一個維運視窗也能查看已移除備份、開啟或下載確認內容，並在需要時還原。ngrok log 與 PID 會放在 `logs/ngrok.log`、`logs/ngrok.pid`。
+一鍵啟動也會自動嘗試啟動 ngrok，並在同一個終端機列出 tunnel / LINE webhook test 狀態。網頁介面的「維運狀態」列會顯示 `LINE/ngrok` 是否已連線、目前 `/line-webhook` 公開 URL，以及已保留原始錄音/錄影的檔案數與容量；此容量會一併納入已移除備份，避免備份長期累積卻不易察覺。滑過原始檔欄位可查看目前最大的幾個保留檔、對應會議與未連結檔案數，點擊「原始檔」可開啟完整維運清單、直接預覽錄音/錄影、開啟或下載保留檔、直接跳到已連結的會議，或手動移除確認不再需要的未連結檔案。手動移除會先搬到 `backups/source_media_deleted/`，不會直接永久刪除；同一個維運視窗也能查看已移除備份、預覽或下載確認內容，並在需要時還原。啟動維護會自動清理超過 `SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS` 的已移除備份，避免備份資料夾無上限膨脹。ngrok log 與 PID 會放在 `logs/ngrok.log`、`logs/ngrok.pid`。
 
 ### 手機 / 平板開啟 Web 介面
 

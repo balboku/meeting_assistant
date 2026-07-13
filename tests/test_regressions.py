@@ -450,6 +450,7 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
             "MEETING_SOURCE_AUDIO_DIR",
             "MEETING_BACKUP_DIR",
             "DB_BACKUP_KEEP",
+            "SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS",
             "JOB_RETENTION_DAYS",
             "MEETING_ASSISTANT_NGROK",
             "MEETING_ASSISTANT_NGROK_URL",
@@ -485,6 +486,55 @@ class MaintenanceRegressionTests(unittest.TestCase):
             self.assertEqual(created.read_bytes(), b"sqlite-content")
             self.assertFalse(old_backup.exists())
 
+    def test_cleanup_source_media_archives_prunes_only_expired_date_buckets(self):
+        from backend.maintenance import cleanup_source_media_archives
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_root = Path(tmpdir) / "source_media_deleted"
+            expired = archive_root / "20260401"
+            retained = archive_root / "20260710"
+            ignored = archive_root / "manual-review"
+            expired.mkdir(parents=True)
+            retained.mkdir()
+            ignored.mkdir()
+            (expired / "old.webm").write_bytes(b"old-media")
+            (expired / "note.txt").write_bytes(b"note")
+            (retained / "fresh.webm").write_bytes(b"fresh")
+            (ignored / "keep.webm").write_bytes(b"manual")
+
+            result = cleanup_source_media_archives(
+                archive_root=archive_root,
+                retention_days=30,
+                now=datetime(2026, 7, 13, 12, 0, 0),
+            )
+
+            self.assertTrue(result["enabled"])
+            self.assertEqual(result["deleted_dirs"], 1)
+            self.assertEqual(result["deleted_files"], 2)
+            self.assertEqual(result["deleted_bytes"], len(b"old-media") + len(b"note"))
+            self.assertFalse(expired.exists())
+            self.assertTrue((retained / "fresh.webm").exists())
+            self.assertTrue((ignored / "keep.webm").exists())
+
+    def test_cleanup_source_media_archives_can_be_disabled(self):
+        from backend.maintenance import cleanup_source_media_archives
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_root = Path(tmpdir) / "source_media_deleted"
+            expired = archive_root / "20260401"
+            expired.mkdir(parents=True)
+            (expired / "old.webm").write_bytes(b"old-media")
+
+            result = cleanup_source_media_archives(
+                archive_root=archive_root,
+                retention_days=0,
+                now=datetime(2026, 7, 13, 12, 0, 0),
+            )
+
+            self.assertFalse(result["enabled"])
+            self.assertEqual(result["deleted_files"], 0)
+            self.assertTrue((expired / "old.webm").exists())
+
     def test_maintain_database_runs_checkpoint_and_vacuum(self):
         from backend.maintenance import maintain_database
 
@@ -512,8 +562,13 @@ class MaintenanceRegressionTests(unittest.TestCase):
         ]
 
         self.assertIn("run_startup_maintenance", lifespan_body)
+        self.assertIn("cleanup_source_media_archives", lifespan_body)
         self.assertLess(
             lifespan_body.index("run_startup_maintenance"),
+            lifespan_body.index("cleanup_source_media_archives"),
+        )
+        self.assertLess(
+            lifespan_body.index("cleanup_source_media_archives"),
             lifespan_body.index("job_worker.start()"),
         )
 
