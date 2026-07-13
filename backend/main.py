@@ -82,6 +82,7 @@ from backend.models import (
     JobMetrics,
     StorageFileMetric,
     StorageMetrics,
+    SourceMediaDeleteResponse,
     SourceMediaInventoryResponse,
     MetricsResponse,
     AppConfigResponse,
@@ -465,6 +466,26 @@ def _source_audio_refs_by_name() -> dict[str, dict]:
     return refs
 
 
+def _source_media_file_by_name(filename: str) -> Path:
+    clean_name = Path(str(filename or "")).name
+    if not clean_name or clean_name != filename or clean_name.startswith("."):
+        raise HTTPException(status_code=400, detail="檔名不合法")
+    if Path(clean_name).suffix.lower() not in SUPPORTED_MEDIA_FORMATS:
+        supported = ", ".join(sorted(SUPPORTED_MEDIA_FORMATS))
+        raise HTTPException(status_code=415, detail=f"不支援的原始檔格式，支援格式：{supported}")
+
+    try:
+        source_root = SOURCE_AUDIO_DIR.resolve()
+        candidate = (SOURCE_AUDIO_DIR / clean_name).resolve()
+    except OSError:
+        raise HTTPException(status_code=404, detail="找不到原始檔")
+    if candidate.parent != source_root:
+        raise HTTPException(status_code=400, detail="檔案路徑不合法")
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="找不到原始檔")
+    return candidate
+
+
 def _source_media_inventory(limit: int = 100) -> SourceMediaInventoryResponse:
     count = 0
     total_bytes = 0
@@ -520,6 +541,22 @@ def _source_media_inventory(limit: int = 100) -> SourceMediaInventoryResponse:
         unlinked_bytes=unlinked_bytes,
         files=sorted_files,
     )
+
+
+def _delete_unlinked_source_media(filename: str) -> SourceMediaDeleteResponse:
+    source_path = _source_media_file_by_name(filename)
+    linked_ref = _source_audio_refs_by_name().get(source_path.name)
+    if linked_ref:
+        raise HTTPException(
+            status_code=409,
+            detail=f"原始檔仍連結到會議 #{linked_ref['id']}，不可從維運清單刪除。",
+        )
+    try:
+        file_bytes = source_path.stat().st_size
+        source_path.unlink()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"刪除原始檔失敗：{exc}")
+    return SourceMediaDeleteResponse(deleted=True, name=source_path.name, bytes=int(file_bytes))
 
 
 def _storage_metrics() -> StorageMetrics:
@@ -581,6 +618,17 @@ async def metrics():
 async def source_media_inventory(limit: int = Query(100, ge=1, le=500)):
     """回傳保留原始錄音/錄影的唯讀維運清單。"""
     return _source_media_inventory(limit=limit)
+
+
+@app.delete(
+    "/source-media/inventory/{filename}",
+    response_model=SourceMediaDeleteResponse,
+    summary="刪除未連結原始媒體檔",
+    tags=["系統"],
+)
+async def delete_unlinked_source_media(filename: str):
+    """只允許刪除未連結任何會議的保留原始錄音/錄影檔。"""
+    return _delete_unlinked_source_media(filename)
 
 
 @app.get(

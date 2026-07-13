@@ -2214,6 +2214,11 @@ class MetricsRegressionTests(unittest.TestCase):
                  mock.patch.object(main, "OUTPUT_DIR", output_dir):
                 response = asgi_request(main.app, "GET", "/metrics")
                 inventory_response = asgi_request(main.app, "GET", "/source-media/inventory?limit=2")
+                linked_delete_response = asgi_request(main.app, "DELETE", "/source-media/inventory/meeting-b.webm")
+                hidden_delete_response = asgi_request(main.app, "DELETE", "/source-media/inventory/.upload_tmp.mp3")
+                delete_response = asgi_request(main.app, "DELETE", "/source-media/inventory/meeting-c.m4a")
+                post_delete_inventory_response = asgi_request(main.app, "GET", "/source-media/inventory?limit=10")
+                deleted_file_exists = (source_dir / "meeting-c.m4a").exists()
 
         self.assertEqual(response.status_code, 200)
         storage = response.json()["storage"]
@@ -2241,6 +2246,16 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in inventory["files"]], ["meeting-b.webm", "meeting-a.mp3"])
         self.assertEqual(inventory["files"][0]["linked_meeting_id"], video_meeting_id)
         self.assertEqual(inventory["files"][1]["linked_meeting_title"], "Audio A")
+        self.assertEqual(linked_delete_response.status_code, 409)
+        self.assertIn("仍連結到會議", linked_delete_response.json()["detail"])
+        self.assertEqual(hidden_delete_response.status_code, 400)
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertEqual(delete_response.json()["name"], "meeting-c.m4a")
+        self.assertFalse(deleted_file_exists)
+        post_delete_inventory = post_delete_inventory_response.json()
+        self.assertEqual(post_delete_inventory["total_files"], 2)
+        self.assertEqual(post_delete_inventory["unlinked_files"], 0)
+        self.assertEqual([item["name"] for item in post_delete_inventory["files"]], ["meeting-b.webm", "meeting-a.mp3"])
 
     def test_metrics_endpoint_reports_ngrok_status(self):
         self._isolated_database()
@@ -3182,9 +3197,14 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("function openSourceStorageInventory", html)
         self.assertIn("function closeSourceStorageInventory", html)
         self.assertIn("function renderSourceStorageFile", html)
+        self.assertIn("function deleteUnlinkedSourceMedia", html)
         self.assertIn("/source-media/inventory?limit=100", html)
+        self.assertIn("/source-media/inventory/${encodeURIComponent(filename)}", html)
+        self.assertIn("method: 'DELETE'", html)
         self.assertIn("openMeetingFromSourceStorage", html)
         self.assertIn("未連結會議", html)
+        self.assertIn("請先確認這不是仍需保留的證據檔", html)
+        self.assertIn("source-media-action danger", html)
         self.assertIn("function showNeedsReviewMeetings", html)
         self.assertIn("loadMeetings(search.value.trim())", html)
         self.assertIn("需複核", html)

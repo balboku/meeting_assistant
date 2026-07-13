@@ -149,6 +149,13 @@ class SourceMediaInventoryResponse(BaseModel):
     files: list[StorageFileMetric] = Field(default_factory=list)
 
 
+class SourceMediaDeleteResponse(BaseModel):
+    """DELETE /source-media/inventory/{filename} 的回應格式"""
+    deleted: bool
+    name: str
+    bytes: int = 0
+
+
 class RecentJobError(BaseModel):
     """最近失敗任務摘要"""
     job_id: str
