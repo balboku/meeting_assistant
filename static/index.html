@@ -1469,7 +1469,7 @@
     </div>
     <div class="rec-quality-box">
       <label class="form-label" for="rec-quality-profile">錄製品質</label>
-      <select id="rec-quality-profile" class="form-input" onchange="updateRecordingEstimate()">
+      <select id="rec-quality-profile" class="form-input" onchange="handleRecordingProfileChange()">
         <option value="audio_standard">標準語音（推薦）</option>
         <option value="audio_compact">省容量語音</option>
         <option value="video_balanced">錄影平衡</option>
@@ -1539,6 +1539,7 @@ let runtimeConfig = {
     video_balanced: { audio_bps: 48000, audio_sample_rate: 24000, audio_channels: 1, video_bps: 1000000, video_fps: 15 }
   }
 };
+let lastAudioRecordingProfileId = 'audio_standard';
 const FALLBACK_UPLOAD_EXTENSIONS = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.webm', '.mp4', '.mov', '.avi', '.mkv', '.mpeg', '.mpg', '.wmv'];
 const FALLBACK_UPLOAD_ACCEPT = FALLBACK_UPLOAD_EXTENSIONS.join(',');
 let sourceStorageInventoryState = {
@@ -2127,6 +2128,17 @@ function getRecordingProfileId() {
   return selected === 'audio_compact' ? 'audio_compact' : 'audio_standard';
 }
 
+function handleRecordingProfileChange() {
+  const select = document.getElementById('rec-quality-profile');
+  if (!select) return;
+  if (!isVideoRecordingMode()) {
+    lastAudioRecordingProfileId = select.value === 'audio_compact'
+      ? 'audio_compact'
+      : 'audio_standard';
+  }
+  updateRecordingEstimate();
+}
+
 function getRecordingProfile() {
   const profiles = runtimeConfig.recording_profiles || {};
   return profiles[getRecordingProfileId()] || profiles.audio_standard || {
@@ -2149,9 +2161,7 @@ function syncRecordingProfileOptions() {
     option.hidden = !allowed;
     option.disabled = !allowed;
   });
-  const desired = videoMode
-    ? 'video_balanced'
-    : (select.value === 'audio_compact' ? 'audio_compact' : 'audio_standard');
+  const desired = videoMode ? 'video_balanced' : lastAudioRecordingProfileId;
   if (select.value !== desired) select.value = desired;
   updateRecordingEstimate();
 }
