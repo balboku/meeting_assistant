@@ -2618,6 +2618,7 @@ async function loadMetrics() {
     const managedFileLabel = archivedFiles > 0 ? `${sourceFiles}+${archivedFiles}` : `${sourceFiles}`;
     const sourceLargestFiles = storage.source_media_largest_files || [];
     sourceStorageEl.textContent = `${managedFileLabel} / ${formatBytes(totalManagedBytes)}`;
+    sourceStorageEl.classList.toggle('attention', unlinkedFiles > 0);
     sourceStorageTile.title = sourceStorageTitle(sourceFiles, sourceBytes, unlinkedFiles, unlinkedBytes, sourceLargestFiles, archivedFiles, archivedBytes);
     averageEl.textContent = data.jobs?.average_completed_seconds == null
       ? '–'
@@ -2637,6 +2638,7 @@ async function loadMetrics() {
     needsReviewEl.textContent = '–';
     needsReviewEl.classList.remove('attention');
     sourceStorageEl.textContent = '–';
+    sourceStorageEl.classList.remove('attention');
     sourceStorageTile.title = '無法讀取 /metrics';
     ngrokDetailEl.textContent = '無法讀取 /metrics';
     ngrokTile.title = '無法讀取 /metrics';

@@ -3328,6 +3328,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("已移除備份自動清理停用", html)
         self.assertIn("totalManagedBytes", html)
         self.assertIn("managedFileLabel", html)
+        self.assertIn("sourceStorageEl.classList.toggle('attention', unlinkedFiles > 0)", html)
+        self.assertIn("sourceStorageEl.classList.remove('attention')", html)
         self.assertIn("已移除備份", html)
         self.assertIn("最大檔案：", html)
         self.assertIn("未連結原始檔：", html)
