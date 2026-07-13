@@ -3645,6 +3645,7 @@ async function cancelActiveRecording() {
   activeRecordingMode = null;
   activeRecordingProfileId = null;
   setRecordingConfigurationLocked(false);
+  setRecordingSubmissionLocked(false);
   recProgMsg.textContent = '已取消處理。';
   closeBtn.disabled = false;
   loadJobs();
@@ -3676,6 +3677,7 @@ function resetRecorder() {
   recPreview.srcObject = null;
   if (recIncludeMic) recIncludeMic.checked = true;
   setRecordingConfigurationLocked(false);
+  setRecordingSubmissionLocked(false);
   updateRecordingModeOptions();
   syncRecordingProfileOptions();
   document.getElementById('rec-title').value = '';
@@ -3695,6 +3697,10 @@ function setRecordingConfigurationLocked(locked) {
   document.getElementById('rec-quality-profile').disabled = locked;
   if (recIncludeMic) recIncludeMic.disabled = locked;
   btnRecStart.disabled = locked;
+}
+
+function setRecordingSubmissionLocked(locked) {
+  document.getElementById('rec-title').disabled = locked;
 }
 
 function switchRecMode(mode) {
@@ -4034,6 +4040,7 @@ async function onRecordingStopped() {
     activeRecordingMode = null;
     activeRecordingProfileId = null;
     setRecordingConfigurationLocked(false);
+    setRecordingSubmissionLocked(false);
     return;
   }
   if (file.size > runtimeConfig.max_upload_bytes) {
@@ -4044,6 +4051,7 @@ async function onRecordingStopped() {
     activeRecordingMode = null;
     activeRecordingProfileId = null;
     setRecordingConfigurationLocked(false);
+    setRecordingSubmissionLocked(false);
     return;
   }
 
@@ -4053,6 +4061,7 @@ async function onRecordingStopped() {
 
   // 關閉錄製按鈕，禁止關閉
   document.getElementById('rec-close-btn').disabled = true;
+  setRecordingSubmissionLocked(true);
 
   const formData = new FormData();
   formData.append('file', file);
@@ -4077,6 +4086,7 @@ async function onRecordingStopped() {
     activeRecordingMode = null;
     activeRecordingProfileId = null;
     setRecordingConfigurationLocked(false);
+    setRecordingSubmissionLocked(false);
   }
 }
 
@@ -4102,6 +4112,7 @@ async function pollRecStatus(jobId) {
         activeRecordingMode = null;
         activeRecordingProfileId = null;
         setRecordingConfigurationLocked(false);
+        setRecordingSubmissionLocked(false);
         setRecordingResult('✅ AI 分析完成！');
         recProgMsg.textContent = '✅ AI 分析完成！';
         document.getElementById('rec-close-btn').disabled = false;
@@ -4121,6 +4132,7 @@ async function pollRecStatus(jobId) {
         activeRecordingMode = null;
         activeRecordingProfileId = null;
         setRecordingConfigurationLocked(false);
+        setRecordingSubmissionLocked(false);
         setRecordingResult('❌ AI 分析失敗', 'error');
         recProgMsg.textContent = `❌ AI 分析失敗：${data.message || '未知錯誤'}`;
         document.getElementById('rec-close-btn').disabled = false;
@@ -4132,6 +4144,7 @@ async function pollRecStatus(jobId) {
         activeRecordingMode = null;
         activeRecordingProfileId = null;
         setRecordingConfigurationLocked(false);
+        setRecordingSubmissionLocked(false);
         setRecordingResult('已取消處理。', 'error');
         recProgMsg.textContent = '已取消處理。';
         document.getElementById('rec-close-btn').disabled = false;
