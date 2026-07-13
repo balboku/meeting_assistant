@@ -2227,6 +2227,17 @@ class MetricsRegressionTests(unittest.TestCase):
                 deleted_backup_path = Path(delete_response.json().get("backup_path", ""))
                 deleted_backup_exists = deleted_backup_path.is_file()
                 deleted_backup_content = deleted_backup_path.read_bytes() if deleted_backup_exists else b""
+                archive_response = asgi_request(main.app, "GET", "/source-media/archive?limit=10")
+                restore_archive_id = archive_response.json()["files"][0]["archive_id"]
+                restore_response = asgi_request(
+                    main.app,
+                    "POST",
+                    "/source-media/archive/restore",
+                    params={"archive_id": restore_archive_id},
+                )
+                post_restore_inventory_response = asgi_request(main.app, "GET", "/source-media/inventory?limit=10")
+                restored_file_exists = (source_dir / "meeting-c.m4a").is_file()
+                restored_backup_exists = deleted_backup_path.exists()
 
         self.assertEqual(response.status_code, 200)
         storage = response.json()["storage"]
@@ -2278,6 +2289,18 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual(post_delete_inventory["total_files"], 2)
         self.assertEqual(post_delete_inventory["unlinked_files"], 0)
         self.assertEqual([item["name"] for item in post_delete_inventory["files"]], ["meeting-b.webm", "meeting-a.mp3"])
+        self.assertEqual(archive_response.status_code, 200)
+        archive_payload = archive_response.json()
+        self.assertEqual(archive_payload["total_files"], 1)
+        self.assertEqual(archive_payload["files"][0]["name"], "meeting-c.m4a")
+        self.assertEqual(archive_payload["files"][0]["source_media_type"], "audio")
+        self.assertEqual(restore_response.status_code, 200)
+        self.assertEqual(restore_response.json()["name"], "meeting-c.m4a")
+        self.assertTrue(restored_file_exists)
+        self.assertFalse(restored_backup_exists)
+        post_restore_inventory = post_restore_inventory_response.json()
+        self.assertEqual(post_restore_inventory["total_files"], 3)
+        self.assertEqual(post_restore_inventory["unlinked_files"], 1)
 
     def test_metrics_endpoint_reports_ngrok_status(self):
         self._isolated_database()
@@ -3225,10 +3248,15 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("const mediaType = String(file.source_media_type || '').toLowerCase()", html)
         self.assertIn("source-storage-badge media-type", html)
         self.assertIn("/source-media/inventory?limit=100", html)
+        self.assertIn("/source-media/archive?limit=100", html)
+        self.assertIn("/source-media/archive/restore?archive_id=", html)
         self.assertIn("/source-media/inventory/${encodeURIComponent(filename)}", html)
         self.assertIn("method: 'DELETE'", html)
+        self.assertIn("method: 'POST'", html)
         self.assertIn("payload.backup_path", html)
         self.assertIn("已從清單移除", html)
+        self.assertIn("function restoreSourceMediaArchive", html)
+        self.assertIn("已移除備份", html)
         self.assertIn('target="_blank"', html)
         self.assertIn("download>下載</a>", html)
         self.assertIn("openMeetingFromSourceStorage", html)

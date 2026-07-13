@@ -598,6 +598,12 @@
       gap: 8px;
       margin-bottom: 14px;
     }
+    .source-storage-section-title {
+      margin: 14px 0 8px;
+      color: var(--text-main);
+      font-size: 13px;
+      font-weight: 700;
+    }
     .source-storage-list {
       display: grid;
       gap: 8px;
@@ -1382,6 +1388,21 @@ async function deleteUnlinkedSourceMedia(filename = '') {
   }
 }
 
+async function restoreSourceMediaArchive(archiveId = '', name = '') {
+  if (!archiveId) return;
+  const label = name || archiveId;
+  if (!confirm(`還原已移除原始檔「${label}」？\n若原始檔清單已有同名檔案，系統會停止還原。`)) return;
+
+  try {
+    const res = await fetch(`${API}/source-media/archive/restore?archive_id=${encodeURIComponent(archiveId)}`, { method: 'POST' });
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    await openSourceStorageInventory();
+    await loadMetrics();
+  } catch (err) {
+    alert(`還原原始檔失敗：${err.message}`);
+  }
+}
+
 function renderSourceStorageFile(file) {
   const meetingId = Number(file.linked_meeting_id || 0);
   const linked = meetingId > 0 && file.linked_meeting_title;
@@ -1414,6 +1435,27 @@ function renderSourceStorageFile(file) {
   </div>`;
 }
 
+function renderSourceArchiveFile(file) {
+  const archiveId = String(file.archive_id || '');
+  const filename = String(file.name || file.archived_name || '');
+  const mediaType = String(file.source_media_type || '').toLowerCase();
+  const mediaTypeLabel = mediaType === 'video' ? '影片' : mediaType === 'audio' ? '音訊' : '';
+  return `<div class="source-storage-item">
+    <div>
+      <div class="source-storage-name">${escapeHtml(filename || '未命名')}</div>
+      <div class="source-storage-meta">
+        <span class="source-storage-badge">${formatBytes(file.bytes)}</span>
+        ${mediaTypeLabel ? `<span class="source-storage-badge media-type">${mediaTypeLabel}</span>` : ''}
+        <span class="source-storage-badge">${formatDate(file.modified_at)}</span>
+        <span class="source-storage-badge unlinked">已移除備份</span>
+      </div>
+    </div>
+    <div class="source-storage-actions">
+      <button type="button" class="source-media-action" data-archive-id="${escapeHtml(archiveId)}" data-source-file="${escapeHtml(filename)}" onclick="restoreSourceMediaArchive(this.dataset.archiveId, this.dataset.sourceFile)">還原</button>
+    </div>
+  </div>`;
+}
+
 async function openSourceStorageInventory() {
   const modal = document.getElementById('source-storage-modal');
   const list = document.getElementById('source-storage-list');
@@ -1422,19 +1464,29 @@ async function openSourceStorageInventory() {
   list.innerHTML = '<div class="detail-placeholder"><div class="loading-spinner"></div><p>載入原始檔清單...</p></div>';
 
   try {
-    const res = await fetch(`${API}/source-media/inventory?limit=100`);
+    const [res, archiveRes] = await Promise.all([
+      fetch(`${API}/source-media/inventory?limit=100`),
+      fetch(`${API}/source-media/archive?limit=100`)
+    ]);
     if (!res.ok) throw new Error(await apiErrorMessage(res));
+    if (!archiveRes.ok) throw new Error(await apiErrorMessage(archiveRes));
     const payload = await res.json();
+    const archivePayload = await archiveRes.json();
     const files = Array.isArray(payload.files) ? payload.files : [];
+    const archivedFiles = Array.isArray(archivePayload.files) ? archivePayload.files : [];
     const summary = `<div class="source-storage-summary">
       <span class="source-storage-badge">總檔案 ${Number(payload.total_files || 0)} 個</span>
       <span class="source-storage-badge">總容量 ${formatBytes(payload.total_bytes)}</span>
       <span class="source-storage-badge unlinked">未連結 ${Number(payload.unlinked_files || 0)} 個 / ${formatBytes(payload.unlinked_bytes)}</span>
+      <span class="source-storage-badge">已移除備份 ${Number(archivePayload.total_files || 0)} 個 / ${formatBytes(archivePayload.total_bytes)}</span>
     </div>`;
     const rows = files.length
       ? files.map(renderSourceStorageFile).join('')
       : '<div class="empty-state"><div class="icon">📁</div><p>目前沒有保留的原始錄音/錄影檔。</p></div>';
-    list.innerHTML = `${summary}${rows}`;
+    const archiveRows = archivedFiles.length
+      ? archivedFiles.map(renderSourceArchiveFile).join('')
+      : '<div class="empty-state"><div class="icon">↩</div><p>目前沒有可還原的已移除備份。</p></div>';
+    list.innerHTML = `${summary}<div class="source-storage-section-title">目前保留</div>${rows}<div class="source-storage-section-title">已移除備份</div>${archiveRows}`;
   } catch (err) {
     list.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>無法讀取原始檔清單：${escapeHtml(err.message)}</p></div>`;
   }

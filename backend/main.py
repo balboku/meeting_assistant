@@ -82,8 +82,11 @@ from backend.models import (
     JobMetrics,
     StorageFileMetric,
     StorageMetrics,
+    SourceMediaArchiveRecord,
+    SourceMediaArchiveResponse,
     SourceMediaDeleteResponse,
     SourceMediaInventoryResponse,
+    SourceMediaRestoreResponse,
     MetricsResponse,
     AppConfigResponse,
     ErrorResponse,
@@ -560,7 +563,7 @@ def _source_media_inventory(limit: int = 100) -> SourceMediaInventoryResponse:
 
 
 def _source_media_delete_backup_path(source_path: Path) -> Path:
-    deleted_dir = BACKUP_DIR / "source_media_deleted" / datetime.now().strftime("%Y%m%d")
+    deleted_dir = _source_media_archive_root() / datetime.now().strftime("%Y%m%d")
     deleted_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%H%M%S_%f")
     candidate = deleted_dir / f"{timestamp}_{source_path.name}"
@@ -569,6 +572,122 @@ def _source_media_delete_backup_path(source_path: Path) -> Path:
         candidate = deleted_dir / f"{timestamp}_{counter}_{source_path.name}"
         counter += 1
     return candidate
+
+
+def _source_media_archive_root() -> Path:
+    return BACKUP_DIR / "source_media_deleted"
+
+
+def _archive_original_name(archived_name: str) -> str:
+    parts = Path(archived_name).name.split("_")
+    if len(parts) >= 4 and parts[0].isdigit() and parts[1].isdigit() and parts[2].isdigit():
+        return "_".join(parts[3:])
+    if len(parts) >= 3 and parts[0].isdigit() and parts[1].isdigit():
+        return "_".join(parts[2:])
+    return Path(archived_name).name
+
+
+def _source_media_archive_id(path: Path) -> str:
+    return path.relative_to(_source_media_archive_root()).as_posix()
+
+
+def _source_media_archive_file_by_id(archive_id: str) -> Path:
+    raw_id = str(archive_id or "").replace("\\", "/").strip("/")
+    parts = [part for part in raw_id.split("/") if part]
+    if len(parts) != 2 or not re.fullmatch(r"\d{8}", parts[0]):
+        raise HTTPException(status_code=400, detail="備份檔案代碼不正確。")
+    archive_name = Path(parts[1]).name
+    original_name = _archive_original_name(archive_name)
+    if not archive_name or archive_name.startswith(".") or Path(original_name).suffix.lower() not in SUPPORTED_MEDIA_FORMATS:
+        raise HTTPException(status_code=400, detail="備份檔案代碼不正確。")
+    try:
+        archive_root = _source_media_archive_root().resolve()
+        candidate = (archive_root / parts[0] / archive_name).resolve()
+    except OSError:
+        raise HTTPException(status_code=404, detail="找不到備份原始檔。")
+    if candidate.parent.parent != archive_root:
+        raise HTTPException(status_code=400, detail="備份檔案代碼不正確。")
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="找不到備份原始檔。")
+    return candidate
+
+
+def _source_media_archive(limit: int = 100) -> SourceMediaArchiveResponse:
+    archive_root = _source_media_archive_root()
+    files: list[SourceMediaArchiveRecord] = []
+    total_files = 0
+    total_bytes = 0
+    try:
+        date_dirs = [entry for entry in archive_root.iterdir() if entry.is_dir() and re.fullmatch(r"\d{8}", entry.name)]
+    except OSError:
+        date_dirs = []
+
+    for date_dir in date_dirs:
+        try:
+            entries = list(date_dir.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.startswith("."):
+                continue
+            original_name = _archive_original_name(entry.name)
+            if Path(original_name).suffix.lower() not in SUPPORTED_MEDIA_FORMATS:
+                continue
+            try:
+                if not entry.is_file():
+                    continue
+                stat = entry.stat()
+            except OSError:
+                continue
+            total_files += 1
+            file_bytes = int(stat.st_size)
+            total_bytes += file_bytes
+            files.append(
+                SourceMediaArchiveRecord(
+                    archive_id=_source_media_archive_id(entry),
+                    name=original_name,
+                    archived_name=entry.name,
+                    bytes=file_bytes,
+                    modified_at=datetime.fromtimestamp(stat.st_mtime),
+                    source_media_type=_storage_source_media_type(entry),
+                    backup_path=str(entry),
+                )
+            )
+
+    sorted_files = sorted(files, key=lambda item: (item.modified_at or datetime.min, item.bytes), reverse=True)[:limit]
+    return SourceMediaArchiveResponse(
+        generated_at=datetime.now(),
+        total_files=total_files,
+        total_bytes=total_bytes,
+        files=sorted_files,
+    )
+
+
+def _restore_source_media_archive(archive_id: str) -> SourceMediaRestoreResponse:
+    archive_path = _source_media_archive_file_by_id(archive_id)
+    original_name = _archive_original_name(archive_path.name)
+    try:
+        source_root = SOURCE_AUDIO_DIR.resolve()
+        target_path = (SOURCE_AUDIO_DIR / original_name).resolve()
+    except OSError:
+        raise HTTPException(status_code=500, detail="無法準備還原路徑。")
+    if target_path.parent != source_root:
+        raise HTTPException(status_code=400, detail="備份檔案代碼不正確。")
+    if target_path.exists():
+        raise HTTPException(status_code=409, detail=f"原始檔清單已存在同名檔案：{original_name}")
+    try:
+        SOURCE_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+        file_bytes = archive_path.stat().st_size
+        shutil.move(str(archive_path), str(target_path))
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"還原備份原始檔失敗：{exc}")
+    return SourceMediaRestoreResponse(
+        restored=True,
+        archive_id=archive_id,
+        name=original_name,
+        bytes=int(file_bytes),
+        restored_path=str(target_path),
+    )
 
 
 def _delete_unlinked_source_media(filename: str) -> SourceMediaDeleteResponse:
@@ -652,6 +771,29 @@ async def metrics():
 async def source_media_inventory(limit: int = Query(100, ge=1, le=500)):
     """回傳保留原始錄音/錄影的唯讀維運清單。"""
     return _source_media_inventory(limit=limit)
+
+
+@app.get(
+    "/source-media/archive",
+    response_model=SourceMediaArchiveResponse,
+    summary="列出已移除原始媒體備份",
+    tags=["蝟餌絞"],
+)
+async def source_media_archive(limit: int = Query(100, ge=1, le=500)):
+    """List source media files that were removed from inventory and archived."""
+    return _source_media_archive(limit=limit)
+
+
+@app.post(
+    "/source-media/archive/restore",
+    response_model=SourceMediaRestoreResponse,
+    summary="還原已移除原始媒體備份",
+    tags=["蝟餌絞"],
+    responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
+async def restore_source_media_archive(archive_id: str = Query(..., description="GET /source-media/archive 回傳的 archive_id。")):
+    """Restore an archived source media file back to the live source media directory."""
+    return _restore_source_media_archive(archive_id)
 
 
 @app.get(

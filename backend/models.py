@@ -158,6 +158,34 @@ class SourceMediaDeleteResponse(BaseModel):
     backup_path: Optional[str] = None
 
 
+class SourceMediaArchiveRecord(BaseModel):
+    """A source media file that was removed from the live inventory and archived."""
+    archive_id: str
+    name: str
+    archived_name: str
+    bytes: int
+    modified_at: Optional[datetime] = None
+    source_media_type: Optional[str] = None
+    backup_path: Optional[str] = None
+
+
+class SourceMediaArchiveResponse(BaseModel):
+    """GET /source-media/archive response payload."""
+    generated_at: datetime
+    total_files: int
+    total_bytes: int
+    files: list[SourceMediaArchiveRecord] = Field(default_factory=list)
+
+
+class SourceMediaRestoreResponse(BaseModel):
+    """POST /source-media/archive/restore response payload."""
+    restored: bool
+    archive_id: str
+    name: str
+    bytes: int = 0
+    restored_path: Optional[str] = None
+
+
 class RecentJobError(BaseModel):
     """最近失敗任務摘要"""
     job_id: str
