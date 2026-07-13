@@ -3222,6 +3222,17 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("document-view", html)
         self.assertIn("@media (max-width: 1100px)", html)
 
+    def test_web_ui_prevents_detail_header_text_stacking(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("grid-template-columns: minmax(0, 1fr);", html)
+        self.assertIn("overflow-wrap: anywhere;", html)
+        self.assertIn("display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px;", html)
+        self.assertIn(".card-meta span", html)
+        self.assertIn("min-width: 0; max-width: 100%;", html)
+        self.assertIn(".detail-actions .btn-primary", html)
+        self.assertIn("white-space: nowrap;", html)
+
     def test_web_ui_can_record_screen_audio_with_toggleable_microphone(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
