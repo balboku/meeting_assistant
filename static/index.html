@@ -2198,8 +2198,10 @@ function updateRecordingEstimate() {
     + (isVideoRecordingMode() ? Number(profile.video_bps || 0) : 0);
   const bytesPerHour = bitsPerSecond * 3600 / 8;
   const currentBytes = bitsPerSecond * Math.max(0, recSeconds || 0) / 8;
+  const profileLabel = recordingProfileBaseLabel(getRecordingProfileId());
+  const prefix = profileLabel ? `${profileLabel}：` : '';
   const current = currentBytes > 0 ? `目前約 ${formatBytes(currentBytes)}；` : '';
-  hint.textContent = `${current}每小時預估容量：${formatBytes(bytesPerHour)}`;
+  hint.textContent = `${prefix}${current}每小時預估容量：${formatBytes(bytesPerHour)}`;
 }
 
 function renderCardQuality(record) {

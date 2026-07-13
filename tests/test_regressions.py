@@ -3750,6 +3750,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("function updateRecordingProfileOptionLabels", html)
         self.assertIn("updateRecordingProfileOptionLabels();", html)
         self.assertIn("option.textContent = recordingProfileOptionLabel(option.value);", html)
+        self.assertIn("const profileLabel = recordingProfileBaseLabel(getRecordingProfileId());", html)
+        self.assertIn("hint.textContent = `${prefix}${current}每小時預估容量", html)
         self.assertIn("const desired = videoMode ? 'video_balanced' : lastAudioRecordingProfileId;", html)
         self.assertIn("function updateRecordingModeOptions", html)
         self.assertIn("function recordingModeLabel", html)
