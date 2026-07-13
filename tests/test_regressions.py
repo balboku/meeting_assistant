@@ -3511,6 +3511,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("/source-media/archive?limit=${SOURCE_STORAGE_FETCH_LIMIT}&offset=${archiveOffset}", html)
         self.assertIn("/source-media/archive/file?archive_id=", html)
         self.assertIn("/source-media/archive/restore?archive_id=", html)
+        self.assertIn("const metadataBytes = Number(file.metadata_bytes || 0);", html)
+        self.assertIn("中繼資料 ${formatBytes(metadataBytes)}", html)
         self.assertIn("/source-media/inventory/${encodeURIComponent(filename)}", html)
         self.assertIn("previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile)", html)
         self.assertIn("source-storage-preview-title", html)

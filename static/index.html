@@ -1641,11 +1641,13 @@ function renderSourceArchiveFile(file) {
   const downloadUrl = `${archiveUrl}&download=1`;
   const mediaType = String(file.source_media_type || '').toLowerCase();
   const mediaTypeLabel = mediaType === 'video' ? '影片' : mediaType === 'audio' ? '音訊' : '';
+  const metadataBytes = Number(file.metadata_bytes || 0);
   return `<div class="source-storage-item">
     <div>
       <div class="source-storage-name">${escapeHtml(filename || '未命名')}</div>
       <div class="source-storage-meta">
         <span class="source-storage-badge">${formatBytes(file.bytes)}</span>
+        ${metadataBytes > 0 ? `<span class="source-storage-badge">中繼資料 ${formatBytes(metadataBytes)}</span>` : ''}
         ${mediaTypeLabel ? `<span class="source-storage-badge media-type">${mediaTypeLabel}</span>` : ''}
         <span class="source-storage-badge">${formatDate(file.modified_at)}</span>
         <span class="source-storage-badge unlinked">已移除備份</span>
