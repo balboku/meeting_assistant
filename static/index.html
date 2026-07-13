@@ -3577,8 +3577,15 @@ function updateRecordingMicToggle() {
   btnRecMic.textContent = recMicMuted ? '🎙 開啟麥克風' : '🎙 關閉麥克風';
 }
 
+function canMuteRecordingMic() {
+  if (recMode !== 'screen' || recScreenAudioCaptured) return true;
+  alert('目前沒有錄到螢幕/分頁音訊；若關閉麥克風，線上會議其他人的聲音不會被錄到。請重新開始錄製，並在分享畫面時勾選「分享音訊」。');
+  return false;
+}
+
 function toggleRecordingMic() {
   if (!recMicAudioTracks.length) return;
+  if (!recMicMuted && !canMuteRecordingMic()) return;
   recMicMuted = !recMicMuted;
   recMicAudioTracks.forEach(track => {
     if (track.readyState === 'live') {
