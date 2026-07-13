@@ -1673,13 +1673,13 @@ function previewSourceMedia(url = '', mediaType = '', name = '', requestedMode =
       <div class="source-storage-preview-title">${mediaTitle}：${safeName}</div>
       <div class="source-storage-preview-actions">
         ${previewToggle}
-        <a class="source-media-action" href="${safeUrl}" target="_blank" rel="noopener noreferrer">新分頁</a>
-        <a class="source-media-action" href="${safeDownloadUrl}" download>下載</a>
-        <button type="button" class="source-media-action" onclick="closeSourceMediaPreview()">關閉</button>
+        <a class="source-media-action" href="${safeUrl}" target="_blank" rel="noopener noreferrer" aria-label="在新分頁開啟${mediaTitle}">新分頁</a>
+        <a class="source-media-action" href="${safeDownloadUrl}" download aria-label="下載${mediaTitle}">下載</a>
+        <button type="button" class="source-media-action" aria-label="關閉原始檔預覽" onclick="closeSourceMediaPreview()">關閉</button>
       </div>
     </div>
     ${player}
-    <div class="source-media-player-status" aria-live="polite"></div>`;
+    <div class="source-media-player-status" role="status" aria-live="polite"></div>`;
   preview.classList.add('show');
   enhanceSourceStoragePreviewPlayer(preview);
   preview.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -1731,16 +1731,17 @@ function renderSourceStorageFile(file) {
   const downloadUrl = `${sourceUrl}?download=1`;
   const mediaType = sourceStorageMediaType(file);
   const mediaTypeLabel = mediaType === 'video' ? '影片' : mediaType === 'audio' ? '音訊' : '';
+  const mediaActionLabel = mediaTypeLabel || '原始檔';
   const meetingBadge = linked
     ? `<span class="source-storage-badge">會議 #${meetingId} ${escapeHtml(file.linked_meeting_title)}</span>`
     : '<span class="source-storage-badge unlinked">未連結會議</span>';
   const actions = [
-    `<button type="button" class="source-media-action" data-source-url="${escapeHtml(sourceUrl)}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${escapeHtml(filename)}" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile)">預覽</button>`,
-    `<a class="source-media-action" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">新分頁</a>`,
-    `<a class="source-media-action" href="${escapeHtml(downloadUrl)}" download>下載</a>`,
+    `<button type="button" class="source-media-action" aria-label="預覽${mediaActionLabel}" data-source-url="${escapeHtml(sourceUrl)}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${escapeHtml(filename)}" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile)">預覽</button>`,
+    `<a class="source-media-action" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer" aria-label="在新分頁開啟${mediaActionLabel}">新分頁</a>`,
+    `<a class="source-media-action" href="${escapeHtml(downloadUrl)}" download aria-label="下載${mediaActionLabel}">下載</a>`,
     linked
-      ? `<button type="button" class="source-media-action" onclick="openMeetingFromSourceStorage(${meetingId})">開會議</button>`
-      : `<button type="button" class="source-media-action danger" data-source-file="${escapeHtml(filename)}" onclick="deleteUnlinkedSourceMedia(this.dataset.sourceFile)">刪除</button>`
+      ? `<button type="button" class="source-media-action" aria-label="開啟連結會議" onclick="openMeetingFromSourceStorage(${meetingId})">開會議</button>`
+      : `<button type="button" class="source-media-action danger" aria-label="刪除未連結原始檔" data-source-file="${escapeHtml(filename)}" onclick="deleteUnlinkedSourceMedia(this.dataset.sourceFile)">刪除</button>`
   ].join('');
   return `<div class="source-storage-item">
     <div>
@@ -1763,6 +1764,7 @@ function renderSourceArchiveFile(file) {
   const downloadUrl = `${archiveUrl}&download=1`;
   const mediaType = sourceStorageMediaType(file);
   const mediaTypeLabel = mediaType === 'video' ? '影片' : mediaType === 'audio' ? '音訊' : '';
+  const mediaActionLabel = mediaTypeLabel || '原始檔';
   const metadataBytes = Number(file.metadata_bytes || 0);
   return `<div class="source-storage-item">
     <div>
@@ -1776,10 +1778,10 @@ function renderSourceArchiveFile(file) {
       </div>
     </div>
     <div class="source-storage-actions">
-      <button type="button" class="source-media-action" data-source-url="${escapeHtml(archiveUrl)}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${escapeHtml(filename)}" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile)">預覽</button>
-      <a class="source-media-action" href="${escapeHtml(archiveUrl)}" target="_blank" rel="noopener noreferrer">新分頁</a>
-      <a class="source-media-action" href="${escapeHtml(downloadUrl)}" download>下載</a>
-      <button type="button" class="source-media-action" data-archive-id="${escapeHtml(archiveId)}" data-source-file="${escapeHtml(filename)}" onclick="restoreSourceMediaArchive(this.dataset.archiveId, this.dataset.sourceFile)">還原</button>
+      <button type="button" class="source-media-action" aria-label="預覽${mediaActionLabel}" data-source-url="${escapeHtml(archiveUrl)}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${escapeHtml(filename)}" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile)">預覽</button>
+      <a class="source-media-action" href="${escapeHtml(archiveUrl)}" target="_blank" rel="noopener noreferrer" aria-label="在新分頁開啟${mediaActionLabel}">新分頁</a>
+      <a class="source-media-action" href="${escapeHtml(downloadUrl)}" download aria-label="下載${mediaActionLabel}">下載</a>
+      <button type="button" class="source-media-action" aria-label="還原原始檔備份" data-archive-id="${escapeHtml(archiveId)}" data-source-file="${escapeHtml(filename)}" onclick="restoreSourceMediaArchive(this.dataset.archiveId, this.dataset.sourceFile)">還原</button>
     </div>
   </div>`;
 }
@@ -2666,7 +2668,7 @@ function renderAudioEvidence(meeting, requestedMode = null) {
       </div>
       ${renderSourceMediaFacts(meeting)}
       <video id="source-media-player" controls preload="metadata" playsinline src="${sourceUrl}"></video>
-      <div id="source-media-player-status" class="source-media-player-status" aria-live="polite"></div>
+      <div id="source-media-player-status" class="source-media-player-status" role="status" aria-live="polite"></div>
     </div>`;
   }
   return `<div id="source-media-evidence" class="audio-evidence media-audio">
@@ -2676,7 +2678,7 @@ function renderAudioEvidence(meeting, requestedMode = null) {
     </div>
     ${renderSourceMediaFacts(meeting)}
     <audio id="source-media-player" controls preload="metadata" src="${sourceUrl}"></audio>
-    <div id="source-media-player-status" class="source-media-player-status" aria-live="polite"></div>
+    <div id="source-media-player-status" class="source-media-player-status" role="status" aria-live="polite"></div>
   </div>`;
 }
 
