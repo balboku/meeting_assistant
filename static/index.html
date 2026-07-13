@@ -598,6 +598,53 @@
       gap: 8px;
       margin-bottom: 14px;
     }
+    .source-storage-preview {
+      display: none;
+      margin-bottom: 12px;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+    }
+    .source-storage-preview.show {
+      display: grid;
+      gap: 10px;
+    }
+    .source-storage-preview-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-width: 0;
+    }
+    .source-storage-preview-title {
+      min-width: 0;
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .source-storage-preview-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: flex-end;
+      flex-shrink: 0;
+    }
+    .source-storage-preview audio,
+    .source-storage-preview video {
+      width: 100%;
+      min-width: 0;
+      border-radius: 6px;
+      background: #000;
+    }
+    .source-storage-preview audio {
+      height: 34px;
+    }
+    .source-storage-preview video {
+      max-height: min(46vh, 520px);
+    }
     .source-storage-section-title {
       margin: 14px 0 8px;
       color: var(--text-main);
@@ -1235,6 +1282,7 @@
       <div class="modal-title">原始檔清單</div>
       <button class="modal-close" onclick="closeSourceStorageInventory()">×</button>
     </div>
+    <div id="source-storage-preview" class="source-storage-preview" aria-live="polite"></div>
     <div id="source-storage-list" class="source-storage-list" aria-live="polite"></div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick="closeSourceStorageInventory()">關閉</button>
@@ -1365,7 +1413,37 @@ function sourceStorageTitle(sourceFiles = 0, sourceBytes = 0, unlinkedFiles = 0,
 }
 
 function closeSourceStorageInventory() {
+  closeSourceMediaPreview();
   document.getElementById('source-storage-modal')?.classList.remove('show');
+}
+
+function closeSourceMediaPreview() {
+  const preview = document.getElementById('source-storage-preview');
+  if (!preview) return;
+  preview.classList.remove('show');
+  preview.innerHTML = '';
+}
+
+function previewSourceMedia(url = '', mediaType = '', name = '') {
+  const preview = document.getElementById('source-storage-preview');
+  if (!preview || !url) return;
+  const safeUrl = escapeHtml(url);
+  const safeName = escapeHtml(name || '原始檔');
+  const isVideo = String(mediaType || '').toLowerCase() === 'video';
+  const player = isVideo
+    ? `<video controls preload="metadata" src="${safeUrl}"></video>`
+    : `<audio controls preload="metadata" src="${safeUrl}"></audio>`;
+  preview.innerHTML = `
+    <div class="source-storage-preview-header">
+      <div class="source-storage-preview-title">${isVideo ? '原始錄影' : '原始音檔'}：${safeName}</div>
+      <div class="source-storage-preview-actions">
+        <a class="source-media-action" href="${safeUrl}" target="_blank" rel="noopener noreferrer">新分頁</a>
+        <button type="button" class="source-media-action" onclick="closeSourceMediaPreview()">關閉</button>
+      </div>
+    </div>
+    ${player}`;
+  preview.classList.add('show');
+  preview.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 function openMeetingFromSourceStorage(meetingId) {
@@ -1418,7 +1496,8 @@ function renderSourceStorageFile(file) {
     ? `<span class="source-storage-badge">會議 #${meetingId} ${escapeHtml(file.linked_meeting_title)}</span>`
     : '<span class="source-storage-badge unlinked">未連結會議</span>';
   const actions = [
-    `<a class="source-media-action" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">開啟</a>`,
+    `<button type="button" class="source-media-action" data-source-url="${escapeHtml(sourceUrl)}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${escapeHtml(filename)}" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile)">預覽</button>`,
+    `<a class="source-media-action" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">新分頁</a>`,
     `<a class="source-media-action" href="${escapeHtml(downloadUrl)}" download>下載</a>`,
     linked
       ? `<button type="button" class="source-media-action" onclick="openMeetingFromSourceStorage(${meetingId})">開會議</button>`
@@ -1456,7 +1535,8 @@ function renderSourceArchiveFile(file) {
       </div>
     </div>
     <div class="source-storage-actions">
-      <a class="source-media-action" href="${escapeHtml(archiveUrl)}" target="_blank" rel="noopener noreferrer">開啟</a>
+      <button type="button" class="source-media-action" data-source-url="${escapeHtml(archiveUrl)}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${escapeHtml(filename)}" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile)">預覽</button>
+      <a class="source-media-action" href="${escapeHtml(archiveUrl)}" target="_blank" rel="noopener noreferrer">新分頁</a>
       <a class="source-media-action" href="${escapeHtml(downloadUrl)}" download>下載</a>
       <button type="button" class="source-media-action" data-archive-id="${escapeHtml(archiveId)}" data-source-file="${escapeHtml(filename)}" onclick="restoreSourceMediaArchive(this.dataset.archiveId, this.dataset.sourceFile)">還原</button>
     </div>
@@ -1468,6 +1548,7 @@ async function openSourceStorageInventory() {
   const list = document.getElementById('source-storage-list');
   if (!modal || !list) return;
   modal.classList.add('show');
+  closeSourceMediaPreview();
   list.innerHTML = '<div class="detail-placeholder"><div class="loading-spinner"></div><p>載入原始檔清單...</p></div>';
 
   try {
