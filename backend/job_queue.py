@@ -78,7 +78,7 @@ def enqueue_audio_job(
             "high_quality_summary": bool(high_quality_summary),
         },
         max_attempts=max_attempts,
-        message="音檔已接收，已排入可靠處理佇列。",
+        message="媒體檔已接收，已排入可靠處理佇列。",
     )
 
 
@@ -272,9 +272,9 @@ class JobQueueWorker:
             if audio_path:
                 path = Path(audio_path)
                 if path.exists():
-                    logger.info("📦 已保留原始音檔：%s", path)
+                    logger.info("📦 已保留原始媒體檔：%s", path)
                 else:
-                    logger.warning("⚠️  原始音檔紀錄存在，但檔案目前不存在：%s", path)
+                    logger.warning("⚠️  原始媒體檔紀錄存在，但檔案目前不存在：%s", path)
 
 
 job_worker = JobQueueWorker()

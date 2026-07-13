@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 class JobStatus(str, Enum):
     """任務處理狀態列舉"""
     PENDING    = "pending"     # 已接收，等待處理
-    PROCESSING = "processing"  # 處理中（上傳音檔 / 呼叫 AI）
+    PROCESSING = "processing"  # 處理中（上傳媒體檔 / 呼叫 AI）
     DONE       = "done"        # 完成
     FAILED     = "failed"      # 失敗
     CANCELLED  = "cancelled"   # 已取消
@@ -40,7 +40,7 @@ class JobResponse(BaseModel):
         "example": {
             "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
             "status": "pending",
-            "message": "音檔已接收，處理中請稍候..."
+            "message": "媒體檔已接收，處理中請稍候..."
         }
     }}
 
@@ -235,9 +235,9 @@ class AppConfigResponse(BaseModel):
 class MeetingRecord(BaseModel):
     """會議記錄摘要（用於清單顯示）"""
     id: int
-    title: str = Field(..., description="會議標題（來自音檔名）")
+    title: str = Field(..., description="會議標題（來自媒體檔名）")
     date: str = Field(..., description="會議日期 YYYY/MM/DD")
-    source_audio: str = Field(..., description="原始音檔名")
+    source_audio: str = Field(..., description="原始媒體檔名")
     output_path: str = Field(..., description="Markdown 檔案路徑")
     summary_preview: Optional[str] = Field(None, description="摘要前 200 字預覽")
     job_id: Optional[str] = Field(None, description="產生此會議記錄的任務 ID")

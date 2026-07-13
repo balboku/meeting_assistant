@@ -17,7 +17,7 @@ graph TB
 
     subgraph BACKEND["⚙️ 2. 核心後端層 (Backend)"]
         FASTAPI["🚪 API 網關\nFastAPI"]
-        PREPROCESS["🔧 音檔預處理模組\nPydub · 格式轉換 / 切割"]
+        PREPROCESS["🔧 媒體預處理模組\nPydub · 格式轉換 / 切割"]
         QUEUE["📋 任務佇列\nBackground Tasks / Celery"]
     end
 
@@ -52,10 +52,10 @@ graph TB
 
 | 層級名稱 | 負責模組與技術堆疊 | 主要任務 |
 | --- | --- | --- |
-| **1. 使用者介面層 (Client)** | 手機端：LINE Bot (Webhook)<br>電腦端：Python GUI (Tkinter/PyQt) + `sounddevice` | 收集音訊來源（實體錄音 / 線上擷取），並向後端發送請求，最後展示結果給使用者。 |
-| **2. 核心後端層 (Backend)** | 框架：Python + FastAPI<br>非同步處理：Celery 或 Background Tasks | 系統中樞。接收音檔、進行格式檢查、排程處理、呼叫 AI API，並將結果回傳給介面層。 |
+| **1. 使用者介面層 (Client)** | 手機端：LINE Bot (Webhook)<br>電腦端：Python GUI (Tkinter/PyQt) + `sounddevice` | 收集音訊或影片來源（實體錄音 / 線上擷取 / 螢幕錄製），並向後端發送請求，最後展示結果給使用者。 |
+| **2. 核心後端層 (Backend)** | 框架：Python + FastAPI<br>非同步處理：Celery 或 Background Tasks | 系統中樞。接收媒體檔、進行格式檢查、排程處理、呼叫 AI API，並將結果回傳給介面層。 |
 | **3. AI 服務層 (AI Services)** | Gemini 3.1 Flash-Lite API（語音辨識 + 摘要生成一體化） | 執行高耗能的機器學習運算，將語音直接轉換為結構化會議記錄。 |
-| **4. 資料儲存層 (Storage)** | 檔案系統：本地資料夾（暫存區 / 封存區）<br>資料庫：SQLite（輕量級，可選） | 暫存處理中的音檔，並永久保存轉錄好的 Markdown 文件與會議元資料。 |
+| **4. 資料儲存層 (Storage)** | 檔案系統：本地資料夾（暫存區 / 封存區）<br>資料庫：SQLite（輕量級，可選） | 暫存處理中的媒體檔，並永久保存轉錄好的 Markdown 文件與會議元資料。 |
 
 ---
 
@@ -84,7 +84,7 @@ graph TB
 | 子模組 | 技術 | 功能 |
 |--------|------|------|
 | **API 網關** | FastAPI | 開出 `/upload-audio`（桌面端上傳）與 `/line-webhook`（LINE 傳遞）端點 |
-| **音檔預處理** | Pydub | 格式統一轉換為 `.mp3`；音檔切割（超過 25MB 時切為 15 分鐘小段） |
+| **媒體預處理** | Pydub | 必要時抽取/轉換音訊並切割，保留原始音訊或影片作為證據檔 |
 | **任務佇列** | Background Tasks | 背景非同步執行，讓前端不卡住；進階版可升級至 Celery + Redis |
 
 ---
@@ -125,11 +125,11 @@ meeting_assistant/
 
 | 資料表 | 用途 |
 |--------|------|
-| `meetings` | 保存會議標題、日期、原始音檔名稱、Markdown 輸出路徑、摘要與建立時間。 |
+| `meetings` | 保存會議標題、日期、原始媒體檔名稱、Markdown 輸出路徑、摘要與建立時間。 |
 | `meeting_fts` | SQLite FTS5 虛擬表，索引 `title`、`source_audio`、`summary`、`output_path`，支援快速的欄位搜尋。 |
 | `meeting_content_fts` | SQLite FTS5 虛擬表，索引每筆會議的完整 Markdown 內容，支援逐字稿搜尋。 |
 | `meeting_revisions` | 保存人工修訂摘要或逐字稿前的完整舊版 Markdown，供回溯 AI 原稿與修改歷史。 |
-| `jobs` | 持久化音檔處理佇列，保存狀態、payload、attempts、取消旗標與進度欄位。 |
+| `jobs` | 持久化媒體處理佇列，保存狀態、payload、attempts、取消旗標與進度欄位。 |
 | `job_events` | 任務事件時間線，記錄建立、worker claim、狀態轉換、retry、取消等事件，供維運與 UI 觀察流程。 |
 | `app_users` | 未來帳號/角色功能使用者表；目前 `MEETING_AUTH_ENABLED=0`，程式碼已完成但不啟用權限控管。 |
 | `audit_logs` | 未來稽核紀錄表，保存 actor、action、resource 與 request metadata；目前只提供底層 helper，不影響既有流程。 |
@@ -153,16 +153,16 @@ sequenceDiagram
     participant DB as 儲存層
     participant LINE as LINE Bot
 
-    U->>API: POST /upload-audio (音檔)
+    U->>API: POST /upload-audio (媒體檔)
     API-->>U: {"status": "processing"} 立即回應
     API->>PROC: 存入 Temp，格式檢查
-    PROC->>AI: 上傳音檔 (File API)
-    AI-->>PROC: ACTIVE（音檔就緒）
-    PROC->>AI: generate_content（音檔 + Prompt）
+    PROC->>AI: 上傳媒體檔 (File API)
+    AI-->>PROC: ACTIVE（媒體檔就緒）
+    PROC->>AI: generate_content（媒體檔 + Prompt）
     AI-->>PROC: Markdown 會議記錄
     PROC->>DB: 寫入 Output 資料夾
     PROC->>DB: 元資料寫入 SQLite（可選）
-    PROC->>PROC: 刪除 Temp 音檔
+    PROC->>PROC: 刪除 Temp 媒體檔
     PROC-->>U: 推播「處理完成」通知
     PROC-->>LINE: Push Message（會議記錄）
 ```

@@ -4,7 +4,7 @@ backend/tasks.py — 背景任務處理器
 =============================================================================
 封裝 meeting_assistant.py 的核心 AI 邏輯，
 讓 FastAPI 能夠以「背景任務（Background Task）」的方式非同步執行，
-確保上傳音檔後 API 能立即回應，不讓使用者等待。
+確保上傳媒體檔後 API 能立即回應，不讓使用者等待。
 =============================================================================
 """
 
@@ -185,7 +185,7 @@ def _transcript_quality_notice(transcript: str) -> str:
     if any(marker in transcript for marker in quality_markers):
         return (
             "逐字稿品質註記：音訊中有片段被標示為雜訊、聽不清或已自動過濾；"
-            "該時間點附近內容可能缺漏，重要結論請回查原始音檔。"
+            "該時間點附近內容可能缺漏，重要結論請回查原始媒體檔。"
         )
     return ""
 
@@ -1381,7 +1381,7 @@ def _prepare_audio_for_transcription(
         raise RuntimeError("音訊有 99.5% 以上為靜音，已停止送出模型以避免浪費免費額度。")
 
     if math.isfinite(max_dbfs) and max_dbfs >= -0.1:
-        report["warnings"].append("偵測到可能的爆音；原始音檔已保留，重要內容請抽查。")
+        report["warnings"].append("偵測到可能的爆音；原始媒體檔已保留，重要內容請抽查。")
 
     if not AUDIO_PREPROCESSING_ENABLED or dbfs >= AUDIO_NORMALIZE_BELOW_DBFS:
         return audio_path, report
@@ -1678,13 +1678,13 @@ def _transcribe_segment(
     while not uploaded.state or uploaded.state.name == "PROCESSING":
         _raise_if_cancelled(job_id)
         if elapsed >= MAX_UPLOAD_WAIT_SECONDS:
-            raise RuntimeError(f"分段 {seg_index + 1} 音檔處理逾時")
+            raise RuntimeError(f"分段 {seg_index + 1} 媒體處理逾時")
         time.sleep(POLLING_INTERVAL)
         elapsed += POLLING_INTERVAL
         uploaded = client.files.get(name=uploaded.name)
 
     if uploaded.state.name == "FAILED":
-        raise RuntimeError(f"分段 {seg_index + 1} 音檔處理失敗")
+        raise RuntimeError(f"分段 {seg_index + 1} 媒體處理失敗")
 
     _raise_if_cancelled(job_id)
     response = client.models.generate_content(
@@ -2888,10 +2888,10 @@ quality_label: {quality_report['label']}
                 except Exception:
                     pass
 
-        # 視呼叫端需求清理本地原始音檔；後端預設保留。
+        # 視呼叫端需求清理本地原始媒體檔；後端預設保留。
         try:
             if cleanup_source_audio and audio_path.exists():
                 audio_path.unlink()
-                logger.info(f"[{job_id}] 🗑️  已清除本地原始音檔：{audio_path.name}")
+                logger.info(f"[{job_id}] 🗑️  已清除本地原始媒體檔：{audio_path.name}")
         except Exception as e:
-            logger.warning(f"[{job_id}] ⚠️  本地音檔清理失敗：{e}")
+            logger.warning(f"[{job_id}] ⚠️  本地媒體檔清理失敗：{e}")

@@ -132,7 +132,7 @@ def _build_evidence_prompt(
 - 會議 ID：{meeting_record.get("id")}
 - 標題：{meeting_record.get("title")}
 - 日期：{meeting_record.get("date")}
-- 原始音檔：{meeting_record.get("source_audio")}
+- 原始媒體檔：{meeting_record.get("source_audio")}
 
 【既有會議紀錄（摘要/決議/待辦優先，逐字稿可能已省略）】
 {meeting_context}

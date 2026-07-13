@@ -240,7 +240,7 @@ def _validate_manual_retry_payload(row: sqlite3.Row) -> None:
     audio_path = Path(payload.get("audio_path", ""))
     output_dir = Path(payload.get("output_dir", ""))
     if not audio_path.is_file():
-        raise ValueError("找不到可重試的原始音檔，請重新上傳。")
+        raise ValueError("找不到可重試的原始媒體檔，請重新上傳。")
     if not output_dir.is_dir():
         raise ValueError("找不到可寫入的輸出資料夾，請重新上傳。")
 
@@ -637,7 +637,7 @@ def create_job(
             (
                 job_id,
                 "pending",
-                message or "音檔已接收，等待處理...",
+                message or "媒體檔已接收，等待處理...",
                 task_type,
                 source,
                 _serialize_payload(payload),
@@ -646,7 +646,7 @@ def create_job(
                 now,
             )
         )
-        _record_job_event(conn, job_id, "created", message or "音檔已接收，等待處理...")
+        _record_job_event(conn, job_id, "created", message or "媒體檔已接收，等待處理...")
     logger.debug(f"📝 任務已建立：{job_id}")
 
 
@@ -1547,7 +1547,7 @@ def list_audit_logs(limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
 
 def search_meetings(query: str, limit: int = 50, needs_review: bool = False) -> list[dict]:
     """
-    搜尋會議記錄的標題、音檔名稱、摘要與完整 Markdown 內容。
+    搜尋會議記錄的標題、媒體檔名、摘要與完整 Markdown 內容。
 
     FTS5 負責快速的完整詞組搜尋，LIKE 後備則補足中文連續字串的部分匹配。
     此函式只讀取索引，不會在每次搜尋時重建索引。

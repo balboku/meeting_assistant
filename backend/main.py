@@ -243,10 +243,10 @@ app = FastAPI(
     description="""
 ## 🎙️ AI Voice Meeting Assistant API
 
-將音訊自動轉換為結構化會議記錄的後端服務。
+將音訊或影片自動轉換為結構化會議記錄的後端服務。
 
 ### 主要功能
-- 📤 **音檔上傳**：非同步處理，立即回傳任務 ID
+- 📤 **媒體檔上傳**：非同步處理，立即回傳任務 ID
 - 📊 **狀態查詢**：即時追蹤處理進度
 - 📚 **歷史記錄**：查詢與瀏覽過去的會議記錄
 - 🤖 **AI 引擎**：Google Gemini 3.1 Flash Lite（語音辨識 + 摘要一體化）
@@ -1085,25 +1085,25 @@ async def app_config():
 
 
 # =============================================================================
-# 音檔上傳端點
+# 媒體檔上傳端點
 # =============================================================================
 
 @app.post(
     "/upload-audio",
     response_model=JobResponse,
-    summary="上傳音檔並觸發 AI 處理",
-    tags=["音檔處理"],
+    summary="上傳音訊或影片並觸發 AI 處理",
+    tags=["媒體處理"],
     status_code=202  # 202 Accepted：已接收，處理中
 )
 async def upload_audio(
-    file: UploadFile = File(..., description="要處理的音檔或影片（支援 mp3/wav/m4a/mp4/mov 等）"),
+    file: UploadFile = File(..., description="要處理的媒體檔（音訊或影片，支援 mp3/wav/m4a/mp4/mov 等）"),
     model: Optional[str] = Form(default=None, description=f"指定 Gemini 模型（預設：{GEMINI_MODEL}）"),
     title: Optional[str] = Form(default=None, description="自訂會議標題（預設使用檔案名稱）"),
     recording_profile: Optional[str] = Form(default=None, description="瀏覽器錄音品質 profile"),
     content_length: Optional[int] = Header(default=None, alias="Content-Length"),
 ):
     """
-    上傳音檔，後端立即回傳 `job_id`，並在背景非同步執行 AI 處理。
+    上傳音訊或影片，後端立即回傳 `job_id`，並在背景非同步執行 AI 處理。
 
     請使用 `GET /status/{job_id}` 輪詢結果。
     """
@@ -1131,7 +1131,7 @@ async def upload_audio(
     # --- 生成唯一任務 ID ---
     job_id = str(uuid.uuid4())
 
-    # --- 儲存至原始音檔保留資料夾 ---
+    # --- 儲存至原始媒體檔保留資料夾 ---
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_filename = f"{job_id[:8]}_{timestamp}{suffix}"
     source_audio_path = SOURCE_AUDIO_DIR / safe_filename
@@ -1208,7 +1208,7 @@ async def upload_audio(
     return JobResponse(
         job_id=job_id,
         status=JobStatus.PENDING,
-        message="音檔已接收，已排入可靠處理佇列，請稍後查詢狀態..."
+        message="媒體檔已接收，已排入可靠處理佇列，請稍後查詢狀態..."
     )
 
 
@@ -1233,10 +1233,10 @@ def _build_job_status_response(job: dict) -> JobStatusResponse:
 
 
 def _resolve_meeting_source_audio(record: dict) -> Path:
-    """Find the retained source audio file for an existing meeting record."""
+    """Find the retained source media file for an existing meeting record."""
     source_audio = str(record.get("source_audio") or "").strip()
     if not source_audio:
-        raise HTTPException(status_code=409, detail="此會議紀錄沒有原始音檔資訊，無法重跑。")
+        raise HTTPException(status_code=409, detail="此會議紀錄沒有原始媒體檔資訊，無法重跑。")
 
     source_name = Path(source_audio).name
     candidates: list[Path] = []
@@ -1259,13 +1259,13 @@ def _resolve_meeting_source_audio(record: dict) -> Path:
             supported = ", ".join(sorted(SUPPORTED_MEDIA_FORMATS))
             raise HTTPException(
                 status_code=415,
-                detail=f"原始音檔格式不支援：{candidate.suffix or '無副檔名'}。支援格式：{supported}",
+                detail=f"原始媒體檔格式不支援：{candidate.suffix or '無副檔名'}。支援格式：{supported}",
             )
         return candidate
 
     raise HTTPException(
         status_code=409,
-        detail=f"找不到保留的原始音檔：{source_name or source_audio}，請重新上傳音檔。",
+        detail=f"找不到保留的原始媒體檔：{source_name or source_audio}，請重新上傳媒體檔。",
     )
 
 
@@ -1432,7 +1432,7 @@ def _meeting_records_with_source_media_type(records: list[dict]) -> list[dict]:
     "/status/{job_id}",
     response_model=JobStatusResponse,
     summary="查詢任務處理狀態",
-    tags=["音檔處理"],
+    tags=["媒體處理"],
     responses={404: {"model": ErrorResponse}}
 )
 async def get_job_status(job_id: str):
@@ -1448,7 +1448,7 @@ async def get_job_status(job_id: str):
     "/jobs",
     response_model=JobListResponse,
     summary="列出最近的任務狀態",
-    tags=["音檔處理"],
+    tags=["媒體處理"],
 )
 async def list_recent_jobs(
     status: Optional[JobStatus] = None,
@@ -1468,7 +1468,7 @@ async def list_recent_jobs(
     "/jobs/{job_id}/cancel",
     response_model=JobStatusResponse,
     summary="取消排隊或處理中的任務",
-    tags=["音檔處理"],
+    tags=["媒體處理"],
     responses={404: {"model": ErrorResponse}},
 )
 async def cancel_job(job_id: str):
@@ -1486,7 +1486,7 @@ async def cancel_job(job_id: str):
     "/jobs/{job_id}/retry",
     response_model=JobStatusResponse,
     summary="重新排入失敗任務",
-    tags=["音檔處理"],
+    tags=["媒體處理"],
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
 )
 async def retry_job(job_id: str):
@@ -1505,7 +1505,7 @@ async def retry_job(job_id: str):
     "/jobs/{job_id}/events",
     response_model=JobEventsResponse,
     summary="查詢任務事件時間線",
-    tags=["音檔處理"],
+    tags=["媒體處理"],
     responses={404: {"model": ErrorResponse}},
 )
 async def get_job_event_timeline(job_id: str):
@@ -1520,7 +1520,7 @@ async def get_job_event_timeline(job_id: str):
 @app.delete(
     "/jobs/{job_id}",
     summary="刪除終態任務",
-    tags=["音檔處理"],
+    tags=["媒體處理"],
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
 )
 async def delete_job_record(job_id: str):
@@ -1665,7 +1665,7 @@ async def list_all_meetings(
     tags=["會議記錄"]
 )
 async def api_search_meetings(q: str, needs_review: bool = False, limit: int = 50):
-    """搜尋標題、音檔、摘要與完整 Markdown 逐字稿內容"""
+    """搜尋標題、媒體檔名、摘要與完整 Markdown 逐字稿內容"""
     records = _meeting_records_with_source_media_type(
         search_meetings(q, limit=limit, needs_review=needs_review)
     )
@@ -1783,13 +1783,13 @@ async def get_meeting_detail(meeting_id: int):
 )
 @app.get(
     "/meetings/{meeting_id}/source-audio",
-    summary="播放或下載會議原始音檔",
+    summary="播放或下載會議原始媒體檔（相容舊路徑）",
     tags=["會議記錄"],
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
 )
 @app.head(
     "/meetings/{meeting_id}/source-audio",
-    summary="檢查會議原始音檔標頭",
+    summary="檢查會議原始媒體檔標頭（相容舊路徑）",
     tags=["會議記錄"],
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
 )
@@ -1988,7 +1988,7 @@ async def export_meeting_docx(meeting_id: int):
 @app.post(
     "/meetings/{meeting_id}/rerun",
     response_model=JobResponse,
-    summary="使用原始音檔重跑會議紀錄",
+    summary="使用原始媒體檔重跑會議紀錄",
     tags=["會議記錄"],
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
 )
@@ -1996,7 +1996,7 @@ async def rerun_meeting_record(
     meeting_id: int,
     request_body: Optional[MeetingRerunRequest] = None,
 ):
-    """用已保留的原始音檔建立新的背景任務，重新產生一筆會議紀錄。"""
+    """用已保留的原始媒體檔建立新的背景任務，重新產生一筆會議紀錄。"""
     record = get_meeting(meeting_id)
     if not record:
         raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
@@ -2072,7 +2072,7 @@ async def rerun_meeting_record(
             else (
                 f"已建立指定分段重跑任務：第 {', '.join(str(index + 1) for index in force_segment_indices)} 段。"
                 if request_body is not None and request_body.segments is not None
-                else "已用原始音檔建立完整重跑任務，完成後會產生新的會議紀錄。"
+                else "已用原始媒體檔建立完整重跑任務，完成後會產生新的會議紀錄。"
             )
         ),
     )

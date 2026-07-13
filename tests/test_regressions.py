@@ -1799,6 +1799,7 @@ class UploadQueueRegressionTests(unittest.TestCase):
                 )
 
             self.assertEqual(response.status_code, 202)
+            self.assertIn("媒體檔已接收", response.json()["message"])
             saved_audio = list(source_audio_dir.glob("*.mp3"))
             self.assertEqual(len(saved_audio), 1)
             self.assertEqual(captured["audio_path"], saved_audio[0])
@@ -2154,6 +2155,7 @@ class MeetingRerunRegressionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["status"], "pending")
+        self.assertIn("原始媒體檔", payload["message"])
         job = database.get_job(payload["job_id"])
         self.assertIsNotNone(job)
         self.assertEqual(job["source"], "meeting_rerun")
@@ -2186,6 +2188,7 @@ class MeetingRerunRegressionTests(unittest.TestCase):
                 response = asgi_request(main.app, "POST", f"/meetings/{meeting_id}/rerun")
 
         self.assertEqual(response.status_code, 409)
+        self.assertIn("原始媒體檔", response.json()["detail"])
         self.assertEqual(database.count_jobs(), 0)
 
 
