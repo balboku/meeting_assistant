@@ -1421,7 +1421,7 @@
   <div class="modal modal-wide">
     <div class="modal-header">
       <div class="modal-title">原始檔清單</div>
-      <button class="modal-close" onclick="closeSourceStorageInventory()">×</button>
+      <button class="modal-close" aria-label="關閉原始檔清單" onclick="closeSourceStorageInventory()">×</button>
     </div>
     <div class="source-storage-controls">
       <input id="source-storage-search" class="form-input" type="search" placeholder="搜尋檔名或會議" oninput="renderSourceStorageInventory()" />
@@ -1443,17 +1443,17 @@
         <option value="name_asc">檔名 A-Z</option>
         <option value="name_desc">檔名 Z-A</option>
       </select>
-      <button id="source-storage-refresh" type="button" class="source-media-action source-storage-refresh" onclick="refreshSourceStorageInventory()">更新</button>
-      <button id="source-storage-reset" type="button" class="source-media-action source-storage-reset" onclick="resetSourceStorageFilters()">清除</button>
+      <button id="source-storage-refresh" type="button" class="source-media-action source-storage-refresh" aria-label="更新原始檔清單" onclick="refreshSourceStorageInventory()">更新</button>
+      <button id="source-storage-reset" type="button" class="source-media-action source-storage-reset" aria-label="清除原始檔篩選條件" onclick="resetSourceStorageFilters()">清除</button>
     </div>
-    <div id="source-storage-status" class="source-storage-status" aria-live="polite"></div>
-    <div id="source-storage-preview" class="source-storage-preview" aria-live="polite"></div>
-    <div id="source-storage-list" class="source-storage-list" aria-live="polite"></div>
+    <div id="source-storage-status" class="source-storage-status" role="status" aria-live="polite"></div>
+    <div id="source-storage-preview" class="source-storage-preview" aria-label="原始檔預覽" aria-live="polite"></div>
+    <div id="source-storage-list" class="source-storage-list" role="list" aria-label="原始檔清單" aria-live="polite"></div>
     <div id="source-storage-more" class="source-storage-more" hidden>
-      <button id="source-storage-load-more" type="button" class="source-media-action source-storage-load-more" onclick="loadMoreSourceStorageInventory()">載入更多</button>
+      <button id="source-storage-load-more" type="button" class="source-media-action source-storage-load-more" aria-label="載入更多原始檔" onclick="loadMoreSourceStorageInventory()">載入更多</button>
     </div>
     <div class="modal-footer">
-      <button class="btn-secondary" onclick="closeSourceStorageInventory()">關閉</button>
+      <button class="btn-secondary" aria-label="關閉原始檔清單" onclick="closeSourceStorageInventory()">關閉</button>
     </div>
   </div>
 </div>
@@ -1743,7 +1743,7 @@ function renderSourceStorageFile(file) {
       ? `<button type="button" class="source-media-action" aria-label="開啟連結會議" onclick="openMeetingFromSourceStorage(${meetingId})">開會議</button>`
       : `<button type="button" class="source-media-action danger" aria-label="刪除未連結原始檔" data-source-file="${escapeHtml(filename)}" onclick="deleteUnlinkedSourceMedia(this.dataset.sourceFile)">刪除</button>`
   ].join('');
-  return `<div class="source-storage-item">
+  return `<div class="source-storage-item" role="listitem">
     <div>
       <div class="source-storage-name">${escapeHtml(file.name || '未命名')}</div>
       <div class="source-storage-meta">
@@ -1766,7 +1766,7 @@ function renderSourceArchiveFile(file) {
   const mediaTypeLabel = mediaType === 'video' ? '影片' : mediaType === 'audio' ? '音訊' : '';
   const mediaActionLabel = mediaTypeLabel || '原始檔';
   const metadataBytes = Number(file.metadata_bytes || 0);
-  return `<div class="source-storage-item">
+  return `<div class="source-storage-item" role="listitem">
     <div>
       <div class="source-storage-name">${escapeHtml(filename || '未命名')}</div>
       <div class="source-storage-meta">
