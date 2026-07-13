@@ -1540,6 +1540,11 @@ let runtimeConfig = {
   }
 };
 let lastAudioRecordingProfileId = 'audio_standard';
+const DEFAULT_RECORDING_PROFILE_LABELS = {
+  audio_standard: '標準語音',
+  audio_compact: '省容量語音',
+  video_balanced: '錄影平衡'
+};
 const FALLBACK_UPLOAD_EXTENSIONS = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.webm', '.mp4', '.mov', '.avi', '.mkv', '.mpeg', '.mpg', '.wmv'];
 const FALLBACK_UPLOAD_ACCEPT = FALLBACK_UPLOAD_EXTENSIONS.join(',');
 let sourceStorageInventoryState = {
@@ -2114,6 +2119,7 @@ async function loadRuntimeConfig() {
   }
   updateUploadLimitHint();
   updateUploadAcceptList();
+  updateRecordingProfileOptionLabels();
   updateRecordingEstimate();
 }
 
@@ -2148,6 +2154,24 @@ function getRecordingProfile() {
     video_bps: 0,
     video_fps: 0,
   };
+}
+
+function recordingProfileBaseLabel(profile = '') {
+  const configured = String(runtimeConfig.recording_profiles?.[profile]?.label || '').trim();
+  return configured || DEFAULT_RECORDING_PROFILE_LABELS[profile] || profile || '';
+}
+
+function recordingProfileOptionLabel(profile = '') {
+  const label = recordingProfileBaseLabel(profile);
+  return profile === 'audio_standard' && label ? `${label}（推薦）` : label;
+}
+
+function updateRecordingProfileOptionLabels() {
+  const select = document.getElementById('rec-quality-profile');
+  if (!select) return;
+  Array.from(select.options).forEach(option => {
+    option.textContent = recordingProfileOptionLabel(option.value);
+  });
 }
 
 function syncRecordingProfileOptions() {
@@ -2567,11 +2591,7 @@ function sourceMediaKindLabel(meeting) {
 }
 
 function recordingProfileLabel(profile = '') {
-  return {
-    audio_standard: '標準錄音',
-    audio_compact: '小容量錄音',
-    video_balanced: '錄影模式'
-  }[profile] || profile || '';
+  return recordingProfileBaseLabel(profile);
 }
 
 function sourceHashPreview(hash = '') {
