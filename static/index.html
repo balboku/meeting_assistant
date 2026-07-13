@@ -3105,6 +3105,7 @@ const progressBox = document.getElementById('progress-box');
 const progressMsg = document.getElementById('progress-msg');
 
 let selectedFile = null;
+let uploadSelectionError = '';
 let activeUploadJobId = null;
 let activeUploadPoll = null;
 
@@ -3169,6 +3170,7 @@ function resetUploadForm() {
   clearActiveUploadPoll();
   activeUploadJobId = null;
   selectedFile = null;
+  uploadSelectionError = '';
   fileInput.value = '';
   document.getElementById('custom-title').value = '';
   fileNameDisplay.textContent = '點擊選擇檔案，或將檔案拖曳至此';
@@ -3192,25 +3194,31 @@ fileInput.addEventListener('change', e => {
 });
 
 function handleFileSelect(file) {
-  selectedFile = file;
+  selectedFile = null;
+  uploadSelectionError = '';
   const sizeText = formatBytes(file.size);
   if (!isSupportedUploadFile(file)) {
-    fileNameDisplay.textContent = uploadUnsupportedMessage(file);
+    uploadSelectionError = uploadUnsupportedMessage(file);
+    fileNameDisplay.textContent = uploadSelectionError;
     fileNameDisplay.style.color = 'var(--red)';
+    fileInput.value = '';
     return;
   }
-  if (selectedFile.size > runtimeConfig.max_upload_bytes) {
-    fileNameDisplay.textContent = `檔案過大：${file.name}（${sizeText}），上限 ${formatBytes(runtimeConfig.max_upload_bytes)}`;
+  if (file.size > runtimeConfig.max_upload_bytes) {
+    uploadSelectionError = `檔案過大：${file.name}（${sizeText}），上限 ${formatBytes(runtimeConfig.max_upload_bytes)}`;
+    fileNameDisplay.textContent = uploadSelectionError;
     fileNameDisplay.style.color = 'var(--red)';
+    fileInput.value = '';
     return;
   }
+  selectedFile = file;
   fileNameDisplay.textContent = `📄 ${file.name} (${sizeText})`;
   fileNameDisplay.style.color = 'var(--text)';
 }
 
 async function startUpload() {
   if (!selectedFile) {
-    alert("請先選擇一個音檔！");
+    alert(uploadSelectionError || "請先選擇一個音檔！");
     return;
   }
   if (!isSupportedUploadFile(selectedFile)) {
