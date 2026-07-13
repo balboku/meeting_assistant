@@ -4871,6 +4871,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("player.error", html)
         self.assertIn("!player.videoWidth || !player.videoHeight", html)
         self.assertIn("沒有偵測到可顯示的畫面", html)
+        self.assertIn("可先按「音訊預覽」確認聲音", html)
         self.assertIn("無法在瀏覽器中預覽", html)
         self.assertIn("player.dataset.statusBound", html)
         self.assertIn("querySelector('video.source-storage-media-player, audio')", html)

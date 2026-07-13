@@ -2727,7 +2727,7 @@ function updateSourceMediaPlayerStatus(player, statusEl) {
   if (isVideo && player.readyState >= 1 && (!player.videoWidth || !player.videoHeight)) {
     setSourceMediaPlayerStatus(
       statusEl,
-      '此原始錄影沒有偵測到可顯示的畫面，可能只有音訊軌，或瀏覽器不支援此影片軌。請使用「新分頁」或「下載」確認原始檔。',
+      '此原始錄影沒有偵測到可顯示的畫面，可能只有音訊軌，或瀏覽器不支援此影片軌。可先按「音訊預覽」確認聲音，必要時再用「新分頁」或「下載」確認原始檔。',
       'warning'
     );
     return;
