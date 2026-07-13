@@ -354,7 +354,8 @@
     .card-title {
       font-size: 15px; font-weight: 600; color: var(--text);
       line-height: 1.4; flex: 1; min-width: 0;
-      overflow-wrap: anywhere;
+      overflow-wrap: break-word;
+      word-break: keep-all;
     }
     .card-id {
       font-size: 11px; color: var(--text-dim);
@@ -433,7 +434,9 @@
       min-width: 0;
       font-size: clamp(20px, 2vw, 26px); font-weight: 700; color: var(--text);
       line-height: 1.3; margin-bottom: 0;
-      overflow-wrap: anywhere;
+      overflow-wrap: break-word;
+      text-wrap: balance;
+      word-break: keep-all;
     }
     .detail-topline {
       display: grid;
@@ -537,7 +540,8 @@
       min-width: 0;
       color: var(--text-mid);
       font-size: 12px;
-      overflow-wrap: anywhere;
+      overflow-wrap: break-word;
+      word-break: keep-all;
     }
     .source-media-facts {
       display: flex;
@@ -2480,6 +2484,25 @@ function isVideoSource(meeting) {
   return videoExtensions.has(extension);
 }
 
+function sourceMediaVideoPreviewCapable(meeting) {
+  if (isVideoSource(meeting)) return true;
+  const browserPreviewExtensions = new Set(['.webm', '.mp4']);
+  return browserPreviewExtensions.has(sourceMediaExtension(meeting));
+}
+
+function sourceMediaPlayerMode(meeting, requestedMode = null) {
+  if (requestedMode === 'video' && sourceMediaVideoPreviewCapable(meeting)) return 'video';
+  if (requestedMode === 'audio') return 'audio';
+  return isVideoSource(meeting) ? 'video' : 'audio';
+}
+
+function switchSourceMediaPlayer(mode) {
+  if (!currentMeetingData) return;
+  const evidence = document.getElementById('source-media-evidence');
+  if (!evidence) return;
+  evidence.outerHTML = renderAudioEvidence(currentMeetingData, mode);
+}
+
 function sourceMediaKindLabel(meeting) {
   return isVideoSource(meeting) ? '原始錄影' : '原始音檔';
 }
@@ -2514,26 +2537,34 @@ function renderSourceMediaFacts(meeting) {
     .join('')}</div>`;
 }
 
-function renderAudioEvidence(meeting) {
+function renderAudioEvidence(meeting, requestedMode = null) {
   const sourceUrl = `${API}/meetings/${meeting.id}/source-media`;
   const downloadUrl = `${sourceUrl}?download=1`;
   const label = escapeHtml(meeting.source_audio || '原始音檔');
-  const mediaLabel = sourceMediaKindLabel(meeting);
+  const playerMode = sourceMediaPlayerMode(meeting, requestedMode);
+  const mediaLabel = playerMode === 'video' ? '原始錄影' : '原始音檔';
+  const canVideoPreview = sourceMediaVideoPreviewCapable(meeting);
+  const previewToggle = canVideoPreview
+    ? playerMode === 'video'
+      ? `<button type="button" class="source-media-action" onclick="switchSourceMediaPlayer('audio')" aria-label="切換為音訊預覽">🔊 音訊預覽</button>`
+      : `<button type="button" class="source-media-action" onclick="switchSourceMediaPlayer('video')" aria-label="切換為影片預覽">🎥 影片預覽</button>`
+    : '';
   const actions = `<div class="source-media-actions">
+    ${previewToggle}
     <a class="source-media-action" href="${sourceUrl}" target="_blank" rel="noopener noreferrer" aria-label="開啟${mediaLabel}">↗ 開啟</a>
     <a class="source-media-action" href="${downloadUrl}" download aria-label="下載${mediaLabel}">⬇ 下載</a>
   </div>`;
-  if (isVideoSource(meeting)) {
-    return `<div class="audio-evidence media-video">
+  if (playerMode === 'video') {
+    return `<div id="source-media-evidence" class="audio-evidence media-video">
       <div class="audio-evidence-header">
         <span class="audio-evidence-label">原始錄影：${label}</span>
         ${actions}
       </div>
       ${renderSourceMediaFacts(meeting)}
-      <video id="source-media-player" controls preload="metadata" src="${sourceUrl}"></video>
+      <video id="source-media-player" controls preload="metadata" playsinline src="${sourceUrl}"></video>
     </div>`;
   }
-  return `<div class="audio-evidence media-audio">
+  return `<div id="source-media-evidence" class="audio-evidence media-audio">
     <div class="audio-evidence-header">
       <span class="audio-evidence-label">原始音檔：${label}</span>
       ${actions}
