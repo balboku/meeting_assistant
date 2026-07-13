@@ -1764,6 +1764,22 @@ function sourceStorageHiddenNotice(payload = {}, archivePayload = {}, files = []
   return `尚有未載入：${parts.join('、')}（每次載入 ${SOURCE_STORAGE_FETCH_LIMIT}）`;
 }
 
+function sourceStorageLoadedArchiveBytes(archivedFiles = []) {
+  return archivedFiles.reduce((total, file) => {
+    const mediaBytes = Number(file.bytes || 0);
+    const metadataBytes = Number(file.metadata_bytes || 0);
+    return total + Math.max(0, mediaBytes) + Math.max(0, metadataBytes);
+  }, 0);
+}
+
+function sourceStorageArchiveUnlistedBytes(archivePayload = {}, archivedFiles = []) {
+  const hiddenArchive = sourceStorageHiddenCount(archivePayload.total_files, archivedFiles.length);
+  if (hiddenArchive > 0) return 0;
+  const totalBytes = Number(archivePayload.total_bytes || 0);
+  const loadedBytes = sourceStorageLoadedArchiveBytes(archivedFiles);
+  return Math.max(0, totalBytes - loadedBytes);
+}
+
 function sourceStorageStatusSummary() {
   const payload = sourceStorageInventoryState.payload || {};
   const archivePayload = sourceStorageInventoryState.archivePayload || {};
@@ -1815,11 +1831,13 @@ function renderSourceStorageInventory() {
   const archiveRetentionLabel = sourceArchiveRetentionLabel();
   const shownCount = liveFiles.length + archivedFiles.length;
   const hiddenNotice = sourceStorageHiddenNotice(payload, archivePayload, sourceStorageInventoryState.files, sourceStorageInventoryState.archivedFiles);
+  const archiveUnlistedBytes = sourceStorageArchiveUnlistedBytes(archivePayload, sourceStorageInventoryState.archivedFiles);
   const summary = `<div class="source-storage-summary">
     <span class="source-storage-badge">總檔案 ${Number(payload.total_files || 0)} 個</span>
     <span class="source-storage-badge">總容量 ${formatBytes(payload.total_bytes)}</span>
     <span class="source-storage-badge unlinked">未連結 ${Number(payload.unlinked_files || 0)} 個 / ${formatBytes(payload.unlinked_bytes)}</span>
     <span class="source-storage-badge">已移除備份 ${Number(archivePayload.total_files || 0)} 個 / ${formatBytes(archivePayload.total_bytes)}</span>
+    ${archiveUnlistedBytes > 0 ? `<span class="source-storage-badge warning">未列出備份容量 ${formatBytes(archiveUnlistedBytes)}</span>` : ''}
     <span class="source-storage-badge">目前顯示 ${shownCount} 個</span>
     ${hiddenNotice ? `<span class="source-storage-badge warning">${escapeHtml(hiddenNotice)}</span>` : ''}
     <span class="source-storage-badge">${escapeHtml(archiveRetentionLabel)}</span>
