@@ -1458,8 +1458,8 @@
     <!-- 模式選擇 -->
     <div class="rec-mode-tabs">
       <button class="rec-tab active" id="tab-audio" onclick="switchRecMode('audio')">🎙 僅錄音</button>
-      <button class="rec-tab" id="tab-video" onclick="switchRecMode('video')">🎥 錄音 + 視訊</button>
-      <button class="rec-tab" id="tab-screen" onclick="switchRecMode('screen')">🖥 螢幕/分頁音訊</button>
+      <button class="rec-tab" id="tab-video" onclick="switchRecMode('video')">🎥 鏡頭錄影</button>
+      <button class="rec-tab" id="tab-screen" onclick="switchRecMode('screen')">🖥 螢幕錄影/分頁音訊</button>
     </div>
     <div class="rec-screen-options" id="rec-screen-options">
       <label class="rec-check">
@@ -1472,12 +1472,12 @@
       <select id="rec-quality-profile" class="form-input" onchange="updateRecordingEstimate()">
         <option value="audio_standard">標準語音（推薦）</option>
         <option value="audio_compact">省容量語音</option>
-        <option value="video_balanced">螢幕/視訊平衡</option>
+        <option value="video_balanced">錄影平衡</option>
       </select>
       <div class="rec-size-estimate" id="rec-size-estimate">每小時預估容量：載入中…</div>
     </div>
 
-    <!-- 視訊預覽（錄影模式才顯示） -->
+    <!-- 錄影預覽（錄影模式才顯示） -->
     <video id="rec-preview" class="rec-preview" autoplay muted playsinline></video>
 
     <!-- 聲波視覺化 -->
@@ -3715,8 +3715,18 @@ function attachScreenStopHandler(displayStream) {
 
 function recordingModeLabel(mode = recMode) {
   if (mode === 'screen') return '螢幕錄製';
-  if (mode === 'video') return '錄影';
+  if (mode === 'video') return '鏡頭錄影';
   return '錄音';
+}
+
+function recordingPermissionHint(mode = recMode) {
+  if (mode === 'screen') {
+    return '請確認瀏覽器已授予螢幕分享權限；若要錄線上會議其他人的聲音，分享分頁或視窗時需勾選分享音訊。';
+  }
+  if (mode === 'video') {
+    return '請確認瀏覽器已授予攝影機與麥克風權限。';
+  }
+  return '請確認瀏覽器已授予麥克風權限。';
 }
 
 function setRecordingResult(message = '', level = 'success') {
@@ -3866,7 +3876,7 @@ async function startRecording() {
     recordedChunks = [];
     recStream = await createRecordingStream();
 
-    // 視訊預覽
+    // 錄影預覽
     if (recMode === 'video' || recMode === 'screen') {
       recPreview.srcObject = recStream;
       recPreview.classList.add('show');
@@ -3918,7 +3928,7 @@ async function startRecording() {
 
   } catch (err) {
     releaseRecordingStreams();
-    alert(`無法開始錄製：${err.message}\n\n請確認瀏覽器已授予麥克風、攝影機或螢幕分享權限。`);
+    alert(`無法開始錄製：${err.message}\n\n${recordingPermissionHint()}`);
   }
 }
 
