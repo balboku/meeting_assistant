@@ -168,6 +168,7 @@ class SourceMediaArchiveRecord(BaseModel):
     name: str
     archived_name: str
     bytes: int
+    metadata_bytes: int = 0
     modified_at: Optional[datetime] = None
     source_media_type: Optional[str] = None
     backup_path: Optional[str] = None

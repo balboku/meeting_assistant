@@ -623,6 +623,16 @@ def _read_source_media_archive_metadata(media_path: Path) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _source_media_archive_metadata_bytes(media_path: Path) -> int:
+    metadata_path = _source_media_archive_metadata_path(media_path)
+    try:
+        if not metadata_path.is_file():
+            return 0
+        return int(metadata_path.stat().st_size)
+    except OSError:
+        return 0
+
+
 def _write_source_media_archive_metadata(
     media_path: Path,
     *,
@@ -717,7 +727,8 @@ def _source_media_archive(limit: int = 100, offset: int = 0) -> SourceMediaArchi
                 continue
             total_files += 1
             file_bytes = int(stat.st_size)
-            total_bytes += file_bytes
+            metadata_bytes = _source_media_archive_metadata_bytes(entry)
+            total_bytes += file_bytes + metadata_bytes
             metadata = _read_source_media_archive_metadata(entry)
             source_media_type = (
                 _normalize_source_media_kind(metadata.get("source_media_type"))
@@ -729,6 +740,7 @@ def _source_media_archive(limit: int = 100, offset: int = 0) -> SourceMediaArchi
                     name=original_name,
                     archived_name=entry.name,
                     bytes=file_bytes,
+                    metadata_bytes=metadata_bytes,
                     modified_at=datetime.fromtimestamp(stat.st_mtime),
                     source_media_type=source_media_type,
                     backup_path=str(entry),
@@ -781,7 +793,7 @@ def _source_media_archive_storage_stats() -> tuple[int, int]:
             except OSError:
                 continue
             count += 1
-            total_bytes += int(stat.st_size)
+            total_bytes += int(stat.st_size) + _source_media_archive_metadata_bytes(entry)
     return count, total_bytes
 
 

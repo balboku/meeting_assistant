@@ -2293,6 +2293,11 @@ class MetricsRegressionTests(unittest.TestCase):
                     if deleted_backup_metadata_exists
                     else {}
                 )
+                deleted_backup_metadata_bytes = (
+                    deleted_backup_metadata_path.stat().st_size
+                    if deleted_backup_metadata_exists
+                    else 0
+                )
                 archive_response = asgi_request(main.app, "GET", "/source-media/archive?limit=10")
                 restore_archive_id = archive_response.json()["files"][0]["archive_id"]
                 archive_file_response = asgi_request(
@@ -2389,13 +2394,16 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in post_delete_inventory["files"]], ["meeting-b.webm", "meeting-a.mp3"])
         post_delete_storage = post_delete_metrics_response.json()["storage"]
         self.assertEqual(post_delete_storage["source_media_archived_files"], 1)
-        self.assertEqual(post_delete_storage["source_media_archived_bytes"], len(b"ccc"))
+        self.assertEqual(post_delete_storage["source_media_archived_bytes"], len(b"ccc") + deleted_backup_metadata_bytes)
         self.assertEqual(archive_response.status_code, 200)
         archive_payload = archive_response.json()
         self.assertEqual(archive_payload["total_files"], 1)
+        self.assertEqual(archive_payload["total_bytes"], len(b"ccc") + deleted_backup_metadata_bytes)
         self.assertEqual(archive_payload["limit"], 10)
         self.assertEqual(archive_payload["offset"], 0)
         self.assertEqual(archive_payload["files"][0]["name"], "meeting-c.m4a")
+        self.assertEqual(archive_payload["files"][0]["bytes"], len(b"ccc"))
+        self.assertEqual(archive_payload["files"][0]["metadata_bytes"], deleted_backup_metadata_bytes)
         self.assertEqual(archive_payload["files"][0]["source_media_type"], "audio")
         self.assertEqual(archive_file_response.status_code, 200)
         self.assertIn("audio/mp4", archive_file_response.headers.get("content-type", ""))
@@ -2433,6 +2441,7 @@ class MetricsRegressionTests(unittest.TestCase):
                 backup_path = Path(delete_response.json().get("backup_path", ""))
                 metadata_path = main._source_media_archive_metadata_path(backup_path)
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                metadata_bytes = metadata_path.stat().st_size
 
                 with mock.patch.object(main, "_storage_source_media_type", return_value="audio"), \
                      mock.patch.object(main, "_ffprobe_stream_types", return_value=set()):
@@ -2449,7 +2458,10 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual(metadata["original_name"], "screen.webm")
         self.assertEqual(metadata["source_media_type"], "video")
         self.assertEqual(archive_response.status_code, 200)
-        self.assertEqual(archive_response.json()["files"][0]["source_media_type"], "video")
+        archive_payload = archive_response.json()
+        self.assertEqual(archive_payload["total_bytes"], len(b"webm-video") + metadata_bytes)
+        self.assertEqual(archive_payload["files"][0]["source_media_type"], "video")
+        self.assertEqual(archive_payload["files"][0]["metadata_bytes"], metadata_bytes)
         self.assertEqual(archive_file_response.status_code, 200)
         self.assertIn("video/webm", archive_file_response.headers.get("content-type", ""))
         self.assertEqual(archive_file_response.content, b"webm-video")
