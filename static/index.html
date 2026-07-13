@@ -2869,12 +2869,19 @@ async function pollStatus(jobId) {
 }
 
 // ── 啟動 ────────────────────────────────────────────────────────────
-loadRuntimeConfig();
-loadMeetings();
-loadJobs();
-loadMetrics();
-setInterval(loadJobs, 10000);
-setInterval(loadMetrics, 10000);
+async function initializeDashboard() {
+  await loadRuntimeConfig();
+  const initialLoads = Promise.allSettled([
+    loadMeetings(),
+    loadJobs(),
+    loadMetrics()
+  ]);
+  setInterval(loadJobs, 10000);
+  setInterval(loadMetrics, 10000);
+  await initialLoads;
+}
+
+initializeDashboard().catch(err => console.error('初始化儀表板失敗', err));
 
 // =========================================================================
 // 🔴 錄音 / 錄影功能
