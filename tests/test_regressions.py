@@ -3679,6 +3679,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("if (!recMicMuted && !canMuteRecordingMic()) return;", html)
         self.assertIn("recMode !== 'screen' || recScreenAudioCaptured", html)
         self.assertIn("線上會議其他人的聲音不會被錄到", html)
+        self.assertIn("線上會議其他人聲音可能未錄到", html)
+        self.assertIn("未偵測到音訊，請重新分享並勾選分享音訊", html)
         self.assertIn("麥克風已關閉", html)
         self.assertIn("Optional microphone capture failed; continuing with screen audio.", html)
         self.assertIn("目前沒有可錄製的聲音", html)

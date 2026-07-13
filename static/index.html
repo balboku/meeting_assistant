@@ -3562,9 +3562,9 @@ function screenRecordingStatusText() {
     return '🔴 錄製中（螢幕/分頁音訊）';
   }
   if (recScreenMicCaptured) {
-    return '🔴 錄製中（僅麥克風音訊）';
+    return '🔴 錄製中（僅麥克風；線上會議其他人聲音可能未錄到）';
   }
-  return '🔴 錄製中（未偵測到音訊）';
+  return '🔴 錄製中（未偵測到音訊，請重新分享並勾選分享音訊）';
 }
 
 function updateRecordingMicToggle() {
