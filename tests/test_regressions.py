@@ -3585,6 +3585,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("sourceStorageAudioFallbackCapable({ name, source_media_type: mediaType })", html)
         self.assertIn('data-source-mode="audio"', html)
         self.assertIn('data-source-mode="video"', html)
+        self.assertIn('aria-label="切換為音訊預覽"', html)
+        self.assertIn('aria-label="切換為影片預覽"', html)
         self.assertIn("🔊 音訊預覽", html)
         self.assertIn("🎥 影片預覽", html)
         self.assertIn("playerMode === 'audio'", html)

@@ -1660,8 +1660,8 @@ function previewSourceMedia(url = '', mediaType = '', name = '', requestedMode =
   const mediaTitle = isVideo ? '原始錄影' : playerMode === 'audio' ? '原始音檔' : '原始檔案';
   const previewToggle = canAudioFallback
     ? isVideo
-      ? `<button type="button" class="source-media-action" data-source-url="${safeUrl}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${safeName}" data-source-mode="audio" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile, this.dataset.sourceMode)">🔊 音訊預覽</button>`
-      : `<button type="button" class="source-media-action" data-source-url="${safeUrl}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${safeName}" data-source-mode="video" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile, this.dataset.sourceMode)">🎥 影片預覽</button>`
+      ? `<button type="button" class="source-media-action" aria-label="切換為音訊預覽" data-source-url="${safeUrl}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${safeName}" data-source-mode="audio" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile, this.dataset.sourceMode)">🔊 音訊預覽</button>`
+      : `<button type="button" class="source-media-action" aria-label="切換為影片預覽" data-source-url="${safeUrl}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${safeName}" data-source-mode="video" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile, this.dataset.sourceMode)">🎥 影片預覽</button>`
     : '';
   const player = isVideo
     ? `<video controls preload="metadata" playsinline class="source-storage-media-player" src="${safeUrl}"></video>`
