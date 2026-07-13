@@ -3106,6 +3106,7 @@ const progressMsg = document.getElementById('progress-msg');
 
 let selectedFile = null;
 let uploadSelectionError = '';
+let uploadBusy = false;
 let activeUploadJobId = null;
 let activeUploadPoll = null;
 
@@ -3128,11 +3129,11 @@ function openUploadModal() {
 }
 
 function closeUploadModal() {
-  if (btnUpload.disabled && activeUploadJobId) {
+  if (uploadBusy && activeUploadJobId) {
     cancelActiveUpload();
     return;
   }
-  if (btnUpload.disabled) return; // 檔案仍在上傳中，尚未取得可取消的 job id
+  if (uploadBusy) return; // 檔案仍在上傳中，尚未取得可取消的 job id
   uploadModal.classList.remove('show');
 }
 
@@ -3158,12 +3159,20 @@ async function cancelActiveUpload() {
   }
   clearActiveUploadPoll();
   activeUploadJobId = null;
+  uploadBusy = false;
   progressMsg.textContent = '已取消處理。';
-  btnUpload.disabled = false;
   btnCancel.disabled = false;
   btnCancel.textContent = '取消';
+  updateUploadActionState();
   loadJobs();
   loadMetrics();
+}
+
+function updateUploadActionState() {
+  btnUpload.disabled = uploadBusy || !selectedFile;
+  btnUpload.title = !selectedFile
+    ? (uploadSelectionError || '請先選擇支援的音訊或影片檔')
+    : '';
 }
 
 function resetUploadForm() {
@@ -3171,14 +3180,15 @@ function resetUploadForm() {
   activeUploadJobId = null;
   selectedFile = null;
   uploadSelectionError = '';
+  uploadBusy = false;
   fileInput.value = '';
   document.getElementById('custom-title').value = '';
   fileNameDisplay.textContent = '點擊選擇檔案，或將檔案拖曳至此';
   fileNameDisplay.style.color = '';
   progressBox.classList.remove('show');
-  btnUpload.disabled = false;
   btnCancel.disabled = false;
   btnCancel.textContent = '取消';
+  updateUploadActionState();
 }
 
 // 拖曳事件
@@ -3202,6 +3212,7 @@ function handleFileSelect(file) {
     fileNameDisplay.textContent = uploadSelectionError;
     fileNameDisplay.style.color = 'var(--red)';
     fileInput.value = '';
+    updateUploadActionState();
     return;
   }
   if (file.size > runtimeConfig.max_upload_bytes) {
@@ -3209,11 +3220,13 @@ function handleFileSelect(file) {
     fileNameDisplay.textContent = uploadSelectionError;
     fileNameDisplay.style.color = 'var(--red)';
     fileInput.value = '';
+    updateUploadActionState();
     return;
   }
   selectedFile = file;
   fileNameDisplay.textContent = `📄 ${file.name} (${sizeText})`;
   fileNameDisplay.style.color = 'var(--text)';
+  updateUploadActionState();
 }
 
 async function startUpload() {
@@ -3230,7 +3243,8 @@ async function startUpload() {
     return;
   }
 
-  btnUpload.disabled = true;
+  uploadBusy = true;
+  updateUploadActionState();
   btnCancel.disabled = true;
   progressBox.classList.add('show');
   progressMsg.textContent = '正在上傳檔案... (1/2)';
@@ -3254,7 +3268,8 @@ async function startUpload() {
     pollStatus(data.job_id);
   } catch (err) {
     progressMsg.textContent = `❌ 上傳失敗: ${err.message}`;
-    btnUpload.disabled = false;
+    uploadBusy = false;
+    updateUploadActionState();
     btnCancel.disabled = false;
   }
 }
@@ -3283,8 +3298,9 @@ async function pollStatus(jobId) {
       if (data.status === 'done') {
         clearActiveUploadPoll();
         activeUploadJobId = null;
+        uploadBusy = false;
         progressMsg.innerHTML = '✅ 處理完成！';
-        btnUpload.disabled = false;
+        updateUploadActionState();
         btnCancel.disabled = false;
         btnCancel.textContent = '取消';
         loadJobs();
@@ -3300,8 +3316,9 @@ async function pollStatus(jobId) {
       } else if (data.status === 'failed') {
         clearActiveUploadPoll();
         activeUploadJobId = null;
+        uploadBusy = false;
         progressMsg.textContent = `❌ 處理失敗: ${data.message || '未知錯誤'}`;
-        btnUpload.disabled = false;
+        updateUploadActionState();
         btnCancel.disabled = false;
         btnCancel.textContent = '取消';
         loadJobs();
@@ -3309,8 +3326,9 @@ async function pollStatus(jobId) {
       } else if (data.status === 'cancelled') {
         clearActiveUploadPoll();
         activeUploadJobId = null;
+        uploadBusy = false;
         progressMsg.textContent = '已取消處理。';
-        btnUpload.disabled = false;
+        updateUploadActionState();
         btnCancel.disabled = false;
         btnCancel.textContent = '取消';
         loadJobs();

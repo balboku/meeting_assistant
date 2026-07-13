@@ -3585,9 +3585,14 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("if (!isSupportedUploadFile(selectedFile))", html)
         self.assertIn("不支援的媒體格式", html)
         self.assertIn("let uploadSelectionError = ''", html)
+        self.assertIn("let uploadBusy = false", html)
         self.assertIn("uploadSelectionError = uploadUnsupportedMessage(file)", html)
         self.assertIn("alert(uploadSelectionError || \"請先選擇一個音檔！\")", html)
         self.assertIn("fileInput.value = ''", html)
+        self.assertIn("function updateUploadActionState", html)
+        self.assertIn("btnUpload.disabled = uploadBusy || !selectedFile", html)
+        self.assertIn("if (uploadBusy && activeUploadJobId)", html)
+        self.assertIn("uploadBusy = true", html)
 
     def test_web_ui_has_readable_api_errors_and_job_event_timeline(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
