@@ -179,6 +179,9 @@ class MeetingDetail(MeetingRecord):
     """會議記錄完整內容（用於單筆查詢）"""
     full_content: str = Field(..., description="完整 Markdown 會議記錄")
     quality_report: Optional[dict] = Field(None, description="音訊與逐段品質報告")
+    recording_profile: Optional[str] = Field(None, description="錄製或轉檔設定代號")
+    source_media_size_bytes: Optional[int] = Field(None, description="原始媒體檔大小")
+    source_media_sha256: Optional[str] = Field(None, description="原始媒體 SHA256")
 
 
 class MeetingRerunRequest(BaseModel):

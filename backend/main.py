@@ -738,6 +738,38 @@ def _source_media_type(record: dict, source_path: Optional[Path] = None) -> str:
     return "audio"
 
 
+def _source_media_detail_metadata(record: dict, source_path: Optional[Path] = None) -> dict[str, object]:
+    quality_report = record.get("quality_report") or {}
+    recording = quality_report.get("recording") if isinstance(quality_report, dict) else {}
+    if not isinstance(recording, dict):
+        recording = {}
+
+    profile = str(recording.get("profile") or "").strip() or None
+    sha256 = str(recording.get("source_audio_sha256") or "").strip() or None
+    if sha256 == "unavailable":
+        sha256 = None
+
+    size_bytes: Optional[int]
+    raw_size = recording.get("source_audio_size_bytes")
+    try:
+        size_bytes = int(raw_size) if raw_size not in (None, "") else None
+    except (TypeError, ValueError):
+        size_bytes = None
+
+    path = source_path or _optional_source_media_path(record)
+    if size_bytes is None and path:
+        try:
+            size_bytes = path.stat().st_size
+        except OSError:
+            size_bytes = None
+
+    return {
+        "recording_profile": profile,
+        "source_media_size_bytes": size_bytes,
+        "source_media_sha256": sha256,
+    }
+
+
 def _source_media_content_type(record: dict, source_path: Path) -> str:
     suffix = source_path.suffix.lower()
     media_kind = _source_media_type(record, source_path)
@@ -1067,10 +1099,15 @@ async def get_meeting_detail(meeting_id: int):
         })
 
     detail_quality_report = quality_report or record.get("quality_report")
+    source_path = _optional_source_media_path(record)
     source_media_type = _source_media_type({
         **record,
         "quality_report": detail_quality_report,
-    })
+    }, source_path)
+    source_media_metadata = _source_media_detail_metadata({
+        **record,
+        "quality_report": detail_quality_report,
+    }, source_path)
 
     return MeetingDetail(
         id=record["id"],
@@ -1086,6 +1123,9 @@ async def get_meeting_detail(meeting_id: int):
         full_content=record["full_content"],
         quality_report=quality_report or None,
         source_media_type=source_media_type,
+        recording_profile=source_media_metadata["recording_profile"],
+        source_media_size_bytes=source_media_metadata["source_media_size_bytes"],
+        source_media_sha256=source_media_metadata["source_media_sha256"],
     )
 
 

@@ -1688,9 +1688,9 @@ function sourceHashPreview(hash = '') {
 
 function renderSourceMediaFacts(meeting) {
   const recording = meeting?.quality_report?.recording || {};
-  const profile = recordingProfileLabel(recording.profile);
-  const sizeBytes = Number(recording.source_audio_size_bytes || 0);
-  const hash = sourceHashPreview(recording.source_audio_sha256);
+  const profile = recordingProfileLabel(meeting?.recording_profile || recording.profile);
+  const sizeBytes = Number(meeting?.source_media_size_bytes || recording.source_audio_size_bytes || 0);
+  const hash = sourceHashPreview(meeting?.source_media_sha256 || recording.source_audio_sha256);
   const facts = [
     sourceMediaKindLabel(meeting),
     profile,

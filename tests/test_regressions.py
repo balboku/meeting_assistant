@@ -3615,25 +3615,37 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
     def test_meeting_detail_exposes_source_media_type(self):
         import backend.main as main
 
-        record = {
-            "id": 7,
-            "title": "錄影會議",
-            "date": "2026/07/12",
-            "source_audio": "screen.webm",
-            "output_path": "meeting.md",
-            "summary": "summary",
-            "job_id": None,
-            "quality_score": None,
-            "quality_label": None,
-            "created_at": datetime(2026, 7, 12, 9, 0, 0),
-            "full_content": "## 一、討論摘要 (Discussion Summary)\nD1 測試",
-            "quality_report": {"recording": {"profile": "video_balanced"}},
-        }
-        with mock.patch.object(main, "get_meeting", return_value=record):
-            response = asgi_request(main.app, "GET", "/meetings/7")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = Path(tmpdir) / "screen.webm"
+            source_path.write_bytes(b"video")
+            record = {
+                "id": 7,
+                "title": "錄影會議",
+                "date": "2026/07/12",
+                "source_audio": str(source_path),
+                "output_path": "meeting.md",
+                "summary": "summary",
+                "job_id": None,
+                "quality_score": None,
+                "quality_label": None,
+                "created_at": datetime(2026, 7, 12, 9, 0, 0),
+                "full_content": "## 一、討論摘要 (Discussion Summary)\nD1 測試",
+                "quality_report": {
+                    "recording": {
+                        "profile": "video_balanced",
+                        "source_audio_sha256": "abc123def4567890",
+                    }
+                },
+            }
+            with mock.patch.object(main, "get_meeting", return_value=record):
+                response = asgi_request(main.app, "GET", "/meetings/7")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["source_media_type"], "video")
+        payload = response.json()
+        self.assertEqual(payload["source_media_type"], "video")
+        self.assertEqual(payload["recording_profile"], "video_balanced")
+        self.assertEqual(payload["source_media_size_bytes"], 5)
+        self.assertEqual(payload["source_media_sha256"], "abc123def4567890")
 
     def test_meeting_rerun_api_can_force_only_one_segment(self):
         import backend.main as main
@@ -4150,6 +4162,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function sourceHashPreview", html)
         self.assertIn("function renderSourceMediaFacts", html)
         self.assertIn("SHA256 ${hash}", html)
+        self.assertIn("meeting?.recording_profile", html)
+        self.assertIn("meeting?.source_media_size_bytes", html)
+        self.assertIn("meeting?.source_media_sha256", html)
         self.assertIn("recording.source_audio_size_bytes", html)
         self.assertIn("recording.source_audio_sha256", html)
         self.assertIn("download=1", html)
