@@ -1323,6 +1323,10 @@ function isNeedsReviewRecord(record) {
   return warningCount > 0 || (hasScore && Number(score) < 85) || /需|警|低|不/.test(label);
 }
 
+function sourceMediaIcon(record) {
+  return isVideoSource(record) ? '🎥' : '🔊';
+}
+
 // ── 主要資料載入 ──────────────────────────────────────────────────
 async function loadMeetings(query = '') {
   const listEl = document.getElementById('list-panel');
@@ -1389,7 +1393,7 @@ async function loadMeetings(query = '') {
         <div class="card-meta">
           <span>📅 ${r.date}</span>
           <span class="dot"></span>
-          <span>🔊 ${escapeHtml(r.source_audio)}</span>
+          <span>${sourceMediaIcon(r)} ${escapeHtml(r.source_audio)}</span>
         </div>
         ${renderCardQuality(r)}
         <div class="card-preview">${escapeHtml(r.summary_preview || '（無摘要）')}</div>
@@ -1641,7 +1645,7 @@ function isVideoSource(meeting) {
   const sourceType = String(meeting?.source_media_type || '').toLowerCase();
   if (sourceType === 'video') return true;
   if (sourceType === 'audio') return false;
-  const videoExtensions = new Set(['.webm', '.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);
+  const videoExtensions = new Set(['.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);
   const profile = meeting?.quality_report?.recording?.profile || '';
   const extension = sourceMediaExtension(meeting);
   if (profile === 'video_balanced') return true;
@@ -1926,7 +1930,7 @@ async function openDetail(id) {
         </div>
         <div class="detail-meta-row" style="margin-top: 12px;">
           <div class="meta-chip"><span class="icon">📅</span>${r.date}</div>
-          <div class="meta-chip"><span class="icon">🔊</span>${escapeHtml(r.source_audio)}</div>
+          <div class="meta-chip"><span class="icon">${sourceMediaIcon(r)}</span>${escapeHtml(r.source_audio)}</div>
           <div class="meta-chip"><span class="icon">⏰</span>${formatDate(r.created_at)}</div>
         </div>
       </div>

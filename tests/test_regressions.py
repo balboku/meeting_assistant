@@ -2308,6 +2308,78 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(searched["quality_warning_count"], 2)
         self.assertEqual(searched["quality_warning_preview"], "錄音音量偏低")
 
+    def test_list_and_search_include_source_media_type(self):
+        database, tmp_path = self._isolated_database()
+        video_output = tmp_path / "video.md"
+        audio_output = tmp_path / "audio.md"
+        mp4_output = tmp_path / "mp4.md"
+        legacy_output = tmp_path / "legacy-webm.md"
+        video_output.write_text("video meeting", encoding="utf-8")
+        audio_output.write_text("audio meeting", encoding="utf-8")
+        mp4_output.write_text("mp4 meeting", encoding="utf-8")
+        legacy_output.write_text("legacy webm meeting", encoding="utf-8")
+
+        video_id = database.save_meeting(
+            title="Video Meeting",
+            date="2026/07/12",
+            source_audio="recorded-screen.webm",
+            output_path=str(video_output),
+            summary="video meeting",
+            quality_report={"recording": {"profile": "video_balanced"}},
+        )
+        audio_id = database.save_meeting(
+            title="Audio Meeting",
+            date="2026/07/12",
+            source_audio="recorded-audio.webm",
+            output_path=str(audio_output),
+            summary="audio meeting",
+            quality_report={"recording": {"profile": "audio_standard"}},
+        )
+        mp4_id = database.save_meeting(
+            title="Uploaded MP4",
+            date="2026/07/12",
+            source_audio="uploaded.mp4",
+            output_path=str(mp4_output),
+            summary="mp4 meeting",
+        )
+        legacy_webm_id = database.save_meeting(
+            title="Legacy WebM",
+            date="2026/07/12",
+            source_audio="legacy.webm",
+            output_path=str(legacy_output),
+            summary="legacy webm meeting",
+        )
+
+        listed_by_id = {row["id"]: row for row in database.list_meetings(limit=10)}
+
+        self.assertEqual(listed_by_id[video_id]["source_media_type"], "video")
+        self.assertEqual(listed_by_id[audio_id]["source_media_type"], "audio")
+        self.assertEqual(listed_by_id[mp4_id]["source_media_type"], "video")
+        self.assertIsNone(listed_by_id[legacy_webm_id]["source_media_type"])
+        self.assertEqual(database.search_meetings("Video Meeting")[0]["source_media_type"], "video")
+        self.assertEqual(database.search_meetings("Audio Meeting")[0]["source_media_type"], "audio")
+
+        import backend.main as main
+
+        source_dir = tmp_path / "source_audio"
+        source_dir.mkdir()
+        (source_dir / "legacy.webm").write_bytes(b"\x1a\x45\xdf\xa3")
+        with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
+             mock.patch.object(main, "_ffprobe_stream_types", return_value={"video", "audio"}):
+            list_response = asgi_request(main.app, "GET", "/meetings?limit=10")
+            legacy_search_response = asgi_request(main.app, "GET", "/meetings/search?q=Legacy%20WebM&limit=5")
+        search_response = asgi_request(main.app, "GET", "/meetings/search?q=Video%20Meeting&limit=5")
+
+        self.assertEqual(list_response.status_code, 200)
+        api_by_id = {row["id"]: row for row in list_response.json()["records"]}
+        self.assertEqual(api_by_id[video_id]["source_media_type"], "video")
+        self.assertEqual(api_by_id[audio_id]["source_media_type"], "audio")
+        self.assertEqual(api_by_id[legacy_webm_id]["source_media_type"], "video")
+        self.assertEqual(search_response.status_code, 200)
+        self.assertEqual(search_response.json()[0]["source_media_type"], "video")
+        self.assertEqual(legacy_search_response.status_code, 200)
+        self.assertEqual(legacy_search_response.json()[0]["source_media_type"], "video")
+
     def test_legacy_meeting_list_infers_quality_warning_count_from_markdown(self):
         database, tmp_path = self._isolated_database()
         output_path = tmp_path / "legacy-warning.md"
@@ -3526,6 +3598,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                  ):
                 self.assertEqual(main._source_media_type(record), "video")
 
+            main.FFPROBE_STREAM_CACHE.clear()
             with mock.patch.object(main.shutil, "which", return_value="ffprobe"), \
                  mock.patch.object(
                      main.subprocess,
@@ -4042,6 +4115,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality-rerun-full-button", html)
         self.assertIn("function renderCardQuality", html)
         self.assertIn("function isNeedsReviewRecord", html)
+        self.assertIn("function sourceMediaIcon", html)
+        self.assertIn("${sourceMediaIcon(r)} ${escapeHtml(r.source_audio)}", html)
         self.assertIn('id="needs-review-filter"', html)
         self.assertIn("review-filter", html)
         self.assertIn("quality_warning_count", html)
@@ -4073,6 +4148,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("⬇ 下載", html)
         self.assertIn("function isVideoSource", html)
         self.assertIn("source_media_type", html)
+        self.assertIn("new Set(['.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv'])", html)
         self.assertIn("<video id=\"source-media-player\"", html)
         self.assertIn("display: grid;", html)
         self.assertIn("grid-template-columns: minmax(0, 1fr);", html)

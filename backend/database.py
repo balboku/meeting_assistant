@@ -95,6 +95,28 @@ LEGACY_TRANSCRIPT_OMISSION_PATTERNS = (
     r"已過濾[^。\n]{0,20}逐字稿",
     r"自動過濾後續重複內容",
 )
+VIDEO_RECORDING_PROFILES = {"video_balanced"}
+AUDIO_RECORDING_PROFILES = {"audio_standard", "audio_compact"}
+VIDEO_SOURCE_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".mpeg", ".mpg", ".wmv"}
+AUDIO_SOURCE_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
+
+
+def _source_media_type_from_metadata(record: dict[str, Any], quality_report: Any) -> Optional[str]:
+    if isinstance(quality_report, dict):
+        recording = quality_report.get("recording") or {}
+        if isinstance(recording, dict):
+            profile = str(recording.get("profile") or "").strip()
+            if profile in VIDEO_RECORDING_PROFILES:
+                return "video"
+            if profile in AUDIO_RECORDING_PROFILES:
+                return "audio"
+
+    suffix = Path(str(record.get("source_audio") or "")).suffix.lower()
+    if suffix in VIDEO_SOURCE_EXTENSIONS:
+        return "video"
+    if suffix in AUDIO_SOURCE_EXTENSIONS:
+        return "audio"
+    return None
 
 
 def _legacy_markdown_quality_warning_count(output_path: str) -> int:
@@ -1202,6 +1224,7 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         quality_report = json.loads(quality_report_json) if quality_report_json else None
     except json.JSONDecodeError:
         quality_report = None
+    record["source_media_type"] = _source_media_type_from_metadata(record, quality_report)
     if isinstance(quality_report, dict):
         warnings = quality_report.get("warnings") or []
         if isinstance(warnings, list):

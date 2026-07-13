@@ -124,6 +124,8 @@ TRUST_LOCAL_NETWORK = os.getenv(
 VIDEO_RECORDING_PROFILES = {"video_balanced"}
 AUDIO_RECORDING_PROFILES = {"audio_standard", "audio_compact"}
 VIDEO_SOURCE_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".mpeg", ".mpg", ".wmv"}
+FFPROBE_STREAM_CACHE_MAX = 256
+FFPROBE_STREAM_CACHE: dict[tuple[str, int, int], set[str]] = {}
 TRUSTED_LOCAL_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "10.0.0.0/8",
     "172.16.0.0/12",
@@ -660,6 +662,15 @@ def _optional_source_media_path(record: dict) -> Optional[Path]:
 
 
 def _ffprobe_stream_types(path: Path) -> set[str]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return set()
+    cache_key = (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+    cached = FFPROBE_STREAM_CACHE.get(cache_key)
+    if cached is not None:
+        return set(cached)
+
     ffprobe = (
         os.getenv("FFPROBE_PATH")
         or os.getenv("FFPROBE_BINARY")
@@ -694,11 +705,15 @@ def _ffprobe_stream_types(path: Path) -> set[str]:
         payload = json.loads(result.stdout or "{}")
     except json.JSONDecodeError:
         return set()
-    return {
+    stream_types = {
         str(stream.get("codec_type") or "").strip().lower()
         for stream in payload.get("streams", [])
         if isinstance(stream, dict) and stream.get("codec_type")
     }
+    FFPROBE_STREAM_CACHE[cache_key] = set(stream_types)
+    if len(FFPROBE_STREAM_CACHE) > FFPROBE_STREAM_CACHE_MAX:
+        FFPROBE_STREAM_CACHE.pop(next(iter(FFPROBE_STREAM_CACHE)))
+    return stream_types
 
 
 def _source_media_type(record: dict, source_path: Optional[Path] = None) -> str:
@@ -729,6 +744,16 @@ def _source_media_content_type(record: dict, source_path: Path) -> str:
     if suffix == ".webm":
         return "video/webm" if media_kind == "video" else "audio/webm"
     return SUPPORTED_MEDIA_FORMATS.get(suffix, "application/octet-stream")
+
+
+def _meeting_records_with_source_media_type(records: list[dict]) -> list[dict]:
+    resolved_records: list[dict] = []
+    for record in records:
+        item = dict(record)
+        if not item.get("source_media_type"):
+            item["source_media_type"] = _source_media_type(item)
+        resolved_records.append(item)
+    return resolved_records
 
 
 @app.get(
@@ -954,7 +979,9 @@ async def list_all_meetings(
     needs_review: bool = False
 ):
     """取得所有歷史會議記錄清單（依時間倒序，支援分頁）"""
-    records = list_meetings(limit=limit, offset=offset, needs_review=needs_review)
+    records = _meeting_records_with_source_media_type(
+        list_meetings(limit=limit, offset=offset, needs_review=needs_review)
+    )
     total = count_meetings(needs_review=needs_review)
     return MeetingListResponse(total=total, records=records)
 
@@ -967,7 +994,9 @@ async def list_all_meetings(
 )
 async def api_search_meetings(q: str, needs_review: bool = False, limit: int = 50):
     """搜尋標題、音檔、摘要與完整 Markdown 逐字稿內容"""
-    records = search_meetings(q, limit=limit, needs_review=needs_review)
+    records = _meeting_records_with_source_media_type(
+        search_meetings(q, limit=limit, needs_review=needs_review)
+    )
     return records
 
 
