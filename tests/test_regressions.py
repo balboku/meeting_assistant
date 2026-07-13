@@ -3438,6 +3438,10 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("min-width: 0; max-width: 100%;", html)
         self.assertIn(".detail-actions .btn-primary", html)
         self.assertIn("white-space: nowrap;", html)
+        self.assertIn(".source-storage-preview-header", html)
+        self.assertIn(".source-storage-preview-actions", html)
+        self.assertIn(".source-storage-item", html)
+        self.assertIn("align-items: stretch;", html)
 
     def test_web_ui_can_record_screen_audio_with_toggleable_microphone(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
