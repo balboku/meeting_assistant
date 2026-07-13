@@ -618,7 +618,11 @@ def _source_media_archive(limit: int = 100) -> SourceMediaArchiveResponse:
     total_files = 0
     total_bytes = 0
     try:
-        date_dirs = [entry for entry in archive_root.iterdir() if entry.is_dir() and re.fullmatch(r"\d{8}", entry.name)]
+        date_dirs = [
+            entry
+            for entry in archive_root.iterdir()
+            if entry.is_dir() and re.fullmatch(r"\d{8}", entry.name)
+        ]
     except OSError:
         date_dirs = []
 
@@ -661,6 +665,41 @@ def _source_media_archive(limit: int = 100) -> SourceMediaArchiveResponse:
         total_bytes=total_bytes,
         files=sorted_files,
     )
+
+
+def _source_media_archive_storage_stats() -> tuple[int, int]:
+    archive_root = _source_media_archive_root()
+    count = 0
+    total_bytes = 0
+    try:
+        date_dirs = [
+            entry
+            for entry in archive_root.iterdir()
+            if entry.is_dir() and re.fullmatch(r"\d{8}", entry.name)
+        ]
+    except OSError:
+        return 0, 0
+
+    for date_dir in date_dirs:
+        try:
+            entries = list(date_dir.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.startswith("."):
+                continue
+            original_name = _archive_original_name(entry.name)
+            if Path(original_name).suffix.lower() not in SUPPORTED_MEDIA_FORMATS:
+                continue
+            try:
+                if not entry.is_file():
+                    continue
+                stat = entry.stat()
+            except OSError:
+                continue
+            count += 1
+            total_bytes += int(stat.st_size)
+    return count, total_bytes
 
 
 def _restore_source_media_archive(archive_id: str) -> SourceMediaRestoreResponse:
@@ -724,12 +763,15 @@ def _storage_metrics() -> StorageMetrics:
         set(SUPPORTED_MEDIA_FORMATS),
         largest_limit=5,
     )
+    archive_count, archive_bytes = _source_media_archive_storage_stats()
     markdown_count, markdown_bytes, _, _, _ = _directory_file_stats(OUTPUT_DIR, {".md"})
     return StorageMetrics(
         source_media_files=source_count,
         source_media_bytes=source_bytes,
         source_media_unlinked_files=source_unlinked_count,
         source_media_unlinked_bytes=source_unlinked_bytes,
+        source_media_archived_files=archive_count,
+        source_media_archived_bytes=archive_bytes,
         source_media_largest_files=source_largest_files,
         meeting_markdown_files=markdown_count,
         meeting_markdown_bytes=markdown_bytes,

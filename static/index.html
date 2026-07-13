@@ -1342,10 +1342,13 @@ function formatBytes(bytes = 0) {
   return `${value} B`;
 }
 
-function sourceStorageTitle(sourceFiles = 0, sourceBytes = 0, unlinkedFiles = 0, unlinkedBytes = 0, largestFiles = []) {
+function sourceStorageTitle(sourceFiles = 0, sourceBytes = 0, unlinkedFiles = 0, unlinkedBytes = 0, largestFiles = [], archivedFiles = 0, archivedBytes = 0) {
   const lines = [`原始錄音/錄影：${sourceFiles} 個檔案，${formatBytes(sourceBytes)}`];
   if (unlinkedFiles > 0) {
     lines.push(`未連結原始檔：${unlinkedFiles} 個，${formatBytes(unlinkedBytes)}`);
+  }
+  if (archivedFiles > 0) {
+    lines.push(`已移除備份：${archivedFiles} 個 / ${formatBytes(archivedBytes)}`);
   }
   const largest = Array.isArray(largestFiles) ? largestFiles.slice(0, 5) : [];
   if (largest.length) {
@@ -2517,9 +2520,13 @@ async function loadMetrics() {
     const sourceBytes = Number(storage.source_media_bytes || 0);
     const unlinkedFiles = Number(storage.source_media_unlinked_files || 0);
     const unlinkedBytes = Number(storage.source_media_unlinked_bytes || 0);
+    const archivedFiles = Number(storage.source_media_archived_files || 0);
+    const archivedBytes = Number(storage.source_media_archived_bytes || 0);
+    const totalManagedBytes = sourceBytes + archivedBytes;
+    const managedFileLabel = archivedFiles > 0 ? `${sourceFiles}+${archivedFiles}` : `${sourceFiles}`;
     const sourceLargestFiles = storage.source_media_largest_files || [];
-    sourceStorageEl.textContent = `${sourceFiles} / ${formatBytes(sourceBytes)}`;
-    sourceStorageTile.title = sourceStorageTitle(sourceFiles, sourceBytes, unlinkedFiles, unlinkedBytes, sourceLargestFiles);
+    sourceStorageEl.textContent = `${managedFileLabel} / ${formatBytes(totalManagedBytes)}`;
+    sourceStorageTile.title = sourceStorageTitle(sourceFiles, sourceBytes, unlinkedFiles, unlinkedBytes, sourceLargestFiles, archivedFiles, archivedBytes);
     averageEl.textContent = data.jobs?.average_completed_seconds == null
       ? '–'
       : `${data.jobs.average_completed_seconds}s`;

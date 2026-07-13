@@ -2223,6 +2223,7 @@ class MetricsRegressionTests(unittest.TestCase):
                 hidden_delete_response = asgi_request(main.app, "DELETE", "/source-media/inventory/.upload_tmp.mp3")
                 delete_response = asgi_request(main.app, "DELETE", "/source-media/inventory/meeting-c.m4a")
                 post_delete_inventory_response = asgi_request(main.app, "GET", "/source-media/inventory?limit=10")
+                post_delete_metrics_response = asgi_request(main.app, "GET", "/metrics")
                 deleted_file_exists = (source_dir / "meeting-c.m4a").exists()
                 deleted_backup_path = Path(delete_response.json().get("backup_path", ""))
                 deleted_backup_exists = deleted_backup_path.is_file()
@@ -2248,6 +2249,7 @@ class MetricsRegressionTests(unittest.TestCase):
                     params={"archive_id": restore_archive_id},
                 )
                 post_restore_inventory_response = asgi_request(main.app, "GET", "/source-media/inventory?limit=10")
+                post_restore_metrics_response = asgi_request(main.app, "GET", "/metrics")
                 restored_file_exists = (source_dir / "meeting-c.m4a").is_file()
                 restored_backup_exists = deleted_backup_path.exists()
 
@@ -2257,6 +2259,8 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual(storage["source_media_bytes"], len(b"audio-a") + len(b"video-bb") + len(b"ccc"))
         self.assertEqual(storage["source_media_unlinked_files"], 1)
         self.assertEqual(storage["source_media_unlinked_bytes"], len(b"ccc"))
+        self.assertEqual(storage["source_media_archived_files"], 0)
+        self.assertEqual(storage["source_media_archived_bytes"], 0)
         self.assertEqual(
             [item["name"] for item in storage["source_media_largest_files"][:3]],
             ["meeting-b.webm", "meeting-a.mp3", "meeting-c.m4a"],
@@ -2301,6 +2305,9 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual(post_delete_inventory["total_files"], 2)
         self.assertEqual(post_delete_inventory["unlinked_files"], 0)
         self.assertEqual([item["name"] for item in post_delete_inventory["files"]], ["meeting-b.webm", "meeting-a.mp3"])
+        post_delete_storage = post_delete_metrics_response.json()["storage"]
+        self.assertEqual(post_delete_storage["source_media_archived_files"], 1)
+        self.assertEqual(post_delete_storage["source_media_archived_bytes"], len(b"ccc"))
         self.assertEqual(archive_response.status_code, 200)
         archive_payload = archive_response.json()
         self.assertEqual(archive_payload["total_files"], 1)
@@ -2320,6 +2327,9 @@ class MetricsRegressionTests(unittest.TestCase):
         post_restore_inventory = post_restore_inventory_response.json()
         self.assertEqual(post_restore_inventory["total_files"], 3)
         self.assertEqual(post_restore_inventory["unlinked_files"], 1)
+        post_restore_storage = post_restore_metrics_response.json()["storage"]
+        self.assertEqual(post_restore_storage["source_media_archived_files"], 0)
+        self.assertEqual(post_restore_storage["source_media_archived_bytes"], 0)
 
     def test_metrics_endpoint_reports_ngrok_status(self):
         self._isolated_database()
@@ -3251,8 +3261,13 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("storage.source_media_bytes", html)
         self.assertIn("storage.source_media_unlinked_files", html)
         self.assertIn("storage.source_media_unlinked_bytes", html)
+        self.assertIn("storage.source_media_archived_files", html)
+        self.assertIn("storage.source_media_archived_bytes", html)
         self.assertIn("storage.source_media_largest_files", html)
         self.assertIn("function sourceStorageTitle", html)
+        self.assertIn("totalManagedBytes", html)
+        self.assertIn("managedFileLabel", html)
+        self.assertIn("已移除備份", html)
         self.assertIn("最大檔案：", html)
         self.assertIn("未連結原始檔：", html)
         self.assertIn("file.linked_meeting_title", html)

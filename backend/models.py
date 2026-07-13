@@ -135,6 +135,8 @@ class StorageMetrics(BaseModel):
     source_media_bytes: int
     source_media_unlinked_files: int = 0
     source_media_unlinked_bytes: int = 0
+    source_media_archived_files: int = 0
+    source_media_archived_bytes: int = 0
     source_media_largest_files: list[StorageFileMetric] = Field(default_factory=list)
     meeting_markdown_files: int
     meeting_markdown_bytes: int
