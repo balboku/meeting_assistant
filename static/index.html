@@ -613,6 +613,26 @@
       border-color: var(--red);
       background: rgba(247,118,142,0.16);
     }
+    .source-media-player-status {
+      display: none;
+      padding: 9px 10px;
+      border: 1px solid rgba(224,175,104,0.35);
+      border-radius: 6px;
+      background: rgba(224,175,104,0.08);
+      color: var(--yellow);
+      font-size: 12px;
+      line-height: 1.5;
+      overflow-wrap: break-word;
+      word-break: keep-all;
+    }
+    .source-media-player-status.show {
+      display: block;
+    }
+    .source-media-player-status.error {
+      border-color: rgba(247,118,142,0.45);
+      background: rgba(247,118,142,0.08);
+      color: var(--red);
+    }
     .source-storage-summary {
       display: flex;
       flex-wrap: wrap;
@@ -1624,7 +1644,8 @@ function previewSourceMedia(url = '', mediaType = '', name = '') {
         <button type="button" class="source-media-action" onclick="closeSourceMediaPreview()">關閉</button>
       </div>
     </div>
-    ${player}`;
+    ${player}
+    <div class="source-media-player-status" aria-live="polite"></div>`;
   preview.classList.add('show');
   enhanceSourceStoragePreviewPlayer(preview);
   preview.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -2585,6 +2606,7 @@ function renderAudioEvidence(meeting, requestedMode = null) {
       </div>
       ${renderSourceMediaFacts(meeting)}
       <video id="source-media-player" controls preload="metadata" playsinline src="${sourceUrl}"></video>
+      <div id="source-media-player-status" class="source-media-player-status" aria-live="polite"></div>
     </div>`;
   }
   return `<div id="source-media-evidence" class="audio-evidence media-audio">
@@ -2594,6 +2616,7 @@ function renderAudioEvidence(meeting, requestedMode = null) {
     </div>
     ${renderSourceMediaFacts(meeting)}
     <audio id="source-media-player" controls preload="metadata" src="${sourceUrl}"></audio>
+    <div id="source-media-player-status" class="source-media-player-status" aria-live="polite"></div>
   </div>`;
 }
 
@@ -2622,14 +2645,58 @@ function primeSourceVideoPreview(video) {
   }
 }
 
+function setSourceMediaPlayerStatus(statusEl, message = '', level = 'warning') {
+  if (!statusEl) return;
+  statusEl.textContent = message;
+  statusEl.classList.toggle('show', Boolean(message));
+  statusEl.classList.toggle('error', level === 'error' && Boolean(message));
+}
+
+function updateSourceMediaPlayerStatus(player, statusEl) {
+  if (!player || !statusEl) return;
+  const isVideo = player.tagName === 'VIDEO';
+  const label = isVideo ? '影片' : '音訊';
+  if (player.error) {
+    setSourceMediaPlayerStatus(
+      statusEl,
+      `${label}無法在瀏覽器中預覽，請使用「新分頁」或「下載」確認原始檔。`,
+      'error'
+    );
+    return;
+  }
+  if (isVideo && player.readyState >= 1 && (!player.videoWidth || !player.videoHeight)) {
+    setSourceMediaPlayerStatus(
+      statusEl,
+      '此原始錄影沒有偵測到可顯示的畫面，可能只有音訊軌，或瀏覽器不支援此影片軌。請使用「新分頁」或「下載」確認原始檔。',
+      'warning'
+    );
+    return;
+  }
+  setSourceMediaPlayerStatus(statusEl);
+}
+
+function bindSourceMediaPlayerStatus(player, statusEl) {
+  if (!player || !statusEl || player.dataset.statusBound === '1') return;
+  player.dataset.statusBound = '1';
+  const sync = () => updateSourceMediaPlayerStatus(player, statusEl);
+  ['loadedmetadata', 'canplay', 'error', 'stalled', 'emptied'].forEach(eventName => {
+    player.addEventListener(eventName, sync);
+  });
+  sync();
+}
+
 function enhanceSourceMediaPlayer() {
   const player = document.getElementById('source-media-player');
+  const statusEl = document.getElementById('source-media-player-status');
   if (player?.tagName === 'VIDEO') primeSourceVideoPreview(player);
+  bindSourceMediaPlayerStatus(player, statusEl);
 }
 
 function enhanceSourceStoragePreviewPlayer(preview = document.getElementById('source-storage-preview')) {
-  const player = preview?.querySelector('video.source-storage-media-player');
+  const player = preview?.querySelector('video.source-storage-media-player, audio');
+  const statusEl = preview?.querySelector('.source-media-player-status');
   if (player?.tagName === 'VIDEO') primeSourceVideoPreview(player);
+  bindSourceMediaPlayerStatus(player, statusEl);
 }
 
 function openSummaryEditor() {
