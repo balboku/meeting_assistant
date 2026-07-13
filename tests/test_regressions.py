@@ -3487,6 +3487,7 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("async function refreshSourceStorageInventory", html)
         self.assertIn("function resetSourceStorageFilters", html)
         self.assertIn("function renderSourceStorageInventory", html)
+        self.assertIn("function renderSourceStorageInventory() {\n  const list = document.getElementById('source-storage-list');\n  if (!list || !sourceStorageInventoryState.loaded) return;\n  closeSourceMediaPreview();", html)
         self.assertIn("sourceStorageInventoryState = {", html)
         self.assertIn("loadedAt: new Date().toISOString()", html)
         self.assertIn("renderSourceStorageInventory();", html)

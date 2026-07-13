@@ -1849,6 +1849,7 @@ function syncSourceStorageLoadMoreButton() {
 function renderSourceStorageInventory() {
   const list = document.getElementById('source-storage-list');
   if (!list || !sourceStorageInventoryState.loaded) return;
+  closeSourceMediaPreview();
   const searchValue = document.getElementById('source-storage-search')?.value || '';
   const filter = document.getElementById('source-storage-filter')?.value || 'all';
   const mediaFilter = document.getElementById('source-storage-media-filter')?.value || 'all';
