@@ -3788,8 +3788,16 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("BASE_URL", script)
         self.assertIn("/history", script)
         self.assertIn("ops-dashboard", script)
+        self.assertIn("/upload-media", script)
+        self.assertNotIn("/upload-audio", script)
         self.assertIn("fake.mp3", script)
         self.assertIn("415", script)
+
+    def test_desktop_gui_client_uses_primary_media_upload_endpoint(self):
+        client_source = (ROOT / "gui" / "api_client.py").read_text(encoding="utf-8")
+
+        self.assertIn("/upload-media", client_source)
+        self.assertNotIn("/upload-audio", client_source)
 
     def test_python_docx_is_declared_as_runtime_dependency(self):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")

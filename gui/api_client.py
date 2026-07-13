@@ -31,7 +31,7 @@ class MeetingAPIClient:
                 p = Path(audio_path)
                 with open(p, "rb") as f:
                     resp = requests.post(
-                        f"{BACKEND_URL}/upload-audio",
+                        f"{BACKEND_URL}/upload-media",
                         files={"file": (p.name, f, "audio/wav")},
                         data={"title": meeting_title},
                         timeout=30,

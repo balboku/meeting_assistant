@@ -18,7 +18,7 @@ upload_status="$(
     printf '<html>not audio</html>' |
         curl -sS -o "$tmp_dir/fake-upload.json" -w '%{http_code}' \
             -F 'file=@-;filename=fake.mp3;type=audio/mpeg' \
-            "$BASE_URL/upload-audio"
+            "$BASE_URL/upload-media"
 )"
 
 if [ "$upload_status" != "415" ]; then
