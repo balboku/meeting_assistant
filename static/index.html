@@ -600,7 +600,7 @@
     }
     .source-storage-controls {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(150px, 200px) minmax(150px, 200px);
+      grid-template-columns: minmax(0, 1fr) repeat(3, minmax(140px, 180px));
       gap: 10px;
       margin-bottom: 12px;
     }
@@ -1324,6 +1324,12 @@
         <option value="audio">只看音訊</option>
         <option value="unknown">未知類型</option>
       </select>
+      <select id="source-storage-sort" class="form-input" onchange="renderSourceStorageInventory()">
+        <option value="modified_desc">最近更新</option>
+        <option value="bytes_desc">容量大到小</option>
+        <option value="name_asc">檔名 A-Z</option>
+        <option value="name_desc">檔名 Z-A</option>
+      </select>
     </div>
     <div id="source-storage-preview" class="source-storage-preview" aria-live="polite"></div>
     <div id="source-storage-list" class="source-storage-list" aria-live="polite"></div>
@@ -1637,6 +1643,22 @@ function sourceStorageMediaTypeMatches(file, mediaFilter) {
   return true;
 }
 
+function sourceStorageSortFiles(files, sortMode) {
+  const sorted = [...files];
+  const filename = file => String(file.name || file.archived_name || '').toLowerCase();
+  const modifiedAt = file => Date.parse(file.modified_at || '') || 0;
+  if (sortMode === 'name_asc') {
+    return sorted.sort((a, b) => filename(a).localeCompare(filename(b), 'zh-Hant'));
+  }
+  if (sortMode === 'name_desc') {
+    return sorted.sort((a, b) => filename(b).localeCompare(filename(a), 'zh-Hant'));
+  }
+  if (sortMode === 'bytes_desc') {
+    return sorted.sort((a, b) => Number(b.bytes || 0) - Number(a.bytes || 0));
+  }
+  return sorted.sort((a, b) => modifiedAt(b) - modifiedAt(a));
+}
+
 function sourceStorageRowsHtml(title, rows, renderer, emptyIcon, emptyText) {
   const body = rows.length
     ? rows.map(renderer).join('')
@@ -1650,16 +1672,23 @@ function renderSourceStorageInventory() {
   const searchValue = document.getElementById('source-storage-search')?.value || '';
   const filter = document.getElementById('source-storage-filter')?.value || 'all';
   const mediaFilter = document.getElementById('source-storage-media-filter')?.value || 'all';
+  const sortMode = document.getElementById('source-storage-sort')?.value || 'modified_desc';
   const payload = sourceStorageInventoryState.payload || {};
   const archivePayload = sourceStorageInventoryState.archivePayload || {};
-  const liveFiles = sourceStorageInventoryState.files
-    .filter(file => sourceStorageFileMatches(file, searchValue))
-    .filter(file => sourceStorageLiveFilterMatches(file, filter))
-    .filter(file => sourceStorageMediaTypeMatches(file, mediaFilter));
+  const liveFiles = sourceStorageSortFiles(
+    sourceStorageInventoryState.files
+      .filter(file => sourceStorageFileMatches(file, searchValue))
+      .filter(file => sourceStorageLiveFilterMatches(file, filter))
+      .filter(file => sourceStorageMediaTypeMatches(file, mediaFilter)),
+    sortMode
+  );
   const archivedFiles = ['all', 'archive'].includes(filter)
-    ? sourceStorageInventoryState.archivedFiles
-        .filter(file => sourceStorageFileMatches(file, searchValue))
-        .filter(file => sourceStorageMediaTypeMatches(file, mediaFilter))
+    ? sourceStorageSortFiles(
+        sourceStorageInventoryState.archivedFiles
+          .filter(file => sourceStorageFileMatches(file, searchValue))
+          .filter(file => sourceStorageMediaTypeMatches(file, mediaFilter)),
+        sortMode
+      )
     : [];
   const archiveRetentionLabel = sourceArchiveRetentionLabel();
   const shownCount = liveFiles.length + archivedFiles.length;
