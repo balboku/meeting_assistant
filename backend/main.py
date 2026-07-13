@@ -620,6 +620,28 @@ async def source_media_inventory(limit: int = Query(100, ge=1, le=500)):
     return _source_media_inventory(limit=limit)
 
 
+@app.get(
+    "/source-media/inventory/{filename}",
+    summary="播放或下載原始媒體檔",
+    tags=["系統"],
+    responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}, 415: {"model": ErrorResponse}},
+)
+async def get_source_media_inventory_file(
+    filename: str,
+    download: bool = Query(False, description="設為 true 時以下載附件形式回傳原始檔。"),
+):
+    """Return a retained source media file from the maintenance inventory."""
+    source_path = _source_media_file_by_name(filename)
+    media_type = _source_media_content_type({"source_audio": source_path.name, "quality_report": {}}, source_path)
+    return FileResponse(
+        path=source_path,
+        filename=source_path.name,
+        media_type=media_type,
+        headers={"Accept-Ranges": "bytes"},
+        content_disposition_type="attachment" if download else "inline",
+    )
+
+
 @app.delete(
     "/source-media/inventory/{filename}",
     response_model=SourceMediaDeleteResponse,
