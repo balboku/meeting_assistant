@@ -1055,6 +1055,10 @@
       font-family: inherit; font-size: 14px; outline: none;
     }
     .form-input:focus { border-color: var(--blue); }
+    .form-input:disabled {
+      opacity: 0.62;
+      cursor: not-allowed;
+    }
 
     .modal-footer { display: flex; justify-content: flex-end; gap: 12px; margin-top: 32px; }
     .modal-wide { max-width: min(1040px, calc(100vw - 32px)); }

@@ -3761,6 +3761,7 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("document.getElementById('rec-quality-profile').disabled = locked", html)
         self.assertIn("function setRecordingSubmissionLocked", html)
         self.assertIn("document.getElementById('rec-title').disabled = locked", html)
+        self.assertIn(".form-input:disabled", html)
         self.assertIn("if (document.getElementById('rec-quality-profile').disabled) return;", html)
         self.assertIn("function recordingModeLabel", html)
         self.assertIn("function recordingPermissionHint", html)
