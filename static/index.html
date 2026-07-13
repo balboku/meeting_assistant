@@ -1485,7 +1485,7 @@
         <option value="audio_compact">省容量語音</option>
         <option value="video_balanced">錄影平衡</option>
       </select>
-      <div class="rec-size-estimate" id="rec-size-estimate">每小時預估容量：載入中…</div>
+      <div class="rec-size-estimate" id="rec-size-estimate" aria-live="polite">每小時預估容量：載入中…</div>
     </div>
 
     <!-- 錄影預覽（錄影模式才顯示） -->
@@ -1496,7 +1496,7 @@
 
     <!-- 計時器 -->
     <div class="rec-timer" id="rec-timer">00:00</div>
-    <div class="rec-status" id="rec-status">準備就緒，按下開始錄製</div>
+    <div class="rec-status" id="rec-status" role="status" aria-live="polite">準備就緒，按下開始錄製</div>
 
     <!-- 標題 -->
     <div class="form-group" style="margin-bottom: 16px;">
@@ -3735,6 +3735,38 @@ function releaseRecordingStreams() {
   recMicMuted = false;
 }
 
+function restoreRecorderAfterStartFailure() {
+  mediaRecorder = null;
+  recordedChunks = [];
+  recScreenAudioCaptured = false;
+  recScreenMicCaptured = false;
+  recMicAudioTracks = [];
+  recMicMuted = false;
+  recSeconds = 0;
+  if (recTimerInterval) {
+    clearInterval(recTimerInterval);
+    recTimerInterval = null;
+  }
+  if (recAnimFrame) {
+    cancelAnimationFrame(recAnimFrame);
+    recAnimFrame = null;
+  }
+  if (audioCtx) {
+    audioCtx.close().catch(err => console.warn('Unable to close audio context after recording start failure.', err));
+    audioCtx = null;
+  }
+  recTimerEl.textContent = '00:00';
+  recTimerEl.style.color = '';
+  recStatusEl.textContent = '錄製未開始，請重新確認權限後再試';
+  btnRecStart.style.display = 'flex';
+  btnRecStop.classList.remove('show');
+  btnRecMic.classList.remove('show');
+  btnRecMic.setAttribute('aria-pressed', 'false');
+  btnRecMic.textContent = '🎙 關閉麥克風';
+  recPreview.srcObject = null;
+  recPreview.classList.remove('show');
+}
+
 async function mixAudioTracks(audioTracks, sampleRate) {
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   if (!audioTracks.length || !AudioContextClass) {
@@ -4000,9 +4032,11 @@ async function startRecording() {
 
   } catch (err) {
     releaseRecordingStreams();
+    restoreRecorderAfterStartFailure();
     activeRecordingMode = null;
     activeRecordingProfileId = null;
     setRecordingConfigurationLocked(false);
+    setRecordingSubmissionLocked(false);
     alert(`無法開始錄製：${err.message}\n\n${recordingPermissionHint()}`);
   }
 }
