@@ -3578,6 +3578,12 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("function updateUploadAcceptList", html)
         self.assertIn("input.accept = extensions.length ? extensions.join(',') : FALLBACK_UPLOAD_ACCEPT", html)
         self.assertIn("updateUploadAcceptList()", html)
+        self.assertIn("function uploadFileExtension", html)
+        self.assertIn("function isSupportedUploadFile", html)
+        self.assertIn("function uploadUnsupportedMessage", html)
+        self.assertIn("if (!isSupportedUploadFile(file))", html)
+        self.assertIn("if (!isSupportedUploadFile(selectedFile))", html)
+        self.assertIn("不支援的媒體格式", html)
 
     def test_web_ui_has_readable_api_errors_and_job_event_timeline(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")

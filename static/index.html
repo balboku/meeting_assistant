@@ -2030,6 +2030,29 @@ function updateUploadAcceptList() {
   input.accept = extensions.length ? extensions.join(',') : FALLBACK_UPLOAD_ACCEPT;
 }
 
+function uploadFileExtension(file) {
+  const name = String(file?.name || '').trim().toLowerCase();
+  const dotIndex = name.lastIndexOf('.');
+  return dotIndex > -1 ? name.slice(dotIndex) : '';
+}
+
+function supportedUploadExtensionsLabel() {
+  return supportedUploadExtensions()
+    .map(ext => ext.replace('.', ''))
+    .join(', ');
+}
+
+function isSupportedUploadFile(file) {
+  const extension = uploadFileExtension(file);
+  return Boolean(extension) && supportedUploadExtensions().includes(extension);
+}
+
+function uploadUnsupportedMessage(file) {
+  const extension = uploadFileExtension(file) || '無副檔名';
+  const supported = supportedUploadExtensionsLabel() || '常見音訊/影片格式';
+  return `不支援的媒體格式：${extension}。請上傳 ${supported}。`;
+}
+
 async function loadRuntimeConfig() {
   try {
     const res = await fetch(`${API}/config`);
@@ -3171,6 +3194,11 @@ fileInput.addEventListener('change', e => {
 function handleFileSelect(file) {
   selectedFile = file;
   const sizeText = formatBytes(file.size);
+  if (!isSupportedUploadFile(file)) {
+    fileNameDisplay.textContent = uploadUnsupportedMessage(file);
+    fileNameDisplay.style.color = 'var(--red)';
+    return;
+  }
   if (selectedFile.size > runtimeConfig.max_upload_bytes) {
     fileNameDisplay.textContent = `檔案過大：${file.name}（${sizeText}），上限 ${formatBytes(runtimeConfig.max_upload_bytes)}`;
     fileNameDisplay.style.color = 'var(--red)';
@@ -3183,6 +3211,10 @@ function handleFileSelect(file) {
 async function startUpload() {
   if (!selectedFile) {
     alert("請先選擇一個音檔！");
+    return;
+  }
+  if (!isSupportedUploadFile(selectedFile)) {
+    alert(uploadUnsupportedMessage(selectedFile));
     return;
   }
   if (selectedFile.size > runtimeConfig.max_upload_bytes) {
