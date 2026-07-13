@@ -2388,7 +2388,7 @@ function isVideoSource(meeting) {
   if (sourceType === 'video') return true;
   if (sourceType === 'audio') return false;
   const videoExtensions = new Set(['.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);
-  const profile = meeting?.quality_report?.recording?.profile || '';
+  const profile = meeting?.recording_profile || meeting?.quality_report?.recording?.profile || '';
   const extension = sourceMediaExtension(meeting);
   if (profile === 'video_balanced') return true;
   if (['audio_standard', 'audio_compact'].includes(profile)) return false;

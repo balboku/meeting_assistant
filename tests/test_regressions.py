@@ -4643,6 +4643,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("⬇ 下載", html)
         self.assertIn("function isVideoSource", html)
         self.assertIn("source_media_type", html)
+        self.assertIn("meeting?.recording_profile || meeting?.quality_report?.recording?.profile", html)
         self.assertIn("new Set(['.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv'])", html)
         self.assertIn("<video id=\"source-media-player\"", html)
         self.assertIn("display: grid;", html)
