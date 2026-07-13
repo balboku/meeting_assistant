@@ -1579,6 +1579,8 @@ function previewSourceMedia(url = '', mediaType = '', name = '') {
   const preview = document.getElementById('source-storage-preview');
   if (!preview || !url) return;
   const safeUrl = escapeHtml(url);
+  const downloadUrl = url.includes('?') ? `${url}&download=1` : `${url}?download=1`;
+  const safeDownloadUrl = escapeHtml(downloadUrl);
   const safeName = escapeHtml(name || '原始檔');
   const resolvedMediaType = sourceStorageMediaType({ name, source_media_type: mediaType });
   const isVideo = resolvedMediaType === 'video';
@@ -1593,6 +1595,7 @@ function previewSourceMedia(url = '', mediaType = '', name = '') {
       <div class="source-storage-preview-title">${mediaTitle}：${safeName}</div>
       <div class="source-storage-preview-actions">
         <a class="source-media-action" href="${safeUrl}" target="_blank" rel="noopener noreferrer">新分頁</a>
+        <a class="source-media-action" href="${safeDownloadUrl}" download>下載</a>
         <button type="button" class="source-media-action" onclick="closeSourceMediaPreview()">關閉</button>
       </div>
     </div>
