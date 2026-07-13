@@ -615,6 +615,17 @@
       align-self: stretch;
       white-space: nowrap;
     }
+    .source-storage-status {
+      min-height: 18px;
+      margin: -2px 0 12px;
+      color: var(--text-dim);
+      font-size: 12px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+    .source-storage-status.error {
+      color: var(--red);
+    }
     .source-storage-preview {
       display: none;
       margin-bottom: 12px;
@@ -1339,6 +1350,7 @@
       <button id="source-storage-refresh" type="button" class="source-media-action source-storage-refresh" onclick="refreshSourceStorageInventory()">更新</button>
       <button id="source-storage-reset" type="button" class="source-media-action source-storage-reset" onclick="resetSourceStorageFilters()">清除</button>
     </div>
+    <div id="source-storage-status" class="source-storage-status" aria-live="polite"></div>
     <div id="source-storage-preview" class="source-storage-preview" aria-live="polite"></div>
     <div id="source-storage-list" class="source-storage-list" aria-live="polite"></div>
     <div class="modal-footer">
@@ -1444,6 +1456,7 @@ let sourceStorageInventoryState = {
   archivedFiles: [],
   payload: {},
   archivePayload: {},
+  loadedAt: null,
   loaded: false
 };
 
@@ -1495,6 +1508,13 @@ function closeSourceMediaPreview() {
   if (!preview) return;
   preview.classList.remove('show');
   preview.innerHTML = '';
+}
+
+function setSourceStorageStatus(message = '', isError = false) {
+  const status = document.getElementById('source-storage-status');
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle('error', Boolean(isError));
 }
 
 function previewSourceMedia(url = '', mediaType = '', name = '') {
@@ -1768,6 +1788,7 @@ async function openSourceStorageInventory() {
   closeSourceMediaPreview();
   sourceStorageInventoryState.loaded = false;
   list.innerHTML = '<div class="detail-placeholder"><div class="loading-spinner"></div><p>載入原始檔清單...</p></div>';
+  setSourceStorageStatus('正在更新原始檔清單...');
 
   try {
     const [res, archiveRes] = await Promise.all([
@@ -1785,11 +1806,16 @@ async function openSourceStorageInventory() {
       archivedFiles,
       payload,
       archivePayload,
+      loadedAt: new Date().toISOString(),
       loaded: true
     };
     renderSourceStorageInventory();
+    setSourceStorageStatus(
+      `最後更新：${formatDate(sourceStorageInventoryState.loadedAt)}；目前載入 ${files.length + archivedFiles.length} 個項目`
+    );
   } catch (err) {
     sourceStorageInventoryState.loaded = false;
+    setSourceStorageStatus(`更新失敗：${err.message}`, true);
     list.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>無法讀取原始檔清單：${escapeHtml(err.message)}</p></div>`;
   }
 }
