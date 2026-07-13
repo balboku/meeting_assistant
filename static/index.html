@@ -1642,7 +1642,11 @@ function sourceStorageMediaType(file = {}) {
   return '';
 }
 
-function previewSourceMedia(url = '', mediaType = '', name = '') {
+function sourceStorageAudioFallbackCapable(file = {}) {
+  return sourceStorageMediaType(file) === 'video' && sourceStorageExtension(file) === '.webm';
+}
+
+function previewSourceMedia(url = '', mediaType = '', name = '', requestedMode = '') {
   const preview = document.getElementById('source-storage-preview');
   if (!preview || !url) return;
   const safeUrl = escapeHtml(url);
@@ -1650,17 +1654,25 @@ function previewSourceMedia(url = '', mediaType = '', name = '') {
   const safeDownloadUrl = escapeHtml(downloadUrl);
   const safeName = escapeHtml(name || '原始檔');
   const resolvedMediaType = sourceStorageMediaType({ name, source_media_type: mediaType });
-  const isVideo = resolvedMediaType === 'video';
-  const mediaTitle = isVideo ? '原始錄影' : resolvedMediaType === 'audio' ? '原始音檔' : '原始檔案';
+  const canAudioFallback = sourceStorageAudioFallbackCapable({ name, source_media_type: mediaType });
+  const playerMode = requestedMode === 'audio' && canAudioFallback ? 'audio' : resolvedMediaType;
+  const isVideo = playerMode === 'video';
+  const mediaTitle = isVideo ? '原始錄影' : playerMode === 'audio' ? '原始音檔' : '原始檔案';
+  const previewToggle = canAudioFallback
+    ? isVideo
+      ? `<button type="button" class="source-media-action" data-source-url="${safeUrl}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${safeName}" data-source-mode="audio" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile, this.dataset.sourceMode)">🔊 音訊預覽</button>`
+      : `<button type="button" class="source-media-action" data-source-url="${safeUrl}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${safeName}" data-source-mode="video" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile, this.dataset.sourceMode)">🎥 影片預覽</button>`
+    : '';
   const player = isVideo
     ? `<video controls preload="metadata" playsinline class="source-storage-media-player" src="${safeUrl}"></video>`
-    : resolvedMediaType === 'audio'
+    : playerMode === 'audio'
       ? `<audio controls preload="metadata" src="${safeUrl}"></audio>`
       : `<div class="source-storage-preview-unsupported">無法判斷此檔案是否可直接預覽，請使用「新分頁」或「下載」開啟。</div>`;
   preview.innerHTML = `
     <div class="source-storage-preview-header">
       <div class="source-storage-preview-title">${mediaTitle}：${safeName}</div>
       <div class="source-storage-preview-actions">
+        ${previewToggle}
         <a class="source-media-action" href="${safeUrl}" target="_blank" rel="noopener noreferrer">新分頁</a>
         <a class="source-media-action" href="${safeDownloadUrl}" download>下載</a>
         <button type="button" class="source-media-action" onclick="closeSourceMediaPreview()">關閉</button>
