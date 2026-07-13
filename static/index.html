@@ -598,6 +598,17 @@
       gap: 8px;
       margin-bottom: 14px;
     }
+    .source-storage-controls {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .source-storage-controls .form-input {
+      min-height: 38px;
+      padding: 9px 12px;
+      margin: 0;
+    }
     .source-storage-preview {
       display: none;
       margin-bottom: 12px;
@@ -848,6 +859,9 @@
       }
       .source-storage-actions {
         justify-content: flex-start;
+      }
+      .source-storage-controls {
+        grid-template-columns: 1fr;
       }
       .app.reading-mode .list-panel { display: none; }
     }
@@ -1296,6 +1310,15 @@
       <div class="modal-title">原始檔清單</div>
       <button class="modal-close" onclick="closeSourceStorageInventory()">×</button>
     </div>
+    <div class="source-storage-controls">
+      <input id="source-storage-search" class="form-input" type="search" placeholder="搜尋檔名或會議" oninput="renderSourceStorageInventory()" />
+      <select id="source-storage-filter" class="form-input" onchange="renderSourceStorageInventory()">
+        <option value="all">全部原始檔</option>
+        <option value="unlinked">未連結會議</option>
+        <option value="linked">已連結會議</option>
+        <option value="archive">已移除備份</option>
+      </select>
+    </div>
     <div id="source-storage-preview" class="source-storage-preview" aria-live="polite"></div>
     <div id="source-storage-list" class="source-storage-list" aria-live="polite"></div>
     <div class="modal-footer">
@@ -1395,6 +1418,13 @@ let runtimeConfig = {
     audio_compact: { audio_bps: 32000, audio_sample_rate: 16000, audio_channels: 1, video_bps: 0, video_fps: 0 },
     video_balanced: { audio_bps: 48000, audio_sample_rate: 24000, audio_channels: 1, video_bps: 1000000, video_fps: 15 }
   }
+};
+let sourceStorageInventoryState = {
+  files: [],
+  archivedFiles: [],
+  payload: {},
+  archivePayload: {},
+  loaded: false
 };
 
 function formatBytes(bytes = 0) {
@@ -1566,12 +1596,92 @@ function renderSourceArchiveFile(file) {
   </div>`;
 }
 
+function sourceStorageSearchText(file) {
+  return [
+    file.name,
+    file.archived_name,
+    file.linked_meeting_title,
+    file.linked_meeting_id,
+    file.source_media_type,
+    formatDate(file.modified_at)
+  ]
+    .filter(value => value !== null && value !== undefined && String(value).trim())
+    .join(' ')
+    .toLowerCase();
+}
+
+function sourceStorageFileMatches(file, query) {
+  const normalizedQuery = String(query || '').trim().toLowerCase();
+  return !normalizedQuery || sourceStorageSearchText(file).includes(normalizedQuery);
+}
+
+function sourceStorageLiveFilterMatches(file, filter) {
+  const meetingId = Number(file.linked_meeting_id || 0);
+  const linked = meetingId > 0 && file.linked_meeting_title;
+  if (filter === 'linked') return linked;
+  if (filter === 'unlinked') return !linked;
+  return filter !== 'archive';
+}
+
+function sourceStorageRowsHtml(title, rows, renderer, emptyIcon, emptyText) {
+  const body = rows.length
+    ? rows.map(renderer).join('')
+    : `<div class="empty-state"><div class="icon">${emptyIcon}</div><p>${emptyText}</p></div>`;
+  return `<div class="source-storage-section-title">${title}</div>${body}`;
+}
+
+function renderSourceStorageInventory() {
+  const list = document.getElementById('source-storage-list');
+  if (!list || !sourceStorageInventoryState.loaded) return;
+  const searchValue = document.getElementById('source-storage-search')?.value || '';
+  const filter = document.getElementById('source-storage-filter')?.value || 'all';
+  const payload = sourceStorageInventoryState.payload || {};
+  const archivePayload = sourceStorageInventoryState.archivePayload || {};
+  const liveFiles = sourceStorageInventoryState.files
+    .filter(file => sourceStorageFileMatches(file, searchValue))
+    .filter(file => sourceStorageLiveFilterMatches(file, filter));
+  const archivedFiles = ['all', 'archive'].includes(filter)
+    ? sourceStorageInventoryState.archivedFiles.filter(file => sourceStorageFileMatches(file, searchValue))
+    : [];
+  const archiveRetentionLabel = sourceArchiveRetentionLabel();
+  const shownCount = liveFiles.length + archivedFiles.length;
+  const summary = `<div class="source-storage-summary">
+    <span class="source-storage-badge">總檔案 ${Number(payload.total_files || 0)} 個</span>
+    <span class="source-storage-badge">總容量 ${formatBytes(payload.total_bytes)}</span>
+    <span class="source-storage-badge unlinked">未連結 ${Number(payload.unlinked_files || 0)} 個 / ${formatBytes(payload.unlinked_bytes)}</span>
+    <span class="source-storage-badge">已移除備份 ${Number(archivePayload.total_files || 0)} 個 / ${formatBytes(archivePayload.total_bytes)}</span>
+    <span class="source-storage-badge">目前顯示 ${shownCount} 個</span>
+    <span class="source-storage-badge">${escapeHtml(archiveRetentionLabel)}</span>
+  </div>`;
+  const sections = [];
+  if (filter !== 'archive') {
+    sections.push(sourceStorageRowsHtml(
+      '目前保留',
+      liveFiles,
+      renderSourceStorageFile,
+      '📁',
+      '沒有符合條件的保留原始錄音/錄影檔。'
+    ));
+  }
+  if (!['linked', 'unlinked'].includes(filter)) {
+    sections.push(sourceStorageRowsHtml(
+      '已移除備份',
+      archivedFiles,
+      renderSourceArchiveFile,
+      '↩',
+      '沒有符合條件的已移除備份。'
+    ));
+  }
+  list.innerHTML = `${summary}${sections.join('')}`;
+}
+
 async function openSourceStorageInventory() {
   const modal = document.getElementById('source-storage-modal');
   const list = document.getElementById('source-storage-list');
   if (!modal || !list) return;
   modal.classList.add('show');
   closeSourceMediaPreview();
+  sourceStorageInventoryState.loaded = false;
   list.innerHTML = '<div class="detail-placeholder"><div class="loading-spinner"></div><p>載入原始檔清單...</p></div>';
 
   try {
@@ -1585,22 +1695,16 @@ async function openSourceStorageInventory() {
     const archivePayload = await archiveRes.json();
     const files = Array.isArray(payload.files) ? payload.files : [];
     const archivedFiles = Array.isArray(archivePayload.files) ? archivePayload.files : [];
-    const archiveRetentionLabel = sourceArchiveRetentionLabel();
-    const summary = `<div class="source-storage-summary">
-      <span class="source-storage-badge">總檔案 ${Number(payload.total_files || 0)} 個</span>
-      <span class="source-storage-badge">總容量 ${formatBytes(payload.total_bytes)}</span>
-      <span class="source-storage-badge unlinked">未連結 ${Number(payload.unlinked_files || 0)} 個 / ${formatBytes(payload.unlinked_bytes)}</span>
-      <span class="source-storage-badge">已移除備份 ${Number(archivePayload.total_files || 0)} 個 / ${formatBytes(archivePayload.total_bytes)}</span>
-      <span class="source-storage-badge">${escapeHtml(archiveRetentionLabel)}</span>
-    </div>`;
-    const rows = files.length
-      ? files.map(renderSourceStorageFile).join('')
-      : '<div class="empty-state"><div class="icon">📁</div><p>目前沒有保留的原始錄音/錄影檔。</p></div>';
-    const archiveRows = archivedFiles.length
-      ? archivedFiles.map(renderSourceArchiveFile).join('')
-      : '<div class="empty-state"><div class="icon">↩</div><p>目前沒有可還原的已移除備份。</p></div>';
-    list.innerHTML = `${summary}<div class="source-storage-section-title">目前保留</div>${rows}<div class="source-storage-section-title">已移除備份</div>${archiveRows}`;
+    sourceStorageInventoryState = {
+      files,
+      archivedFiles,
+      payload,
+      archivePayload,
+      loaded: true
+    };
+    renderSourceStorageInventory();
   } catch (err) {
+    sourceStorageInventoryState.loaded = false;
     list.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>無法讀取原始檔清單：${escapeHtml(err.message)}</p></div>`;
   }
 }
