@@ -731,6 +731,11 @@
       border-color: rgba(125,166,255,0.45);
       background: rgba(125,166,255,0.12);
     }
+    .source-storage-badge.warning {
+      color: var(--yellow);
+      border-color: rgba(224,175,104,0.42);
+      background: rgba(224,175,104,0.08);
+    }
     .source-storage-actions {
       display: flex;
       flex-wrap: wrap;
@@ -1459,6 +1464,7 @@ let sourceStorageInventoryState = {
   loadedAt: null,
   loaded: false
 };
+const SOURCE_STORAGE_FETCH_LIMIT = 500;
 
 function formatBytes(bytes = 0) {
   const value = Number(bytes) || 0;
@@ -1724,6 +1730,20 @@ function sourceStorageRowsHtml(title, rows, renderer, emptyIcon, emptyText) {
   return `<div class="source-storage-section-title">${title}</div>${body}`;
 }
 
+function sourceStorageHiddenCount(totalFiles = 0, loadedFiles = 0) {
+  return Math.max(0, Number(totalFiles || 0) - Number(loadedFiles || 0));
+}
+
+function sourceStorageHiddenNotice(payload = {}, archivePayload = {}, files = [], archivedFiles = []) {
+  const hiddenLive = sourceStorageHiddenCount(payload.total_files, files.length);
+  const hiddenArchive = sourceStorageHiddenCount(archivePayload.total_files, archivedFiles.length);
+  if (!hiddenLive && !hiddenArchive) return '';
+  const parts = [];
+  if (hiddenLive) parts.push(`保留原始檔 ${hiddenLive} 個`);
+  if (hiddenArchive) parts.push(`已移除備份 ${hiddenArchive} 個`);
+  return `尚有未載入：${parts.join('、')}（目前上限 ${SOURCE_STORAGE_FETCH_LIMIT}）`;
+}
+
 function renderSourceStorageInventory() {
   const list = document.getElementById('source-storage-list');
   if (!list || !sourceStorageInventoryState.loaded) return;
@@ -1750,12 +1770,14 @@ function renderSourceStorageInventory() {
     : [];
   const archiveRetentionLabel = sourceArchiveRetentionLabel();
   const shownCount = liveFiles.length + archivedFiles.length;
+  const hiddenNotice = sourceStorageHiddenNotice(payload, archivePayload, sourceStorageInventoryState.files, sourceStorageInventoryState.archivedFiles);
   const summary = `<div class="source-storage-summary">
     <span class="source-storage-badge">總檔案 ${Number(payload.total_files || 0)} 個</span>
     <span class="source-storage-badge">總容量 ${formatBytes(payload.total_bytes)}</span>
     <span class="source-storage-badge unlinked">未連結 ${Number(payload.unlinked_files || 0)} 個 / ${formatBytes(payload.unlinked_bytes)}</span>
     <span class="source-storage-badge">已移除備份 ${Number(archivePayload.total_files || 0)} 個 / ${formatBytes(archivePayload.total_bytes)}</span>
     <span class="source-storage-badge">目前顯示 ${shownCount} 個</span>
+    ${hiddenNotice ? `<span class="source-storage-badge warning">${escapeHtml(hiddenNotice)}</span>` : ''}
     <span class="source-storage-badge">${escapeHtml(archiveRetentionLabel)}</span>
   </div>`;
   const sections = [];
@@ -1792,8 +1814,8 @@ async function openSourceStorageInventory() {
 
   try {
     const [res, archiveRes] = await Promise.all([
-      fetch(`${API}/source-media/inventory?limit=100`),
-      fetch(`${API}/source-media/archive?limit=100`)
+      fetch(`${API}/source-media/inventory?limit=${SOURCE_STORAGE_FETCH_LIMIT}`),
+      fetch(`${API}/source-media/archive?limit=${SOURCE_STORAGE_FETCH_LIMIT}`)
     ]);
     if (!res.ok) throw new Error(await apiErrorMessage(res));
     if (!archiveRes.ok) throw new Error(await apiErrorMessage(archiveRes));
@@ -1810,8 +1832,11 @@ async function openSourceStorageInventory() {
       loaded: true
     };
     renderSourceStorageInventory();
+    const totalLoaded = files.length + archivedFiles.length;
+    const totalAvailable = Number(payload.total_files || 0) + Number(archivePayload.total_files || 0);
+    const hiddenNotice = sourceStorageHiddenNotice(payload, archivePayload, files, archivedFiles);
     setSourceStorageStatus(
-      `最後更新：${formatDate(sourceStorageInventoryState.loadedAt)}；目前載入 ${files.length + archivedFiles.length} 個項目`
+      `最後更新：${formatDate(sourceStorageInventoryState.loadedAt)}；目前載入 ${totalLoaded} / ${totalAvailable} 個項目${hiddenNotice ? `；${hiddenNotice}` : ''}`
     );
   } catch (err) {
     sourceStorageInventoryState.loaded = false;
