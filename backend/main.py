@@ -633,6 +633,34 @@ def _source_media_archive_metadata_bytes(media_path: Path) -> int:
         return 0
 
 
+def _source_media_archive_metadata_media_name(metadata_path: Path) -> Optional[str]:
+    if metadata_path.suffix.lower() != ".json":
+        return None
+    media_name = metadata_path.name[:-len(".json")]
+    if not media_name:
+        return None
+    original_name = _archive_original_name(media_name)
+    if Path(original_name).suffix.lower() not in SUPPORTED_MEDIA_FORMATS:
+        return None
+    return media_name
+
+
+def _source_media_archive_orphan_metadata_bytes(entries: list[Path], media_names: set[str]) -> int:
+    total_bytes = 0
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        media_name = _source_media_archive_metadata_media_name(entry)
+        if not media_name or media_name in media_names:
+            continue
+        try:
+            if entry.is_file():
+                total_bytes += int(entry.stat().st_size)
+        except OSError:
+            continue
+    return total_bytes
+
+
 def _write_source_media_archive_metadata(
     media_path: Path,
     *,
@@ -713,6 +741,13 @@ def _source_media_archive(limit: int = 100, offset: int = 0) -> SourceMediaArchi
             entries = list(date_dir.iterdir())
         except OSError:
             continue
+        media_names = {
+            entry.name
+            for entry in entries
+            if not entry.name.startswith(".")
+            and Path(_archive_original_name(entry.name)).suffix.lower() in SUPPORTED_MEDIA_FORMATS
+        }
+        total_bytes += _source_media_archive_orphan_metadata_bytes(entries, media_names)
         for entry in entries:
             if entry.name.startswith("."):
                 continue
@@ -780,6 +815,13 @@ def _source_media_archive_storage_stats() -> tuple[int, int]:
             entries = list(date_dir.iterdir())
         except OSError:
             continue
+        media_names = {
+            entry.name
+            for entry in entries
+            if not entry.name.startswith(".")
+            and Path(_archive_original_name(entry.name)).suffix.lower() in SUPPORTED_MEDIA_FORMATS
+        }
+        total_bytes += _source_media_archive_orphan_metadata_bytes(entries, media_names)
         for entry in entries:
             if entry.name.startswith("."):
                 continue

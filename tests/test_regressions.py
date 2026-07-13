@@ -2466,6 +2466,40 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertIn("video/webm", archive_file_response.headers.get("content-type", ""))
         self.assertEqual(archive_file_response.content, b"webm-video")
 
+    def test_source_media_archive_counts_orphan_metadata_storage(self):
+        self._isolated_database()
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_dir = root / "source_audio"
+            output_dir = root / "output"
+            archive_dir = root / "backups" / "source_media_deleted" / "20260713"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            archive_dir.mkdir(parents=True)
+            orphan_metadata = archive_dir / "171825_042088_screen.webm.json"
+            orphan_metadata.write_text('{"source_media_type":"video"}', encoding="utf-8")
+            orphan_metadata_bytes = orphan_metadata.stat().st_size
+            ignored_metadata = archive_dir / "manual-note.txt.json"
+            ignored_metadata.write_text("not a source media sidecar", encoding="utf-8")
+
+            with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
+                 mock.patch.object(main, "OUTPUT_DIR", output_dir), \
+                 mock.patch.object(main, "BACKUP_DIR", root / "backups"):
+                metrics_response = asgi_request(main.app, "GET", "/metrics")
+                archive_response = asgi_request(main.app, "GET", "/source-media/archive?limit=10")
+
+        self.assertEqual(metrics_response.status_code, 200)
+        storage = metrics_response.json()["storage"]
+        self.assertEqual(storage["source_media_archived_files"], 0)
+        self.assertEqual(storage["source_media_archived_bytes"], orphan_metadata_bytes)
+        self.assertEqual(archive_response.status_code, 200)
+        archive_payload = archive_response.json()
+        self.assertEqual(archive_payload["total_files"], 0)
+        self.assertEqual(archive_payload["total_bytes"], orphan_metadata_bytes)
+        self.assertEqual(archive_payload["files"], [])
+
     def test_metrics_endpoint_reports_ngrok_status(self):
         self._isolated_database()
         import backend.main as main
