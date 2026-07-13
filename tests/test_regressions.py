@@ -2286,6 +2286,13 @@ class MetricsRegressionTests(unittest.TestCase):
                 deleted_backup_path = Path(delete_response.json().get("backup_path", ""))
                 deleted_backup_exists = deleted_backup_path.is_file()
                 deleted_backup_content = deleted_backup_path.read_bytes() if deleted_backup_exists else b""
+                deleted_backup_metadata_path = main._source_media_archive_metadata_path(deleted_backup_path)
+                deleted_backup_metadata_exists = deleted_backup_metadata_path.is_file()
+                deleted_backup_metadata = (
+                    json.loads(deleted_backup_metadata_path.read_text(encoding="utf-8"))
+                    if deleted_backup_metadata_exists
+                    else {}
+                )
                 archive_response = asgi_request(main.app, "GET", "/source-media/archive?limit=10")
                 restore_archive_id = archive_response.json()["files"][0]["archive_id"]
                 archive_file_response = asgi_request(
@@ -2310,6 +2317,7 @@ class MetricsRegressionTests(unittest.TestCase):
                 post_restore_metrics_response = asgi_request(main.app, "GET", "/metrics")
                 restored_file_exists = (source_dir / "meeting-c.m4a").is_file()
                 restored_backup_exists = deleted_backup_path.exists()
+                restored_backup_metadata_exists = deleted_backup_metadata_path.exists()
 
         self.assertEqual(response.status_code, 200)
         storage = response.json()["storage"]
@@ -2370,6 +2378,10 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertIn("source_media_deleted", delete_response.json()["backup_path"])
         self.assertTrue(deleted_backup_exists)
         self.assertEqual(deleted_backup_content, b"ccc")
+        self.assertTrue(deleted_backup_metadata_exists)
+        self.assertEqual(deleted_backup_metadata["original_name"], "meeting-c.m4a")
+        self.assertEqual(deleted_backup_metadata["source_media_type"], "audio")
+        self.assertEqual(deleted_backup_metadata["bytes"], len(b"ccc"))
         self.assertFalse(deleted_file_exists)
         post_delete_inventory = post_delete_inventory_response.json()
         self.assertEqual(post_delete_inventory["total_files"], 2)
@@ -2396,12 +2408,51 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual(restore_response.json()["name"], "meeting-c.m4a")
         self.assertTrue(restored_file_exists)
         self.assertFalse(restored_backup_exists)
+        self.assertFalse(restored_backup_metadata_exists)
         post_restore_inventory = post_restore_inventory_response.json()
         self.assertEqual(post_restore_inventory["total_files"], 3)
         self.assertEqual(post_restore_inventory["unlinked_files"], 1)
         post_restore_storage = post_restore_metrics_response.json()["storage"]
         self.assertEqual(post_restore_storage["source_media_archived_files"], 0)
         self.assertEqual(post_restore_storage["source_media_archived_bytes"], 0)
+
+    def test_source_media_archive_preserves_webm_video_metadata_for_preview(self):
+        self._isolated_database()
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_dir = root / "source_audio"
+            source_dir.mkdir()
+            (source_dir / "screen.webm").write_bytes(b"webm-video")
+
+            with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
+                 mock.patch.object(main, "BACKUP_DIR", root / "backups"):
+                with mock.patch.object(main, "_storage_source_media_type", return_value="video"):
+                    delete_response = asgi_request(main.app, "DELETE", "/source-media/inventory/screen.webm")
+                backup_path = Path(delete_response.json().get("backup_path", ""))
+                metadata_path = main._source_media_archive_metadata_path(backup_path)
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+                with mock.patch.object(main, "_storage_source_media_type", return_value="audio"), \
+                     mock.patch.object(main, "_ffprobe_stream_types", return_value=set()):
+                    archive_response = asgi_request(main.app, "GET", "/source-media/archive?limit=10")
+                    archive_id = archive_response.json()["files"][0]["archive_id"]
+                    archive_file_response = asgi_request(
+                        main.app,
+                        "GET",
+                        "/source-media/archive/file",
+                        params={"archive_id": archive_id},
+                    )
+
+        self.assertEqual(delete_response.status_code, 200)
+        self.assertEqual(metadata["original_name"], "screen.webm")
+        self.assertEqual(metadata["source_media_type"], "video")
+        self.assertEqual(archive_response.status_code, 200)
+        self.assertEqual(archive_response.json()["files"][0]["source_media_type"], "video")
+        self.assertEqual(archive_file_response.status_code, 200)
+        self.assertIn("video/webm", archive_file_response.headers.get("content-type", ""))
+        self.assertEqual(archive_file_response.content, b"webm-video")
 
     def test_metrics_endpoint_reports_ngrok_status(self):
         self._isolated_database()

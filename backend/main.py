@@ -605,6 +605,49 @@ def _source_media_archive_root() -> Path:
     return BACKUP_DIR / "source_media_deleted"
 
 
+def _source_media_archive_metadata_path(media_path: Path) -> Path:
+    return media_path.with_name(f"{media_path.name}.json")
+
+
+def _normalize_source_media_kind(value: object) -> Optional[str]:
+    media_kind = str(value or "").strip().lower()
+    return media_kind if media_kind in {"audio", "video"} else None
+
+
+def _read_source_media_archive_metadata(media_path: Path) -> dict[str, object]:
+    metadata_path = _source_media_archive_metadata_path(media_path)
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_source_media_archive_metadata(
+    media_path: Path,
+    *,
+    original_name: str,
+    file_bytes: int,
+    source_media_type: Optional[str],
+) -> None:
+    payload = {
+        "version": 1,
+        "original_name": original_name,
+        "archived_name": media_path.name,
+        "bytes": int(file_bytes),
+        "source_media_type": _normalize_source_media_kind(source_media_type),
+        "deleted_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    metadata_path = _source_media_archive_metadata_path(media_path)
+    try:
+        metadata_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning("Unable to write source media archive metadata for %s: %s", media_path, exc)
+
+
 def _archive_original_name(archived_name: str) -> str:
     parts = Path(archived_name).name.split("_")
     if len(parts) >= 4 and parts[0].isdigit() and parts[1].isdigit() and parts[2].isdigit():
@@ -675,6 +718,11 @@ def _source_media_archive(limit: int = 100, offset: int = 0) -> SourceMediaArchi
             total_files += 1
             file_bytes = int(stat.st_size)
             total_bytes += file_bytes
+            metadata = _read_source_media_archive_metadata(entry)
+            source_media_type = (
+                _normalize_source_media_kind(metadata.get("source_media_type"))
+                or _storage_source_media_type(entry)
+            )
             files.append(
                 SourceMediaArchiveRecord(
                     archive_id=_source_media_archive_id(entry),
@@ -682,7 +730,7 @@ def _source_media_archive(limit: int = 100, offset: int = 0) -> SourceMediaArchi
                     archived_name=entry.name,
                     bytes=file_bytes,
                     modified_at=datetime.fromtimestamp(stat.st_mtime),
-                    source_media_type=_storage_source_media_type(entry),
+                    source_media_type=source_media_type,
                     backup_path=str(entry),
                 )
             )
@@ -753,6 +801,12 @@ def _restore_source_media_archive(archive_id: str) -> SourceMediaRestoreResponse
         SOURCE_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
         file_bytes = archive_path.stat().st_size
         shutil.move(str(archive_path), str(target_path))
+        metadata_path = _source_media_archive_metadata_path(archive_path)
+        try:
+            if metadata_path.exists():
+                metadata_path.unlink()
+        except OSError as exc:
+            logger.warning("Unable to remove source media archive metadata %s: %s", metadata_path, exc)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"還原備份原始檔失敗：{exc}")
     return SourceMediaRestoreResponse(
@@ -774,8 +828,15 @@ def _delete_unlinked_source_media(filename: str) -> SourceMediaDeleteResponse:
         )
     try:
         file_bytes = source_path.stat().st_size
+        source_media_type = _storage_source_media_type(source_path)
         backup_path = _source_media_delete_backup_path(source_path)
         shutil.move(str(source_path), str(backup_path))
+        _write_source_media_archive_metadata(
+            backup_path,
+            original_name=source_path.name,
+            file_bytes=int(file_bytes),
+            source_media_type=source_media_type,
+        )
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"刪除原始檔失敗：{exc}")
     return SourceMediaDeleteResponse(
@@ -880,7 +941,13 @@ async def get_source_media_archive_file(
     """Return an archived source media file for review before restore."""
     archive_path = _source_media_archive_file_by_id(archive_id)
     original_name = _archive_original_name(archive_path.name)
-    media_type = _source_media_content_type({"source_audio": original_name, "quality_report": {}}, archive_path)
+    metadata = _read_source_media_archive_metadata(archive_path)
+    archived_kind = _normalize_source_media_kind(metadata.get("source_media_type"))
+    media_type = (
+        _source_media_content_type_for_kind(archive_path, archived_kind)
+        if archived_kind
+        else _source_media_content_type({"source_audio": original_name, "quality_report": {}}, archive_path)
+    )
     return FileResponse(
         path=archive_path,
         filename=original_name,
@@ -1285,10 +1352,15 @@ def _source_media_detail_metadata(record: dict, source_path: Optional[Path] = No
 
 
 def _source_media_content_type(record: dict, source_path: Path) -> str:
-    suffix = source_path.suffix.lower()
     media_kind = _source_media_type(record, source_path)
+    return _source_media_content_type_for_kind(source_path, media_kind)
+
+
+def _source_media_content_type_for_kind(source_path: Path, media_kind: Optional[str]) -> str:
+    suffix = source_path.suffix.lower()
+    normalized_kind = _normalize_source_media_kind(media_kind)
     if suffix == ".webm":
-        return "video/webm" if media_kind == "video" else "audio/webm"
+        return "video/webm" if normalized_kind == "video" else "audio/webm"
     return SUPPORTED_MEDIA_FORMATS.get(suffix, "application/octet-stream")
 
 
