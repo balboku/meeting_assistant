@@ -1541,12 +1541,29 @@ function setSourceStorageStatus(message = '', isError = false) {
   status.classList.toggle('error', Boolean(isError));
 }
 
+function sourceStorageExtension(file = {}) {
+  const source = String(file.name || file.archived_name || '').toLowerCase().split('?')[0];
+  const dotIndex = source.lastIndexOf('.');
+  return dotIndex >= 0 ? source.slice(dotIndex) : '';
+}
+
+function sourceStorageMediaType(file = {}) {
+  const sourceType = String(file.source_media_type || '').toLowerCase();
+  if (sourceType === 'video' || sourceType === 'audio') return sourceType;
+  const extension = sourceStorageExtension(file);
+  const videoExtensions = new Set(['.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);
+  const audioExtensions = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.flac', '.wma']);
+  if (videoExtensions.has(extension)) return 'video';
+  if (audioExtensions.has(extension)) return 'audio';
+  return '';
+}
+
 function previewSourceMedia(url = '', mediaType = '', name = '') {
   const preview = document.getElementById('source-storage-preview');
   if (!preview || !url) return;
   const safeUrl = escapeHtml(url);
   const safeName = escapeHtml(name || '原始檔');
-  const isVideo = String(mediaType || '').toLowerCase() === 'video';
+  const isVideo = sourceStorageMediaType({ name, source_media_type: mediaType }) === 'video';
   const player = isVideo
     ? `<video controls preload="metadata" src="${safeUrl}"></video>`
     : `<audio controls preload="metadata" src="${safeUrl}"></audio>`;
@@ -1607,7 +1624,7 @@ function renderSourceStorageFile(file) {
   const filename = String(file.name || '');
   const sourceUrl = `${API}/source-media/inventory/${encodeURIComponent(filename)}`;
   const downloadUrl = `${sourceUrl}?download=1`;
-  const mediaType = String(file.source_media_type || '').toLowerCase();
+  const mediaType = sourceStorageMediaType(file);
   const mediaTypeLabel = mediaType === 'video' ? '影片' : mediaType === 'audio' ? '音訊' : '';
   const meetingBadge = linked
     ? `<span class="source-storage-badge">會議 #${meetingId} ${escapeHtml(file.linked_meeting_title)}</span>`
@@ -1639,7 +1656,7 @@ function renderSourceArchiveFile(file) {
   const filename = String(file.name || file.archived_name || '');
   const archiveUrl = `${API}/source-media/archive/file?archive_id=${encodeURIComponent(archiveId)}`;
   const downloadUrl = `${archiveUrl}&download=1`;
-  const mediaType = String(file.source_media_type || '').toLowerCase();
+  const mediaType = sourceStorageMediaType(file);
   const mediaTypeLabel = mediaType === 'video' ? '影片' : mediaType === 'audio' ? '音訊' : '';
   const metadataBytes = Number(file.metadata_bytes || 0);
   return `<div class="source-storage-item">
@@ -1669,6 +1686,7 @@ function sourceStorageSearchText(file) {
     file.linked_meeting_title,
     file.linked_meeting_id,
     file.source_media_type,
+    sourceStorageMediaType(file),
     formatDate(file.modified_at)
   ]
     .filter(value => value !== null && value !== undefined && String(value).trim())
@@ -1690,7 +1708,7 @@ function sourceStorageLiveFilterMatches(file, filter) {
 }
 
 function sourceStorageMediaTypeMatches(file, mediaFilter) {
-  const mediaType = String(file.source_media_type || '').toLowerCase();
+  const mediaType = sourceStorageMediaType(file);
   if (mediaFilter === 'audio') return mediaType === 'audio';
   if (mediaFilter === 'video') return mediaType === 'video';
   if (mediaFilter === 'unknown') return !['audio', 'video'].includes(mediaType);
