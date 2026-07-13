@@ -537,11 +537,15 @@
       justify-content: space-between;
       gap: 12px;
       min-width: 0;
+      flex-wrap: wrap;
     }
     .audio-evidence-label {
+      flex: 1 1 240px;
       min-width: 0;
+      max-width: 100%;
       color: var(--text-mid);
       font-size: 12px;
+      line-height: 1.45;
       overflow-wrap: break-word;
       word-break: keep-all;
     }
@@ -572,6 +576,7 @@
       flex: 0 1 auto;
       justify-content: flex-end;
       min-width: 0;
+      max-width: 100%;
     }
     .source-media-action {
       display: inline-flex;
@@ -587,6 +592,7 @@
       font-size: 12px;
       font-family: inherit;
       white-space: nowrap;
+      max-width: 100%;
       cursor: pointer;
       background: rgba(122,162,247,0.08);
     }
@@ -660,9 +666,12 @@
       justify-content: space-between;
       gap: 12px;
       min-width: 0;
+      flex-wrap: wrap;
     }
     .source-storage-preview-title {
+      flex: 1 1 240px;
       min-width: 0;
+      max-width: 100%;
       color: var(--text);
       font-size: 13px;
       font-weight: 700;
@@ -675,7 +684,8 @@
       flex-wrap: wrap;
       gap: 6px;
       justify-content: flex-end;
-      flex-shrink: 0;
+      flex: 0 1 auto;
+      max-width: 100%;
     }
     .source-storage-preview audio,
     .source-storage-preview video {
