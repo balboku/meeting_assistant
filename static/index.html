@@ -600,7 +600,7 @@
     }
     .source-storage-controls {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) repeat(3, minmax(140px, 180px));
+      grid-template-columns: minmax(0, 1fr) repeat(3, minmax(140px, 180px)) auto;
       gap: 10px;
       margin-bottom: 12px;
     }
@@ -608,6 +608,11 @@
       min-height: 38px;
       padding: 9px 12px;
       margin: 0;
+    }
+    .source-storage-reset {
+      min-height: 38px;
+      align-self: stretch;
+      white-space: nowrap;
     }
     .source-storage-preview {
       display: none;
@@ -1330,6 +1335,7 @@
         <option value="name_asc">檔名 A-Z</option>
         <option value="name_desc">檔名 Z-A</option>
       </select>
+      <button id="source-storage-reset" type="button" class="source-media-action source-storage-reset" onclick="resetSourceStorageFilters()">清除</button>
     </div>
     <div id="source-storage-preview" class="source-storage-preview" aria-live="polite"></div>
     <div id="source-storage-list" class="source-storage-list" aria-live="polite"></div>
@@ -1657,6 +1663,18 @@ function sourceStorageSortFiles(files, sortMode) {
     return sorted.sort((a, b) => Number(b.bytes || 0) - Number(a.bytes || 0));
   }
   return sorted.sort((a, b) => modifiedAt(b) - modifiedAt(a));
+}
+
+function resetSourceStorageFilters() {
+  const search = document.getElementById('source-storage-search');
+  const filter = document.getElementById('source-storage-filter');
+  const mediaFilter = document.getElementById('source-storage-media-filter');
+  const sort = document.getElementById('source-storage-sort');
+  if (search) search.value = '';
+  if (filter) filter.value = 'all';
+  if (mediaFilter) mediaFilter.value = 'all';
+  if (sort) sort.value = 'modified_desc';
+  renderSourceStorageInventory();
 }
 
 function sourceStorageRowsHtml(title, rows, renderer, emptyIcon, emptyText) {
