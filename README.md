@@ -145,8 +145,8 @@ BASE_URL=http://127.0.0.1:8001 scripts/smoke_e2e.sh
 | `RECORDING_AUDIO_CHANNELS` | `1` | 錄音聲道數，會議語音建議單聲道。 |
 | `RECORDING_COMPACT_AUDIO_BITRATE` | `32000` | 省容量語音 profile 的 Opus 位元率（bps）。 |
 | `RECORDING_COMPACT_AUDIO_SAMPLE_RATE` | `16000` | 省容量語音 profile 的取樣率（Hz）。 |
-| `RECORDING_VIDEO_BITRATE` | `1000000` | 螢幕/視訊平衡 profile 的影像位元率（bps）。 |
-| `RECORDING_VIDEO_FPS` | `15` | 螢幕/視訊平衡 profile 的目標幀率。 |
+| `RECORDING_VIDEO_BITRATE` | `1000000` | 錄影平衡 profile 的影像位元率（bps），鏡頭錄影與螢幕錄影皆使用此設定。 |
+| `RECORDING_VIDEO_FPS` | `15` | 錄影平衡 profile 的目標幀率。 |
 | `DB_PATH` | `./meetings.db` | SQLite 資料庫位置，測試或部署時可換到獨立磁碟路徑。 |
 | `MEETING_TEMP_DIR` | `./temp` | 分段與處理中的暫存檔資料夾；過期暫存會自動清理。 |
 | `MEETING_OUTPUT_DIR` | `./output` | 生成 Markdown 會議記錄的輸出資料夾。 |

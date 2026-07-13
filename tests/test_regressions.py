@@ -215,6 +215,7 @@ class ConfigRegressionTests(unittest.TestCase):
         self.assertFalse(payload["auth"]["enabled"])
         self.assertEqual(payload["recording_profiles"]["audio_standard"]["audio_bps"], 48000)
         self.assertEqual(payload["recording_profiles"]["video_balanced"]["video_fps"], 15)
+        self.assertEqual(payload["recording_profiles"]["video_balanced"]["label"], "錄影平衡")
         self.assertIn(".mp3", payload["supported_extensions"])
         self.assertIn(".mp4", payload["supported_extensions"])
 

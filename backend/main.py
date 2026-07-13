@@ -186,7 +186,7 @@ RECORDING_PROFILES = {
         "video_fps": 0,
     },
     "video_balanced": {
-        "label": "螢幕/視訊平衡",
+        "label": "錄影平衡",
         "audio_bps": _positive_int_env("RECORDING_AUDIO_BITRATE", 48_000),
         "audio_sample_rate": _positive_int_env("RECORDING_AUDIO_SAMPLE_RATE", 24_000),
         "audio_channels": _positive_int_env("RECORDING_AUDIO_CHANNELS", 1),
