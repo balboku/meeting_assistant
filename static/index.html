@@ -3750,6 +3750,11 @@ async function startRecording() {
 
 function stopRecording() {
   if (mediaRecorder && mediaRecorder.state === 'recording') {
+    try {
+      mediaRecorder.requestData();
+    } catch (err) {
+      console.warn('Unable to flush recorder data before stop.', err);
+    }
     mediaRecorder.stop();
   }
   releaseRecordingStreams();
@@ -3769,6 +3774,13 @@ async function onRecordingStopped() {
 
   const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
   const file = new File([blob], `recording.${ext}`, { type: blob.type });
+  if (!recordedChunks.length || file.size <= 0) {
+    recResult.classList.add('show');
+    recProg.classList.add('show');
+    recProgMsg.textContent = '❌ 錄製失敗：沒有取得任何錄音資料，請重新錄製並確認瀏覽器權限。';
+    document.getElementById('rec-close-btn').disabled = false;
+    return;
+  }
   if (file.size > runtimeConfig.max_upload_bytes) {
     recProg.classList.add('show');
     recProgMsg.textContent = `❌ 錄製檔案超過上限 ${formatBytes(runtimeConfig.max_upload_bytes)}，請縮短錄製時間。`;
