@@ -82,6 +82,7 @@ from backend.models import (
     JobMetrics,
     StorageFileMetric,
     StorageMetrics,
+    SourceMediaInventoryResponse,
     MetricsResponse,
     AppConfigResponse,
     ErrorResponse,
@@ -464,6 +465,63 @@ def _source_audio_refs_by_name() -> dict[str, dict]:
     return refs
 
 
+def _source_media_inventory(limit: int = 100) -> SourceMediaInventoryResponse:
+    count = 0
+    total_bytes = 0
+    unlinked_count = 0
+    unlinked_bytes = 0
+    files: list[StorageFileMetric] = []
+    source_refs = _source_audio_refs_by_name()
+    normalized_suffixes = {suffix.lower() for suffix in SUPPORTED_MEDIA_FORMATS}
+
+    try:
+        entries = list(SOURCE_AUDIO_DIR.iterdir())
+    except OSError:
+        entries = []
+
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        try:
+            if not entry.is_file():
+                continue
+            if entry.suffix.lower() not in normalized_suffixes:
+                continue
+            stat = entry.stat()
+        except OSError:
+            continue
+
+        count += 1
+        file_bytes = int(stat.st_size)
+        total_bytes += file_bytes
+        linked_ref = source_refs.get(entry.name)
+        if linked_ref is None:
+            unlinked_count += 1
+            unlinked_bytes += file_bytes
+        files.append(
+            StorageFileMetric(
+                name=entry.name,
+                bytes=file_bytes,
+                modified_at=datetime.fromtimestamp(stat.st_mtime),
+                linked_meeting_id=int(linked_ref["id"]) if linked_ref else None,
+                linked_meeting_title=str(linked_ref["title"]) if linked_ref else None,
+            )
+        )
+
+    sorted_files = sorted(files, key=lambda item: item.bytes, reverse=True)
+    if limit > 0:
+        sorted_files = sorted_files[:limit]
+
+    return SourceMediaInventoryResponse(
+        generated_at=datetime.now(),
+        total_files=count,
+        total_bytes=total_bytes,
+        unlinked_files=unlinked_count,
+        unlinked_bytes=unlinked_bytes,
+        files=sorted_files,
+    )
+
+
 def _storage_metrics() -> StorageMetrics:
     (
         source_count,
@@ -512,6 +570,17 @@ async def metrics():
         storage=_storage_metrics(),
         ngrok=get_ngrok_status(expected_port=SERVER_PORT),
     )
+
+
+@app.get(
+    "/source-media/inventory",
+    response_model=SourceMediaInventoryResponse,
+    summary="原始媒體檔案清單",
+    tags=["系統"],
+)
+async def source_media_inventory(limit: int = Query(100, ge=1, le=500)):
+    """回傳保留原始錄音/錄影的唯讀維運清單。"""
+    return _source_media_inventory(limit=limit)
 
 
 @app.get(

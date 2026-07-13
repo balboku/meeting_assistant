@@ -139,6 +139,16 @@ class StorageMetrics(BaseModel):
     meeting_markdown_bytes: int
 
 
+class SourceMediaInventoryResponse(BaseModel):
+    """GET /source-media/inventory 的回應格式"""
+    generated_at: datetime
+    total_files: int
+    total_bytes: int
+    unlinked_files: int = 0
+    unlinked_bytes: int = 0
+    files: list[StorageFileMetric] = Field(default_factory=list)
+
+
 class RecentJobError(BaseModel):
     """最近失敗任務摘要"""
     job_id: str

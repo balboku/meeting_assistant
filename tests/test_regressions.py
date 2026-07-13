@@ -2213,6 +2213,7 @@ class MetricsRegressionTests(unittest.TestCase):
             with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
                  mock.patch.object(main, "OUTPUT_DIR", output_dir):
                 response = asgi_request(main.app, "GET", "/metrics")
+                inventory_response = asgi_request(main.app, "GET", "/source-media/inventory?limit=2")
 
         self.assertEqual(response.status_code, 200)
         storage = response.json()["storage"]
@@ -2231,6 +2232,15 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertIsNone(storage["source_media_largest_files"][2]["linked_meeting_id"])
         self.assertEqual(storage["meeting_markdown_files"], 2)
         self.assertEqual(storage["meeting_markdown_bytes"], len("note-a".encode("utf-8")) + len("note-bb".encode("utf-8")))
+        self.assertEqual(inventory_response.status_code, 200)
+        inventory = inventory_response.json()
+        self.assertEqual(inventory["total_files"], 3)
+        self.assertEqual(inventory["total_bytes"], len(b"audio-a") + len(b"video-bb") + len(b"ccc"))
+        self.assertEqual(inventory["unlinked_files"], 1)
+        self.assertEqual(inventory["unlinked_bytes"], len(b"ccc"))
+        self.assertEqual([item["name"] for item in inventory["files"]], ["meeting-b.webm", "meeting-a.mp3"])
+        self.assertEqual(inventory["files"][0]["linked_meeting_id"], video_meeting_id)
+        self.assertEqual(inventory["files"][1]["linked_meeting_title"], "Audio A")
 
     def test_metrics_endpoint_reports_ngrok_status(self):
         self._isolated_database()
@@ -3155,6 +3165,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("data.meetings?.needs_review", html)
         self.assertIn('id="ops-source-storage"', html)
         self.assertIn('id="ops-source-storage-tile"', html)
+        self.assertIn('id="source-storage-modal"', html)
+        self.assertIn('id="source-storage-list"', html)
         self.assertIn("data.storage", html)
         self.assertIn("storage.source_media_files", html)
         self.assertIn("storage.source_media_bytes", html)
@@ -3167,6 +3179,12 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("file.linked_meeting_title", html)
         self.assertIn("formatBytes(sourceBytes)", html)
         self.assertIn("原始檔", html)
+        self.assertIn("function openSourceStorageInventory", html)
+        self.assertIn("function closeSourceStorageInventory", html)
+        self.assertIn("function renderSourceStorageFile", html)
+        self.assertIn("/source-media/inventory?limit=100", html)
+        self.assertIn("openMeetingFromSourceStorage", html)
+        self.assertIn("未連結會議", html)
         self.assertIn("function showNeedsReviewMeetings", html)
         self.assertIn("loadMeetings(search.value.trim())", html)
         self.assertIn("需複核", html)

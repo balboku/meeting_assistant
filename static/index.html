@@ -575,11 +575,71 @@
       color: var(--blue);
       text-decoration: none;
       font-size: 12px;
+      font-family: inherit;
+      cursor: pointer;
       background: rgba(122,162,247,0.08);
     }
     .source-media-action:hover {
       border-color: var(--blue);
       background: rgba(122,162,247,0.16);
+    }
+    .source-storage-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .source-storage-list {
+      display: grid;
+      gap: 8px;
+      max-height: min(64vh, 700px);
+      overflow-y: auto;
+    }
+    .source-storage-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+    }
+    .source-storage-name {
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .source-storage-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 7px;
+    }
+    .source-storage-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      border: 1px solid rgba(122,162,247,0.22);
+      background: rgba(122,162,247,0.06);
+      color: var(--text-mid);
+      font-size: 11px;
+      line-height: 1.3;
+      overflow-wrap: anywhere;
+    }
+    .source-storage-badge.unlinked {
+      color: var(--yellow);
+      border-color: rgba(224,175,104,0.42);
+      background: rgba(224,175,104,0.08);
+    }
+    .source-storage-actions {
+      display: flex;
+      justify-content: flex-end;
+      min-width: 92px;
     }
     .timecode-button {
       display: inline-flex;
@@ -721,6 +781,12 @@
       .detail-actions .btn-secondary {
         flex: 1 1 160px;
         justify-content: center;
+      }
+      .source-storage-item {
+        grid-template-columns: 1fr;
+      }
+      .source-storage-actions {
+        justify-content: flex-start;
       }
       .job-dashboard-header { align-items: flex-start; }
       .job-dashboard-heading { gap: 6px 10px; }
@@ -1035,7 +1101,9 @@
       <div class="ops-label">需複核</div>
       <div class="ops-value" id="ops-needs-review">–</div>
     </div>
-    <div class="ops-tile" id="ops-source-storage-tile" title="原始錄音/錄影保留容量">
+    <div class="ops-tile actionable" id="ops-source-storage-tile" title="原始錄音/錄影保留容量" role="button" tabindex="0"
+         onclick="openSourceStorageInventory()"
+         onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openSourceStorageInventory(); }">
       <div class="ops-label">原始檔</div>
       <div class="ops-value" id="ops-source-storage">–</div>
     </div>
@@ -1135,6 +1203,20 @@
       <button class="modal-close" onclick="closeRevisionHistory()">×</button>
     </div>
     <div id="revision-list" class="revision-list"></div>
+  </div>
+</div>
+
+<!-- Source Media Inventory Modal -->
+<div class="modal-overlay" id="source-storage-modal">
+  <div class="modal modal-wide">
+    <div class="modal-header">
+      <div class="modal-title">原始檔清單</div>
+      <button class="modal-close" onclick="closeSourceStorageInventory()">×</button>
+    </div>
+    <div id="source-storage-list" class="source-storage-list" aria-live="polite"></div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeSourceStorageInventory()">關閉</button>
+    </div>
   </div>
 </div>
 
@@ -1253,7 +1335,65 @@ function sourceStorageTitle(sourceFiles = 0, sourceBytes = 0, unlinkedFiles = 0,
       lines.push(`${file.name || '未命名'} (${formatBytes(file.bytes)}) · ${meeting}`);
     });
   }
+  lines.push('點擊可開啟原始檔清單');
   return lines.join('\n');
+}
+
+function closeSourceStorageInventory() {
+  document.getElementById('source-storage-modal')?.classList.remove('show');
+}
+
+function openMeetingFromSourceStorage(meetingId) {
+  closeSourceStorageInventory();
+  openDetail(meetingId);
+}
+
+function renderSourceStorageFile(file) {
+  const meetingId = Number(file.linked_meeting_id || 0);
+  const linked = meetingId > 0 && file.linked_meeting_title;
+  const meetingBadge = linked
+    ? `<span class="source-storage-badge">會議 #${meetingId} ${escapeHtml(file.linked_meeting_title)}</span>`
+    : '<span class="source-storage-badge unlinked">未連結會議</span>';
+  const action = linked
+    ? `<button type="button" class="source-media-action" onclick="openMeetingFromSourceStorage(${meetingId})">開會議</button>`
+    : '<span class="source-storage-badge unlinked">請人工確認後再清理</span>';
+  return `<div class="source-storage-item">
+    <div>
+      <div class="source-storage-name">${escapeHtml(file.name || '未命名')}</div>
+      <div class="source-storage-meta">
+        <span class="source-storage-badge">${formatBytes(file.bytes)}</span>
+        <span class="source-storage-badge">${formatDate(file.modified_at)}</span>
+        ${meetingBadge}
+      </div>
+    </div>
+    <div class="source-storage-actions">${action}</div>
+  </div>`;
+}
+
+async function openSourceStorageInventory() {
+  const modal = document.getElementById('source-storage-modal');
+  const list = document.getElementById('source-storage-list');
+  if (!modal || !list) return;
+  modal.classList.add('show');
+  list.innerHTML = '<div class="detail-placeholder"><div class="loading-spinner"></div><p>載入原始檔清單...</p></div>';
+
+  try {
+    const res = await fetch(`${API}/source-media/inventory?limit=100`);
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    const payload = await res.json();
+    const files = Array.isArray(payload.files) ? payload.files : [];
+    const summary = `<div class="source-storage-summary">
+      <span class="source-storage-badge">總檔案 ${Number(payload.total_files || 0)} 個</span>
+      <span class="source-storage-badge">總容量 ${formatBytes(payload.total_bytes)}</span>
+      <span class="source-storage-badge unlinked">未連結 ${Number(payload.unlinked_files || 0)} 個 / ${formatBytes(payload.unlinked_bytes)}</span>
+    </div>`;
+    const rows = files.length
+      ? files.map(renderSourceStorageFile).join('')
+      : '<div class="empty-state"><div class="icon">📁</div><p>目前沒有保留的原始錄音/錄影檔。</p></div>';
+    list.innerHTML = `${summary}${rows}`;
+  } catch (err) {
+    list.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>無法讀取原始檔清單：${escapeHtml(err.message)}</p></div>`;
+  }
 }
 
 async function apiErrorMessage(res) {
