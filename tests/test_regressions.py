@@ -4695,6 +4695,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function sourceMediaPlayerMode", html)
         self.assertIn("function switchSourceMediaPlayer", html)
         self.assertIn("source_media_type", html)
+        self.assertIn("if (sourceType === 'audio') return false;", html)
         self.assertIn("meeting?.recording_profile || meeting?.quality_report?.recording?.profile", html)
         self.assertIn("new Set(['.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv'])", html)
         self.assertIn("new Set(['.webm', '.mp4'])", html)

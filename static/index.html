@@ -2485,7 +2485,9 @@ function isVideoSource(meeting) {
 }
 
 function sourceMediaVideoPreviewCapable(meeting) {
-  if (isVideoSource(meeting)) return true;
+  const sourceType = String(meeting?.source_media_type || '').toLowerCase();
+  if (sourceType === 'video') return true;
+  if (sourceType === 'audio') return false;
   const browserPreviewExtensions = new Set(['.webm', '.mp4']);
   return browserPreviewExtensions.has(sourceMediaExtension(meeting));
 }
