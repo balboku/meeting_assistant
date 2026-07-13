@@ -290,6 +290,11 @@
     .ops-tile:last-child { border-right: 0; padding-right: 0; }
     .ops-tile.actionable { cursor: pointer; }
     .ops-tile.actionable:hover .ops-value { color: var(--blue); }
+    .ops-tile.actionable:focus-visible {
+      outline: 2px solid var(--blue);
+      outline-offset: 3px;
+      border-radius: 6px;
+    }
     .ops-label {
       color: var(--text-dim);
       font-size: 11px;
@@ -1310,13 +1315,13 @@
       <div class="ops-label">失敗任務</div>
       <div class="ops-value" id="ops-failed-jobs">–</div>
     </div>
-    <div class="ops-tile actionable" id="ops-needs-review-tile" title="顯示需複核會議" role="button" tabindex="0"
+    <div class="ops-tile actionable" id="ops-needs-review-tile" title="顯示需複核會議" role="button" tabindex="0" aria-label="顯示需複核會議"
          onclick="showNeedsReviewMeetings()"
          onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showNeedsReviewMeetings(); }">
       <div class="ops-label">需複核</div>
       <div class="ops-value" id="ops-needs-review">–</div>
     </div>
-    <div class="ops-tile actionable" id="ops-source-storage-tile" title="原始錄音/錄影保留容量" role="button" tabindex="0"
+    <div class="ops-tile actionable" id="ops-source-storage-tile" title="原始錄音/錄影保留容量" role="button" tabindex="0" aria-label="開啟原始檔清單"
          onclick="openSourceStorageInventory()"
          onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openSourceStorageInventory(); }">
       <div class="ops-label">原始檔</div>
