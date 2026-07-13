@@ -2503,6 +2503,7 @@ function switchSourceMediaPlayer(mode) {
   const evidence = document.getElementById('source-media-evidence');
   if (!evidence) return;
   evidence.outerHTML = renderAudioEvidence(currentMeetingData, mode);
+  enhanceSourceMediaPlayer();
 }
 
 function sourceMediaKindLabel(meeting) {
@@ -2574,6 +2575,31 @@ function renderAudioEvidence(meeting, requestedMode = null) {
     ${renderSourceMediaFacts(meeting)}
     <audio id="source-media-player" controls preload="metadata" src="${sourceUrl}"></audio>
   </div>`;
+}
+
+function primeSourceVideoPreview(video) {
+  if (!video || video.dataset.previewPrimed === '1') return;
+  const seekPreviewFrame = () => {
+    if (video.dataset.previewPrimed === '1' || !video.paused || video.currentTime > 0.1) return;
+    video.dataset.previewPrimed = '1';
+    const finiteDuration = Number.isFinite(video.duration) && video.duration > 0;
+    const previewSecond = finiteDuration ? Math.min(1, Math.max(0.25, video.duration * 0.01)) : 0.25;
+    try {
+      video.currentTime = previewSecond;
+    } catch (err) {
+      console.warn('Unable to seek source video preview frame.', err);
+    }
+  };
+  if (video.readyState >= 1) {
+    seekPreviewFrame();
+  } else {
+    video.addEventListener('loadedmetadata', seekPreviewFrame, { once: true });
+  }
+}
+
+function enhanceSourceMediaPlayer() {
+  const player = document.getElementById('source-media-player');
+  if (player?.tagName === 'VIDEO') primeSourceVideoPreview(player);
 }
 
 function openSummaryEditor() {
@@ -2837,6 +2863,7 @@ async function openDetail(id) {
       </div>
     `;
     enhanceTranscriptTimecodes(detail.querySelector('.md-content'));
+    enhanceSourceMediaPlayer();
     syncReadingModeButton();
   } catch (err) {
     detail.innerHTML = `
