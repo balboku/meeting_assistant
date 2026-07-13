@@ -1042,6 +1042,11 @@
     .upload-area:hover, .upload-area.dragover {
       border-color: var(--blue); background: rgba(122, 162, 247, 0.05);
     }
+    .upload-area:focus-visible {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(122,162,247,0.18);
+      outline: none;
+    }
     .upload-area .icon { font-size: 32px; margin-bottom: 12px; color: var(--blue-dim); }
     .upload-area span { display: block; font-size: 14px; margin-top: 8px; color: var(--text-mid); }
     #file-input { display: none; }
@@ -1350,9 +1355,9 @@
   <div class="modal">
     <div class="modal-header">
       <div class="modal-title">上傳音訊/影片並產生會議記錄</div>
-      <button class="modal-close" onclick="closeUploadModal()">×</button>
+      <button class="modal-close" aria-label="關閉上傳視窗" onclick="closeUploadModal()">×</button>
     </div>
-    <div class="upload-area" id="drop-zone" onclick="document.getElementById('file-input').click()">
+    <div class="upload-area" id="drop-zone" role="button" tabindex="0" aria-label="選擇要上傳的音訊或影片檔案" aria-describedby="file-name-display upload-limit-hint" onclick="openUploadFilePicker()">
       <div class="icon">📤</div>
       <div id="file-name-display">點擊選擇檔案，或將檔案拖曳至此</div>
       <span id="upload-limit-hint">支援常見音訊/影片格式 (預設最高 500MB)</span>
@@ -1380,7 +1385,7 @@
   <div class="modal modal-wide">
     <div class="modal-header">
       <div class="modal-title">編輯摘要、決議與待辦</div>
-      <button class="modal-close" onclick="closeSummaryEditor()">×</button>
+      <button class="modal-close" aria-label="關閉摘要編輯視窗" onclick="closeSummaryEditor()">×</button>
     </div>
     <textarea id="summary-editor" class="summary-editor" aria-label="摘要、決議與待辦 Markdown"></textarea>
     <div class="modal-footer">
@@ -1395,7 +1400,7 @@
   <div class="modal modal-wide">
     <div class="modal-header">
       <div class="modal-title">編輯完整逐字稿</div>
-      <button class="modal-close" onclick="closeTranscriptEditor()">×</button>
+      <button class="modal-close" aria-label="關閉逐字稿編輯視窗" onclick="closeTranscriptEditor()">×</button>
     </div>
     <textarea id="transcript-editor" class="summary-editor" aria-label="完整逐字稿 Markdown"></textarea>
     <div class="modal-footer">
@@ -1410,7 +1415,7 @@
   <div class="modal modal-wide">
     <div class="modal-header">
       <div class="modal-title">版本紀錄</div>
-      <button class="modal-close" onclick="closeRevisionHistory()">×</button>
+      <button class="modal-close" aria-label="關閉版本紀錄" onclick="closeRevisionHistory()">×</button>
     </div>
     <div id="revision-list" class="revision-list"></div>
   </div>
@@ -1463,7 +1468,7 @@
   <div class="modal" style="max-width: 520px;">
     <div class="modal-header">
       <div class="modal-title">🔴 即時錄製會議</div>
-      <button class="modal-close" id="rec-close-btn" onclick="closeRecordModal()">×</button>
+      <button class="modal-close" id="rec-close-btn" aria-label="關閉錄製視窗" onclick="closeRecordModal()">×</button>
     </div>
 
     <!-- 模式選擇 -->
@@ -3418,7 +3423,18 @@ function resetUploadForm() {
   updateUploadActionState();
 }
 
+function openUploadFilePicker() {
+  fileInput.click();
+}
+
+function handleDropZoneKeydown(e) {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  e.preventDefault();
+  openUploadFilePicker();
+}
+
 // 拖曳事件
+dropZone.addEventListener('keydown', handleDropZoneKeydown);
 dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
 dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
 dropZone.addEventListener('drop', e => {
