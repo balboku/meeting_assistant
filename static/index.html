@@ -1218,7 +1218,7 @@
         <span style="font-size:16px;">🔴</span> 開始錄製
       </button>
       <button class="btn-primary" onclick="openUploadModal()">
-        <span style="font-size:16px;">⬆️</span> 上傳音檔
+        <span style="font-size:16px;">⬆️</span> 上傳音訊/影片
       </button>
     </div>
   </header>
@@ -1333,7 +1333,7 @@
 <div class="modal-overlay" id="upload-modal">
   <div class="modal">
     <div class="modal-header">
-      <div class="modal-title">上傳音檔並產生會議記錄</div>
+      <div class="modal-title">上傳音訊/影片並產生會議記錄</div>
       <button class="modal-close" onclick="closeUploadModal()">×</button>
     </div>
     <div class="upload-area" id="drop-zone" onclick="document.getElementById('file-input').click()">
@@ -2235,7 +2235,7 @@ async function loadMeetings(query = '') {
       const safeQuery = escapeHtml(query);
       const emptyText = reviewOnly
         ? (query ? `找不到包含「${safeQuery}」且需複核的會議記錄` : '目前沒有需複核的會議記錄')
-        : (query ? `找不到包含「${safeQuery}」的會議記錄` : '尚無會議記錄<br>請先透過 LINE Bot 或桌面 GUI 處理一段音檔');
+        : (query ? `找不到包含「${safeQuery}」的會議記錄` : '尚無會議記錄<br>請先透過 LINE Bot、上傳音訊/影片或桌面 GUI 建立一筆記錄');
       listEl.innerHTML = `
         <div class="empty-state">
           <div class="icon">🗂</div>
@@ -2308,7 +2308,7 @@ async function deleteMeeting(event, id) {
       document.getElementById('detail-panel').innerHTML = `
         <div class="empty-state">
           <div class="icon">🤖</div>
-          <p>AI 語音會議助理<br>請在左側點選會議記錄，或點擊「上傳音檔」</p>
+          <p>AI 語音會議助理<br>請在左側點選會議記錄，或點擊「上傳音訊/影片」</p>
         </div>`;
     }
 
@@ -3388,7 +3388,7 @@ function handleFileSelect(file) {
 
 async function startUpload() {
   if (!selectedFile) {
-    alert(uploadSelectionError || "請先選擇一個音檔！");
+    alert(uploadSelectionError || "請先選擇一個音訊或影片檔！");
     return;
   }
   if (!isSupportedUploadFile(selectedFile)) {
