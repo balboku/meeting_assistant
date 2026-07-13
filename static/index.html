@@ -1339,8 +1339,8 @@
     <div class="upload-area" id="drop-zone" onclick="document.getElementById('file-input').click()">
       <div class="icon">📤</div>
       <div id="file-name-display">點擊選擇檔案，或將檔案拖曳至此</div>
-      <span id="upload-limit-hint">支援 mp3, wav, m4a, aac, flac (預設最高 500MB)</span>
-      <input type="file" id="file-input" accept="audio/*,video/mp4,video/webm" />
+      <span id="upload-limit-hint">支援常見音訊/影片格式 (預設最高 500MB)</span>
+      <input type="file" id="file-input" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,.webm,.mp4,.mov,.avi,.mkv,.mpeg,.mpg,.wmv" />
     </div>
     <div class="form-group">
       <label class="form-label">自訂會議標題 (選填)</label>
@@ -1527,15 +1527,15 @@ let runtimeConfig = {
   max_upload_mb: 500,
   max_upload_bytes: 500 * 1024 * 1024,
   source_media_archive_retention_days: 90,
-  supported_extensions: ['.mp3', '.wav', '.m4a', '.aac', '.flac'],
+  supported_extensions: ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.webm', '.mp4', '.mov', '.avi', '.mkv', '.mpeg', '.mpg', '.wmv'],
   recording_profiles: {
     audio_standard: { audio_bps: 48000, audio_sample_rate: 24000, audio_channels: 1, video_bps: 0, video_fps: 0 },
     audio_compact: { audio_bps: 32000, audio_sample_rate: 16000, audio_channels: 1, video_bps: 0, video_fps: 0 },
     video_balanced: { audio_bps: 48000, audio_sample_rate: 24000, audio_channels: 1, video_bps: 1000000, video_fps: 15 }
   }
 };
-const FALLBACK_UPLOAD_ACCEPT = 'audio/*,video/mp4,video/webm';
-const FALLBACK_UPLOAD_EXTENSIONS = ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.webm', '.mp4'];
+const FALLBACK_UPLOAD_EXTENSIONS = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.webm', '.mp4', '.mov', '.avi', '.mkv', '.mpeg', '.mpg', '.wmv'];
+const FALLBACK_UPLOAD_ACCEPT = FALLBACK_UPLOAD_EXTENSIONS.join(',');
 let sourceStorageInventoryState = {
   files: [],
   archivedFiles: [],
