@@ -3613,9 +3613,13 @@ function closeRecordModal() {
     cancelActiveRecording();
     return;
   }
-  // 如果正在錄製，先停止並釋放資源
   if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.stop();
+    if (!confirm('目前正在錄製，關閉視窗會取消本次錄製且不會送出 AI 分析。確定要取消嗎？')) {
+      return;
+    }
+    discardActiveLocalRecording();
+    recModal.classList.remove('show');
+    return;
   }
   releaseRecordingStreams();
   if (recTimerInterval) clearInterval(recTimerInterval);
@@ -3735,7 +3739,7 @@ function releaseRecordingStreams() {
   recMicMuted = false;
 }
 
-function restoreRecorderAfterStartFailure() {
+function restoreRecorderIdleState(statusText = '錄製未開始，請重新確認權限後再試') {
   mediaRecorder = null;
   recordedChunks = [];
   recScreenAudioCaptured = false;
@@ -3757,7 +3761,7 @@ function restoreRecorderAfterStartFailure() {
   }
   recTimerEl.textContent = '00:00';
   recTimerEl.style.color = '';
-  recStatusEl.textContent = '錄製未開始，請重新確認權限後再試';
+  recStatusEl.textContent = statusText;
   btnRecStart.style.display = 'flex';
   btnRecStop.classList.remove('show');
   btnRecMic.classList.remove('show');
@@ -3765,6 +3769,24 @@ function restoreRecorderAfterStartFailure() {
   btnRecMic.textContent = '🎙 關閉麥克風';
   recPreview.srcObject = null;
   recPreview.classList.remove('show');
+}
+
+function discardActiveLocalRecording() {
+  const recorder = mediaRecorder;
+  if (recorder && recorder.state === 'recording') {
+    recorder.onstop = null;
+    try {
+      recorder.stop();
+    } catch (err) {
+      console.warn('Unable to stop recorder while discarding local recording.', err);
+    }
+  }
+  releaseRecordingStreams();
+  restoreRecorderIdleState('錄製已取消，內容未送出');
+  activeRecordingMode = null;
+  activeRecordingProfileId = null;
+  setRecordingConfigurationLocked(false);
+  setRecordingSubmissionLocked(false);
 }
 
 async function mixAudioTracks(audioTracks, sampleRate) {
@@ -4032,7 +4054,7 @@ async function startRecording() {
 
   } catch (err) {
     releaseRecordingStreams();
-    restoreRecorderAfterStartFailure();
+    restoreRecorderIdleState();
     activeRecordingMode = null;
     activeRecordingProfileId = null;
     setRecordingConfigurationLocked(false);
