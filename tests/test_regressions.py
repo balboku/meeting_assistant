@@ -3574,6 +3574,10 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("source_media_archive_retention_days", html)
         self.assertIn("selectedFile.size > runtimeConfig.max_upload_bytes", html)
         self.assertIn("formatBytes(runtimeConfig.max_upload_bytes)", html)
+        self.assertIn("function supportedUploadExtensions", html)
+        self.assertIn("function updateUploadAcceptList", html)
+        self.assertIn("input.accept = extensions.length ? extensions.join(',') : FALLBACK_UPLOAD_ACCEPT", html)
+        self.assertIn("updateUploadAcceptList()", html)
 
     def test_web_ui_has_readable_api_errors_and_job_event_timeline(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")

@@ -1491,6 +1491,8 @@ let runtimeConfig = {
     video_balanced: { audio_bps: 48000, audio_sample_rate: 24000, audio_channels: 1, video_bps: 1000000, video_fps: 15 }
   }
 };
+const FALLBACK_UPLOAD_ACCEPT = 'audio/*,video/mp4,video/webm';
+const FALLBACK_UPLOAD_EXTENSIONS = ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.webm', '.mp4'];
 let sourceStorageInventoryState = {
   files: [],
   archivedFiles: [],
@@ -2005,11 +2007,27 @@ async function apiErrorMessage(res) {
 function updateUploadLimitHint() {
   const hint = document.getElementById('upload-limit-hint');
   if (!hint) return;
-  const extensions = (runtimeConfig.supported_extensions || [])
-    .filter(ext => ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.webm', '.mp4'].includes(ext))
+  const extensions = supportedUploadExtensions()
     .map(ext => ext.replace('.', ''))
     .join(', ');
   hint.textContent = `支援 ${extensions || '常見音訊/影片格式'}，單檔上限 ${formatBytes(runtimeConfig.max_upload_bytes)}`;
+}
+
+function supportedUploadExtensions() {
+  const configured = Array.isArray(runtimeConfig.supported_extensions)
+    ? runtimeConfig.supported_extensions
+    : [];
+  const normalized = configured
+    .map(ext => String(ext || '').trim().toLowerCase())
+    .filter(ext => ext.startsWith('.'));
+  return normalized.length ? normalized : FALLBACK_UPLOAD_EXTENSIONS;
+}
+
+function updateUploadAcceptList() {
+  const input = document.getElementById('file-input');
+  if (!input) return;
+  const extensions = supportedUploadExtensions();
+  input.accept = extensions.length ? extensions.join(',') : FALLBACK_UPLOAD_ACCEPT;
 }
 
 async function loadRuntimeConfig() {
@@ -2021,6 +2039,7 @@ async function loadRuntimeConfig() {
     console.warn('載入執行期設定失敗，使用預設值。', err);
   }
   updateUploadLimitHint();
+  updateUploadAcceptList();
   updateRecordingEstimate();
 }
 
