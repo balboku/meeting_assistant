@@ -449,6 +449,7 @@ def _directory_file_stats(
                     name=entry.name,
                     bytes=int(stat.st_size),
                     modified_at=datetime.fromtimestamp(stat.st_mtime),
+                    source_media_type=_storage_source_media_type(entry, linked_ref) if source_refs is not None else None,
                     linked_meeting_id=int(linked_ref["id"]) if linked_ref else None,
                     linked_meeting_title=str(linked_ref["title"]) if linked_ref else None,
                 )
@@ -464,6 +465,20 @@ def _source_audio_refs_by_name() -> dict[str, dict]:
         if source_name:
             refs.setdefault(source_name, row)
     return refs
+
+
+def _storage_source_media_type(entry: Path, linked_ref: Optional[dict] = None) -> Optional[str]:
+    if entry.suffix.lower() not in SUPPORTED_MEDIA_FORMATS:
+        return None
+    record = {
+        "source_audio": str(linked_ref.get("source_audio") if linked_ref else entry),
+        "quality_report": linked_ref.get("quality_report") if linked_ref else {},
+    }
+    try:
+        return _source_media_type(record, entry)
+    except Exception as exc:
+        logger.debug("Unable to detect source media type for %s: %s", entry, exc)
+        return None
 
 
 def _source_media_file_by_name(filename: str) -> Path:
@@ -524,6 +539,7 @@ def _source_media_inventory(limit: int = 100) -> SourceMediaInventoryResponse:
                 name=entry.name,
                 bytes=file_bytes,
                 modified_at=datetime.fromtimestamp(stat.st_mtime),
+                source_media_type=_storage_source_media_type(entry, linked_ref),
                 linked_meeting_id=int(linked_ref["id"]) if linked_ref else None,
                 linked_meeting_title=str(linked_ref["title"]) if linked_ref else None,
             )

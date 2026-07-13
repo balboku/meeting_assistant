@@ -2208,6 +2208,7 @@ class MetricsRegressionTests(unittest.TestCase):
                 source_audio="meeting-b.webm",
                 output_path=str(output_dir / "meeting-b.md"),
                 summary="video summary",
+                quality_report={"recording": {"profile": "video_balanced"}},
             )
 
             with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
@@ -2234,8 +2235,10 @@ class MetricsRegressionTests(unittest.TestCase):
             ["meeting-b.webm", "meeting-a.mp3", "meeting-c.m4a"],
         )
         self.assertEqual(storage["source_media_largest_files"][0]["bytes"], len(b"video-bb"))
+        self.assertEqual(storage["source_media_largest_files"][0]["source_media_type"], "video")
         self.assertEqual(storage["source_media_largest_files"][0]["linked_meeting_id"], video_meeting_id)
         self.assertEqual(storage["source_media_largest_files"][0]["linked_meeting_title"], "Video B")
+        self.assertEqual(storage["source_media_largest_files"][1]["source_media_type"], "audio")
         self.assertEqual(storage["source_media_largest_files"][1]["linked_meeting_id"], audio_meeting_id)
         self.assertIsNone(storage["source_media_largest_files"][2]["linked_meeting_id"])
         self.assertEqual(storage["meeting_markdown_files"], 2)
@@ -2247,6 +2250,8 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual(inventory["unlinked_files"], 1)
         self.assertEqual(inventory["unlinked_bytes"], len(b"ccc"))
         self.assertEqual([item["name"] for item in inventory["files"]], ["meeting-b.webm", "meeting-a.mp3"])
+        self.assertEqual(inventory["files"][0]["source_media_type"], "video")
+        self.assertEqual(inventory["files"][1]["source_media_type"], "audio")
         self.assertEqual(inventory["files"][0]["linked_meeting_id"], video_meeting_id)
         self.assertEqual(inventory["files"][1]["linked_meeting_title"], "Audio A")
         self.assertEqual(inventory_media_response.status_code, 200)
@@ -3210,6 +3215,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("function deleteUnlinkedSourceMedia", html)
         self.assertIn("const sourceUrl = `${API}/source-media/inventory/${encodeURIComponent(filename)}`", html)
         self.assertIn("const downloadUrl = `${sourceUrl}?download=1`", html)
+        self.assertIn("const mediaType = String(file.source_media_type || '').toLowerCase()", html)
+        self.assertIn("source-storage-badge media-type", html)
         self.assertIn("/source-media/inventory?limit=100", html)
         self.assertIn("/source-media/inventory/${encodeURIComponent(filename)}", html)
         self.assertIn("method: 'DELETE'", html)

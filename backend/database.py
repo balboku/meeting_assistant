@@ -1328,12 +1328,21 @@ def list_meeting_source_audio_refs() -> list[dict]:
     """Return lightweight meeting references keyed by retained source media."""
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT id, title, source_audio, created_at
+            """SELECT id, title, source_audio, created_at, quality_report_json
                FROM meetings
                WHERE COALESCE(source_audio, '') <> ''
                ORDER BY created_at DESC, id DESC"""
         ).fetchall()
-        return [dict(row) for row in rows]
+        refs = []
+        for row in rows:
+            record = dict(row)
+            quality_report_json = record.pop("quality_report_json", None)
+            try:
+                record["quality_report"] = json.loads(quality_report_json) if quality_report_json else None
+            except json.JSONDecodeError:
+                record["quality_report"] = None
+            refs.append(record)
+        return refs
 
 
 def get_meeting(meeting_id: int) -> Optional[dict]:

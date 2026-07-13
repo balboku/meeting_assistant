@@ -124,6 +124,7 @@ class StorageFileMetric(BaseModel):
     name: str
     bytes: int
     modified_at: Optional[datetime] = None
+    source_media_type: Optional[str] = None
     linked_meeting_id: Optional[int] = None
     linked_meeting_title: Optional[str] = None
 
