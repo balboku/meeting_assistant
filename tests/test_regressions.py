@@ -3761,6 +3761,7 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("recResult.classList.toggle('error'", html)
         self.assertIn("if (mode === 'screen') return '螢幕錄製';", html)
         self.assertIn("if (mode === 'video') return '鏡頭錄影';", html)
+        self.assertIn("`🔴 ${recordingModeLabel()}中...`", html)
         self.assertIn("function toggleRecordingMic", html)
         self.assertIn("function updateRecordingMicToggle", html)
         self.assertIn("function canMuteRecordingMic", html)

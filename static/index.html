@@ -3953,7 +3953,9 @@ async function startRecording() {
     // UI 更新
     btnRecStart.style.display = 'none';
     btnRecStop.classList.add('show');
-    recStatusEl.textContent = recMode === 'screen' ? screenRecordingStatusText() : '🔴 錄製中...';
+    recStatusEl.textContent = recMode === 'screen'
+      ? screenRecordingStatusText()
+      : `🔴 ${recordingModeLabel()}中...`;
     updateRecordingMicToggle();
     updateRecordingEstimate();
     recTimerEl.style.color = 'var(--red)';
