@@ -583,6 +583,10 @@
       border-color: var(--blue);
       background: rgba(122,162,247,0.16);
     }
+    .source-media-action:disabled {
+      opacity: 0.55;
+      cursor: wait;
+    }
     .source-media-action.danger {
       color: var(--red);
       border-color: rgba(247,118,142,0.42);
@@ -684,6 +688,17 @@
       gap: 8px;
       max-height: min(64vh, 700px);
       overflow-y: auto;
+    }
+    .source-storage-more {
+      display: flex;
+      justify-content: center;
+      margin-top: 12px;
+    }
+    .source-storage-more[hidden] {
+      display: none;
+    }
+    .source-storage-load-more {
+      min-width: 180px;
     }
     .source-storage-item {
       display: grid;
@@ -1358,6 +1373,9 @@
     <div id="source-storage-status" class="source-storage-status" aria-live="polite"></div>
     <div id="source-storage-preview" class="source-storage-preview" aria-live="polite"></div>
     <div id="source-storage-list" class="source-storage-list" aria-live="polite"></div>
+    <div id="source-storage-more" class="source-storage-more" hidden>
+      <button id="source-storage-load-more" type="button" class="source-media-action source-storage-load-more" onclick="loadMoreSourceStorageInventory()">載入更多</button>
+    </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick="closeSourceStorageInventory()">關閉</button>
     </div>
@@ -1741,7 +1759,31 @@ function sourceStorageHiddenNotice(payload = {}, archivePayload = {}, files = []
   const parts = [];
   if (hiddenLive) parts.push(`保留原始檔 ${hiddenLive} 個`);
   if (hiddenArchive) parts.push(`已移除備份 ${hiddenArchive} 個`);
-  return `尚有未載入：${parts.join('、')}（目前上限 ${SOURCE_STORAGE_FETCH_LIMIT}）`;
+  return `尚有未載入：${parts.join('、')}（每次載入 ${SOURCE_STORAGE_FETCH_LIMIT}）`;
+}
+
+function sourceStorageStatusSummary() {
+  const payload = sourceStorageInventoryState.payload || {};
+  const archivePayload = sourceStorageInventoryState.archivePayload || {};
+  const files = sourceStorageInventoryState.files || [];
+  const archivedFiles = sourceStorageInventoryState.archivedFiles || [];
+  const totalLoaded = files.length + archivedFiles.length;
+  const totalAvailable = Number(payload.total_files || 0) + Number(archivePayload.total_files || 0);
+  const hiddenNotice = sourceStorageHiddenNotice(payload, archivePayload, files, archivedFiles);
+  return `最後更新：${formatDate(sourceStorageInventoryState.loadedAt)}；目前載入 ${totalLoaded} / ${totalAvailable} 個項目${hiddenNotice ? `；${hiddenNotice}` : ''}`;
+}
+
+function syncSourceStorageLoadMoreButton() {
+  const more = document.getElementById('source-storage-more');
+  const button = document.getElementById('source-storage-load-more');
+  if (!more || !button) return;
+  const payload = sourceStorageInventoryState.payload || {};
+  const archivePayload = sourceStorageInventoryState.archivePayload || {};
+  const hiddenLive = sourceStorageHiddenCount(payload.total_files, sourceStorageInventoryState.files.length);
+  const hiddenArchive = sourceStorageHiddenCount(archivePayload.total_files, sourceStorageInventoryState.archivedFiles.length);
+  const hiddenTotal = hiddenLive + hiddenArchive;
+  more.hidden = !sourceStorageInventoryState.loaded || hiddenTotal <= 0;
+  button.textContent = hiddenTotal > 0 ? `載入更多（尚有 ${hiddenTotal} 個）` : '載入更多';
 }
 
 function renderSourceStorageInventory() {
@@ -1800,6 +1842,58 @@ function renderSourceStorageInventory() {
     ));
   }
   list.innerHTML = `${summary}${sections.join('')}`;
+  syncSourceStorageLoadMoreButton();
+}
+
+async function fetchSourceStorageInventoryPage(liveOffset = 0, archiveOffset = 0) {
+  const [res, archiveRes] = await Promise.all([
+    fetch(`${API}/source-media/inventory?limit=${SOURCE_STORAGE_FETCH_LIMIT}&offset=${liveOffset}`),
+    fetch(`${API}/source-media/archive?limit=${SOURCE_STORAGE_FETCH_LIMIT}&offset=${archiveOffset}`)
+  ]);
+  if (!res.ok) throw new Error(await apiErrorMessage(res));
+  if (!archiveRes.ok) throw new Error(await apiErrorMessage(archiveRes));
+  const payload = await res.json();
+  const archivePayload = await archiveRes.json();
+  return {
+    payload,
+    archivePayload,
+    files: Array.isArray(payload.files) ? payload.files : [],
+    archivedFiles: Array.isArray(archivePayload.files) ? archivePayload.files : []
+  };
+}
+
+async function loadMoreSourceStorageInventory() {
+  if (!sourceStorageInventoryState.loaded) return;
+  const button = document.getElementById('source-storage-load-more');
+  const previousLabel = button?.textContent || '載入更多';
+  if (button) {
+    button.disabled = true;
+    button.textContent = '載入中';
+  }
+  try {
+    const page = await fetchSourceStorageInventoryPage(
+      sourceStorageInventoryState.files.length,
+      sourceStorageInventoryState.archivedFiles.length
+    );
+    sourceStorageInventoryState = {
+      files: [...sourceStorageInventoryState.files, ...page.files],
+      archivedFiles: [...sourceStorageInventoryState.archivedFiles, ...page.archivedFiles],
+      payload: page.payload,
+      archivePayload: page.archivePayload,
+      loadedAt: new Date().toISOString(),
+      loaded: true
+    };
+    renderSourceStorageInventory();
+    setSourceStorageStatus(sourceStorageStatusSummary());
+  } catch (err) {
+    setSourceStorageStatus(`載入更多失敗：${err.message}`, true);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = previousLabel;
+    }
+    syncSourceStorageLoadMoreButton();
+  }
 }
 
 async function openSourceStorageInventory() {
@@ -1811,36 +1905,24 @@ async function openSourceStorageInventory() {
   sourceStorageInventoryState.loaded = false;
   list.innerHTML = '<div class="detail-placeholder"><div class="loading-spinner"></div><p>載入原始檔清單...</p></div>';
   setSourceStorageStatus('正在更新原始檔清單...');
+  syncSourceStorageLoadMoreButton();
 
   try {
-    const [res, archiveRes] = await Promise.all([
-      fetch(`${API}/source-media/inventory?limit=${SOURCE_STORAGE_FETCH_LIMIT}`),
-      fetch(`${API}/source-media/archive?limit=${SOURCE_STORAGE_FETCH_LIMIT}`)
-    ]);
-    if (!res.ok) throw new Error(await apiErrorMessage(res));
-    if (!archiveRes.ok) throw new Error(await apiErrorMessage(archiveRes));
-    const payload = await res.json();
-    const archivePayload = await archiveRes.json();
-    const files = Array.isArray(payload.files) ? payload.files : [];
-    const archivedFiles = Array.isArray(archivePayload.files) ? archivePayload.files : [];
+    const page = await fetchSourceStorageInventoryPage(0, 0);
     sourceStorageInventoryState = {
-      files,
-      archivedFiles,
-      payload,
-      archivePayload,
+      files: page.files,
+      archivedFiles: page.archivedFiles,
+      payload: page.payload,
+      archivePayload: page.archivePayload,
       loadedAt: new Date().toISOString(),
       loaded: true
     };
     renderSourceStorageInventory();
-    const totalLoaded = files.length + archivedFiles.length;
-    const totalAvailable = Number(payload.total_files || 0) + Number(archivePayload.total_files || 0);
-    const hiddenNotice = sourceStorageHiddenNotice(payload, archivePayload, files, archivedFiles);
-    setSourceStorageStatus(
-      `最後更新：${formatDate(sourceStorageInventoryState.loadedAt)}；目前載入 ${totalLoaded} / ${totalAvailable} 個項目${hiddenNotice ? `；${hiddenNotice}` : ''}`
-    );
+    setSourceStorageStatus(sourceStorageStatusSummary());
   } catch (err) {
     sourceStorageInventoryState.loaded = false;
     setSourceStorageStatus(`更新失敗：${err.message}`, true);
+    syncSourceStorageLoadMoreButton();
     list.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>無法讀取原始檔清單：${escapeHtml(err.message)}</p></div>`;
   }
 }

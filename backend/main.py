@@ -525,7 +525,9 @@ def _source_media_file_by_name(filename: str) -> Path:
     return candidate
 
 
-def _source_media_inventory(limit: int = 100) -> SourceMediaInventoryResponse:
+def _source_media_inventory(limit: int = 100, offset: int = 0) -> SourceMediaInventoryResponse:
+    safe_limit = max(int(limit), 0)
+    safe_offset = max(int(offset), 0)
     count = 0
     total_bytes = 0
     unlinked_count = 0
@@ -570,13 +572,17 @@ def _source_media_inventory(limit: int = 100) -> SourceMediaInventoryResponse:
         )
 
     sorted_files = sorted(files, key=lambda item: item.bytes, reverse=True)
-    if limit > 0:
-        sorted_files = sorted_files[:limit]
+    if safe_limit > 0:
+        sorted_files = sorted_files[safe_offset:safe_offset + safe_limit]
+    elif safe_offset > 0:
+        sorted_files = sorted_files[safe_offset:]
 
     return SourceMediaInventoryResponse(
         generated_at=datetime.now(),
         total_files=count,
         total_bytes=total_bytes,
+        limit=safe_limit,
+        offset=safe_offset,
         unlinked_files=unlinked_count,
         unlinked_bytes=unlinked_bytes,
         files=sorted_files,
@@ -633,7 +639,9 @@ def _source_media_archive_file_by_id(archive_id: str) -> Path:
     return candidate
 
 
-def _source_media_archive(limit: int = 100) -> SourceMediaArchiveResponse:
+def _source_media_archive(limit: int = 100, offset: int = 0) -> SourceMediaArchiveResponse:
+    safe_limit = max(int(limit), 0)
+    safe_offset = max(int(offset), 0)
     archive_root = _source_media_archive_root()
     files: list[SourceMediaArchiveRecord] = []
     total_files = 0
@@ -679,11 +687,17 @@ def _source_media_archive(limit: int = 100) -> SourceMediaArchiveResponse:
                 )
             )
 
-    sorted_files = sorted(files, key=lambda item: (item.modified_at or datetime.min, item.bytes), reverse=True)[:limit]
+    sorted_files = sorted(files, key=lambda item: (item.modified_at or datetime.min, item.bytes), reverse=True)
+    if safe_limit > 0:
+        sorted_files = sorted_files[safe_offset:safe_offset + safe_limit]
+    elif safe_offset > 0:
+        sorted_files = sorted_files[safe_offset:]
     return SourceMediaArchiveResponse(
         generated_at=datetime.now(),
         total_files=total_files,
         total_bytes=total_bytes,
+        limit=safe_limit,
+        offset=safe_offset,
         files=sorted_files,
     )
 
@@ -831,9 +845,12 @@ async def metrics():
     summary="原始媒體檔案清單",
     tags=["系統"],
 )
-async def source_media_inventory(limit: int = Query(100, ge=1, le=500)):
+async def source_media_inventory(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
     """回傳保留原始錄音/錄影的唯讀維運清單。"""
-    return _source_media_inventory(limit=limit)
+    return _source_media_inventory(limit=limit, offset=offset)
 
 
 @app.get(
@@ -842,9 +859,12 @@ async def source_media_inventory(limit: int = Query(100, ge=1, le=500)):
     summary="列出已移除原始媒體備份",
     tags=["蝟餌絞"],
 )
-async def source_media_archive(limit: int = Query(100, ge=1, le=500)):
+async def source_media_archive(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
     """List source media files that were removed from inventory and archived."""
-    return _source_media_archive(limit=limit)
+    return _source_media_archive(limit=limit, offset=offset)
 
 
 @app.get(

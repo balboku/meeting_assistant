@@ -147,6 +147,8 @@ class SourceMediaInventoryResponse(BaseModel):
     generated_at: datetime
     total_files: int
     total_bytes: int
+    limit: int = 100
+    offset: int = 0
     unlinked_files: int = 0
     unlinked_bytes: int = 0
     files: list[StorageFileMetric] = Field(default_factory=list)
@@ -176,6 +178,8 @@ class SourceMediaArchiveResponse(BaseModel):
     generated_at: datetime
     total_files: int
     total_bytes: int
+    limit: int = 100
+    offset: int = 0
     files: list[SourceMediaArchiveRecord] = Field(default_factory=list)
 
 
