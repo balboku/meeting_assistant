@@ -1260,6 +1260,7 @@
       <div class="search-wrap">
         <span class="search-icon">🔍</span>
         <input id="search-input" type="text"
+               aria-label="搜尋會議標題或內容關鍵字"
                placeholder="搜尋會議標題或內容關鍵字..."
                autocomplete="off" />
         <div id="search-status" class="search-status" aria-live="polite"></div>
@@ -1374,7 +1375,7 @@
       <input type="file" id="file-input" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,.webm,.mp4,.mov,.avi,.mkv,.mpeg,.mpg,.wmv" />
     </div>
     <div class="form-group">
-      <label class="form-label">自訂會議標題 (選填)</label>
+      <label class="form-label" for="custom-title">自訂會議標題 (選填)</label>
       <input type="text" id="custom-title" class="form-input" placeholder="例如：2026 Q3 產品規畫會議" />
     </div>
     <div class="progress-box" id="progress-box">
@@ -1439,20 +1440,20 @@
       <button class="modal-close" aria-label="關閉原始檔清單" onclick="closeSourceStorageInventory()">×</button>
     </div>
     <div class="source-storage-controls">
-      <input id="source-storage-search" class="form-input" type="search" placeholder="搜尋檔名或會議" oninput="renderSourceStorageInventory()" />
-      <select id="source-storage-filter" class="form-input" onchange="renderSourceStorageInventory()">
+      <input id="source-storage-search" class="form-input" type="search" aria-label="搜尋原始檔檔名或會議" placeholder="搜尋檔名或會議" oninput="renderSourceStorageInventory()" />
+      <select id="source-storage-filter" class="form-input" aria-label="原始檔連結狀態篩選" onchange="renderSourceStorageInventory()">
         <option value="all">全部原始檔</option>
         <option value="unlinked">未連結會議</option>
         <option value="linked">已連結會議</option>
         <option value="archive">已移除備份</option>
       </select>
-      <select id="source-storage-media-filter" class="form-input" onchange="renderSourceStorageInventory()">
+      <select id="source-storage-media-filter" class="form-input" aria-label="原始檔媒體類型篩選" onchange="renderSourceStorageInventory()">
         <option value="all">全部類型</option>
         <option value="video">只看錄影</option>
         <option value="audio">只看音訊</option>
         <option value="unknown">未知類型</option>
       </select>
-      <select id="source-storage-sort" class="form-input" onchange="renderSourceStorageInventory()">
+      <select id="source-storage-sort" class="form-input" aria-label="原始檔排序方式" onchange="renderSourceStorageInventory()">
         <option value="modified_desc">最近更新</option>
         <option value="bytes_desc">容量大到小</option>
         <option value="name_asc">檔名 A-Z</option>
@@ -1515,7 +1516,7 @@
 
     <!-- 標題 -->
     <div class="form-group" style="margin-bottom: 16px;">
-      <label class="form-label">會議標題 (選填)</label>
+      <label class="form-label" for="rec-title">會議標題 (選填)</label>
       <input type="text" id="rec-title" class="form-input" placeholder="例如：週例會" />
     </div>
 
