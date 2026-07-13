@@ -1438,6 +1438,8 @@ function renderSourceStorageFile(file) {
 function renderSourceArchiveFile(file) {
   const archiveId = String(file.archive_id || '');
   const filename = String(file.name || file.archived_name || '');
+  const archiveUrl = `${API}/source-media/archive/file?archive_id=${encodeURIComponent(archiveId)}`;
+  const downloadUrl = `${archiveUrl}&download=1`;
   const mediaType = String(file.source_media_type || '').toLowerCase();
   const mediaTypeLabel = mediaType === 'video' ? '影片' : mediaType === 'audio' ? '音訊' : '';
   return `<div class="source-storage-item">
@@ -1451,6 +1453,8 @@ function renderSourceArchiveFile(file) {
       </div>
     </div>
     <div class="source-storage-actions">
+      <a class="source-media-action" href="${escapeHtml(archiveUrl)}" target="_blank" rel="noopener noreferrer">開啟</a>
+      <a class="source-media-action" href="${escapeHtml(downloadUrl)}" download>下載</a>
       <button type="button" class="source-media-action" data-archive-id="${escapeHtml(archiveId)}" data-source-file="${escapeHtml(filename)}" onclick="restoreSourceMediaArchive(this.dataset.archiveId, this.dataset.sourceFile)">還原</button>
     </div>
   </div>`;

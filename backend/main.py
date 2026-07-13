@@ -784,6 +784,29 @@ async def source_media_archive(limit: int = Query(100, ge=1, le=500)):
     return _source_media_archive(limit=limit)
 
 
+@app.get(
+    "/source-media/archive/file",
+    summary="播放或下載已移除原始媒體備份",
+    tags=["蝟餌絞"],
+    responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+)
+async def get_source_media_archive_file(
+    archive_id: str = Query(..., description="GET /source-media/archive 回傳的 archive_id。"),
+    download: bool = Query(False, description="設為 true 時以下載附件形式回傳備份原始檔。"),
+):
+    """Return an archived source media file for review before restore."""
+    archive_path = _source_media_archive_file_by_id(archive_id)
+    original_name = _archive_original_name(archive_path.name)
+    media_type = _source_media_content_type({"source_audio": original_name, "quality_report": {}}, archive_path)
+    return FileResponse(
+        path=archive_path,
+        filename=original_name,
+        media_type=media_type,
+        headers={"Accept-Ranges": "bytes"},
+        content_disposition_type="attachment" if download else "inline",
+    )
+
+
 @app.post(
     "/source-media/archive/restore",
     response_model=SourceMediaRestoreResponse,

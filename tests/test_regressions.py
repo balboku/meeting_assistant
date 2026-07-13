@@ -2229,6 +2229,18 @@ class MetricsRegressionTests(unittest.TestCase):
                 deleted_backup_content = deleted_backup_path.read_bytes() if deleted_backup_exists else b""
                 archive_response = asgi_request(main.app, "GET", "/source-media/archive?limit=10")
                 restore_archive_id = archive_response.json()["files"][0]["archive_id"]
+                archive_file_response = asgi_request(
+                    main.app,
+                    "GET",
+                    "/source-media/archive/file",
+                    params={"archive_id": restore_archive_id},
+                )
+                archive_download_response = asgi_request(
+                    main.app,
+                    "GET",
+                    "/source-media/archive/file",
+                    params={"archive_id": restore_archive_id, "download": "1"},
+                )
                 restore_response = asgi_request(
                     main.app,
                     "POST",
@@ -2294,6 +2306,13 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual(archive_payload["total_files"], 1)
         self.assertEqual(archive_payload["files"][0]["name"], "meeting-c.m4a")
         self.assertEqual(archive_payload["files"][0]["source_media_type"], "audio")
+        self.assertEqual(archive_file_response.status_code, 200)
+        self.assertIn("audio/mp4", archive_file_response.headers.get("content-type", ""))
+        self.assertIn("inline", archive_file_response.headers.get("content-disposition", ""))
+        self.assertEqual(archive_file_response.content, b"ccc")
+        self.assertEqual(archive_download_response.status_code, 200)
+        self.assertIn("attachment", archive_download_response.headers.get("content-disposition", ""))
+        self.assertEqual(archive_download_response.content, b"ccc")
         self.assertEqual(restore_response.status_code, 200)
         self.assertEqual(restore_response.json()["name"], "meeting-c.m4a")
         self.assertTrue(restored_file_exists)
@@ -3249,6 +3268,7 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("source-storage-badge media-type", html)
         self.assertIn("/source-media/inventory?limit=100", html)
         self.assertIn("/source-media/archive?limit=100", html)
+        self.assertIn("/source-media/archive/file?archive_id=", html)
         self.assertIn("/source-media/archive/restore?archive_id=", html)
         self.assertIn("/source-media/inventory/${encodeURIComponent(filename)}", html)
         self.assertIn("method: 'DELETE'", html)
