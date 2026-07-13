@@ -3641,6 +3641,7 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("overflow-wrap: break-word;", html)
         self.assertIn("word-break: keep-all;", html)
         self.assertIn("text-wrap: balance;", html)
+        self.assertNotIn("overflow-wrap: anywhere", html)
         self.assertIn("display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px;", html)
         self.assertIn(".card-meta span", html)
         self.assertIn("min-width: 0; max-width: 100%;", html)
