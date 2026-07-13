@@ -1635,7 +1635,7 @@ function sourceStorageMediaType(file = {}) {
   const sourceType = String(file.source_media_type || '').toLowerCase();
   if (sourceType === 'video' || sourceType === 'audio') return sourceType;
   const extension = sourceStorageExtension(file);
-  const videoExtensions = new Set(['.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);
+  const videoExtensions = new Set(['.webm', '.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);
   const audioExtensions = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.flac', '.wma']);
   if (videoExtensions.has(extension)) return 'video';
   if (audioExtensions.has(extension)) return 'audio';
@@ -2569,7 +2569,7 @@ function isVideoSource(meeting) {
   const sourceType = String(meeting?.source_media_type || '').toLowerCase();
   if (sourceType === 'video') return true;
   if (sourceType === 'audio') return false;
-  const videoExtensions = new Set(['.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);
+  const videoExtensions = new Set(['.webm', '.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);
   const profile = meeting?.recording_profile || meeting?.quality_report?.recording?.profile || '';
   const extension = sourceMediaExtension(meeting);
   if (profile === 'video_balanced') return true;
