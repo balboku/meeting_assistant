@@ -418,6 +418,12 @@
       border-color: rgba(158,206,106,0.35);
       background: rgba(158,206,106,0.08);
     }
+    .card-quality-chip.review-segments {
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .card-review-reason {
       margin-top: 8px;
       color: var(--yellow);
@@ -2522,6 +2528,9 @@ function renderCardQuality(record) {
   const score = record?.quality_score;
   const label = String(record?.quality_label || '').trim();
   const warningPreview = String(record?.quality_warning_preview || '').trim();
+  const reviewSegments = (record?.quality_review_segments || [])
+    .map(segment => String(segment || '').trim())
+    .filter(Boolean);
   const chips = [];
   if (score !== null && score !== undefined) {
     const reviewClass = Number(score) < 85 || /需|警|低|不/.test(label)
@@ -2533,6 +2542,12 @@ function renderCardQuality(record) {
   }
   if (warningCount > 0) {
     chips.push(`<span class="card-quality-chip needs-review">需複核 ${warningCount}</span>`);
+  }
+  if (reviewSegments.length) {
+    const segmentText = reviewSegments.length > 3
+      ? `${reviewSegments.slice(0, 3).join('、')} 等 ${reviewSegments.length} 段`
+      : reviewSegments.join('、');
+    chips.push(`<span class="card-quality-chip needs-review review-segments" title="需複核分段：${escapeHtml(reviewSegments.join('、'))}">分段：${escapeHtml(segmentText)}</span>`);
   }
   const qualityRow = chips.length ? `<div class="card-quality-row">${chips.join('')}</div>` : '';
   const reason = warningPreview

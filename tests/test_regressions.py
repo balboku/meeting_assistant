@@ -2711,11 +2711,49 @@ class SearchRegressionTests(unittest.TestCase):
             listed["quality_warning_preview"],
             "第 2 段：疑似連續重複轉錄：同一句連續重複 31 次",
         )
+        self.assertEqual(listed["quality_review_segments"], ["第 2 段"])
+        self.assertEqual(listed["quality_review_segment_count"], 1)
         self.assertEqual(searched["quality_warning_count"], listed["quality_warning_count"])
         self.assertEqual(searched["quality_warning_preview"], listed["quality_warning_preview"])
+        self.assertEqual(searched["quality_review_segments"], ["第 2 段"])
+        self.assertEqual(searched["quality_review_segment_count"], 1)
         self.assertEqual(issue_search["id"], meeting_id)
         self.assertEqual(issue_review_search["id"], meeting_id)
         self.assertIn(meeting_id, [row["id"] for row in needs_review])
+
+    def test_list_and_search_include_review_segment_labels(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "review-segments.md"
+        output_path.write_text("review-segments-content", encoding="utf-8")
+        quality_report = {
+            "score": 91,
+            "label": "可用",
+            "warnings": ["逐字稿品質警示：需抽查"],
+            "review_segments": [
+                {"index": 1, "label": "第 2 段", "issues": ["疑似連續重複轉錄"]},
+                {"index": 3, "issues": ["時間戳不連續"]},
+            ],
+            "segments": [
+                {"index": 1, "issues": ["疑似連續重複轉錄"]},
+                {"index": 3, "issues": []},
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Review Segment Labels",
+            date="2026/07/12",
+            source_audio="review-segments.webm",
+            output_path=str(output_path),
+            summary="review-segments-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Review Segment Labels")[0]
+
+        self.assertEqual(listed["quality_review_segments"], ["第 2 段", "第 4 段"])
+        self.assertEqual(listed["quality_review_segment_count"], 2)
+        self.assertEqual(searched["quality_review_segments"], ["第 2 段", "第 4 段"])
+        self.assertEqual(searched["quality_review_segment_count"], 2)
 
     def test_list_and_search_include_source_media_type(self):
         database, tmp_path = self._isolated_database()
@@ -5123,6 +5161,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("review-filter", html)
         self.assertIn("quality_warning_count", html)
         self.assertIn("quality_warning_preview", html)
+        self.assertIn("quality_review_segments", html)
+        self.assertIn("card-quality-chip needs-review review-segments", html)
+        self.assertIn("需複核分段：${escapeHtml(reviewSegments.join('、'))}", html)
+        self.assertIn("分段：${escapeHtml(segmentText)}", html)
         self.assertIn("card-quality-chip", html)
         self.assertIn("card-review-reason", html)
         self.assertIn("原因：${escapeHtml(warningPreview)}", html)

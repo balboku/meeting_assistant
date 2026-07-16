@@ -1220,6 +1220,13 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
     quality_report_json = record.pop("quality_report_json", None)
     warning_count = 0
     warning_preview = None
+    review_segment_labels: list[str] = []
+
+    def add_review_segment_label(label: str) -> None:
+        cleaned = str(label or "").strip()
+        if cleaned and cleaned not in review_segment_labels:
+            review_segment_labels.append(cleaned)
+
     try:
         quality_report = json.loads(quality_report_json) if quality_report_json else None
     except json.JSONDecodeError:
@@ -1232,6 +1239,16 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             if warnings:
                 warning_preview = str(warnings[0]).strip() or None
         segment_issue_previews: list[str] = []
+        for review_segment in quality_report.get("review_segments") or []:
+            if not isinstance(review_segment, dict):
+                continue
+            label = str(review_segment.get("label") or "").strip()
+            if not label:
+                try:
+                    label = f"第 {int(review_segment.get('index', 0)) + 1} 段"
+                except (TypeError, ValueError):
+                    label = "分段"
+            add_review_segment_label(label)
         for segment in quality_report.get("segments") or []:
             if not isinstance(segment, dict):
                 continue
@@ -1243,6 +1260,7 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
                 issue_text = str(issue).strip()
                 if issue_text:
                     segment_issue_previews.append(f"{segment_label}：{issue_text}")
+                    add_review_segment_label(segment_label)
         if segment_issue_previews:
             warning_count += len(segment_issue_previews)
             if not warning_preview:
@@ -1264,6 +1282,8 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             warning_preview = f"品質標籤：{label}"
     record["quality_warning_count"] = warning_count
     record["quality_warning_preview"] = warning_preview
+    record["quality_review_segments"] = review_segment_labels
+    record["quality_review_segment_count"] = len(review_segment_labels)
     return record
 
 
