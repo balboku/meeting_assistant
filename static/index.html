@@ -2659,7 +2659,11 @@ function renderCardQuality(record) {
         : '';
       const display = `${label}${timeText}`;
       const issueText = issues[0] ? `：${issues[0]}` : '';
-      return { display, title: `${display}${issueText}` };
+      return {
+        display,
+        reason: issues[0] ? `${display}：${issues[0]}` : '',
+        title: `${display}${issueText}`,
+      };
     })
     .filter(Boolean);
   const reviewSegments = (reviewSegmentDetails.length ? reviewSegmentDetails : (record?.quality_review_segments || []))
@@ -2687,8 +2691,16 @@ function renderCardQuality(record) {
     chips.push(`<span class="card-quality-chip needs-review review-segments" title="需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}">分段：${escapeHtml(segmentText)}</span>`);
   }
   const qualityRow = chips.length ? `<div class="card-quality-row">${chips.join('')}</div>` : '';
-  const reason = warningPreview
-    ? `<div class="card-review-reason" title="${escapeHtml(warningPreview)}">原因：${escapeHtml(warningPreview)}</div>`
+  const reviewSegmentReasons = reviewSegmentDetails
+    .map(segment => String(segment.reason || '').trim())
+    .filter(Boolean);
+  const visibleReason = reviewSegmentReasons[0] || warningPreview;
+  const extraReasonText = reviewSegmentReasons.length > 1
+    ? `；另有 ${reviewSegmentReasons.length - 1} 段`
+    : '';
+  const reasonTitle = [...new Set([warningPreview, ...reviewSegmentReasons].filter(Boolean))].join('\n');
+  const reason = visibleReason
+    ? `<div class="card-review-reason" title="${escapeHtml(reasonTitle || visibleReason)}">原因：${escapeHtml(visibleReason)}${escapeHtml(extraReasonText)}</div>`
     : '';
   return `${qualityRow}${reason}`;
 }
