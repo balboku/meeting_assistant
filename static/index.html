@@ -579,6 +579,7 @@
       max-width: min(100%, 460px);
     }
     .quality-review-segment:hover { border-color: var(--yellow); background: rgba(242, 213, 207, 0.16); }
+    .quality-review-segment.media-only { border-style: dashed; }
     .quality-review-segment.unavailable {
       cursor: default;
       opacity: 0.78;
@@ -2980,15 +2981,25 @@ function qualityWarningSegmentIndices(warning = '', segments = []) {
   return indices;
 }
 
-function focusQualitySegment(segmentIndex) {
+function focusQualitySegment(segmentIndex, fallbackStartSeconds = null) {
   const index = Number(segmentIndex);
   const button = document.getElementById(`rerun-segment-${index}`);
+  const fallbackSeconds = Number(fallbackStartSeconds);
+  const hasFallbackSeconds = Number.isFinite(fallbackSeconds) && fallbackSeconds >= 0;
   if (!button) {
+    const mediaCued = hasFallbackSeconds && cueSourceMedia(fallbackSeconds);
+    if (mediaCued) {
+      setDetailStatus(`已定位第 ${index + 1} 段，原始檔已跳到 ${clockText(fallbackSeconds)}；此舊紀錄沒有可重跑的分段控制`);
+      return;
+    }
     setDetailStatus(`找不到第 ${index + 1} 段的重跑控制`);
     return;
   }
   const segment = button.closest('.segment-status');
-  const startSeconds = Number(segment?.dataset.startSeconds);
+  const segmentStartSeconds = Number(segment?.dataset.startSeconds);
+  const startSeconds = Number.isFinite(segmentStartSeconds) && segmentStartSeconds >= 0
+    ? segmentStartSeconds
+    : fallbackSeconds;
   const hasStartSeconds = Number.isFinite(startSeconds) && startSeconds >= 0;
   const mediaCued = hasStartSeconds && cueSourceMedia(startSeconds);
   const mediaHint = mediaCued ? `，原始檔已跳到 ${clockText(startSeconds)}` : '';
@@ -3029,7 +3040,17 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
       const timeText = hasTimeRange
         ? `${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)} · `
         : '';
+      const startSeconds = Number(segment.start_seconds);
+      const hasStartSeconds = Number.isFinite(startSeconds) && startSeconds >= 0;
+      const canCueSource = hasStartSeconds;
+      const focusArgs = hasStartSeconds ? `${index}, ${startSeconds}` : `${index}`;
       if (!canFocusSegment) {
+        if (canCueSource) {
+          return `<button type="button" class="quality-review-segment media-only" aria-describedby="detail-status" title="此舊紀錄沒有可重跑的分段控制，可定位原始檔時間" onclick="focusQualitySegment(${focusArgs})">
+            <span class="quality-review-segment-label">第 ${index + 1} 段</span>
+            <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
+          </button>`;
+        }
         return `<span class="quality-review-segment unavailable" aria-disabled="true" title="此舊紀錄沒有可定位的分段控制">
           <span class="quality-review-segment-label">第 ${index + 1} 段</span>
           <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
