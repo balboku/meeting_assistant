@@ -1066,6 +1066,15 @@
     .upload-area:hover, .upload-area.dragover {
       border-color: var(--blue); background: rgba(122, 162, 247, 0.05);
     }
+    .upload-area[aria-disabled="true"] {
+      cursor: wait;
+      opacity: 0.72;
+    }
+    .upload-area[aria-disabled="true"]:hover,
+    .upload-area[aria-disabled="true"].dragover {
+      border-color: var(--border);
+      background: transparent;
+    }
     .upload-area:focus-visible {
       border-color: var(--blue);
       box-shadow: 0 0 0 3px rgba(122,162,247,0.18);
@@ -1382,7 +1391,7 @@
       <div class="modal-title" id="upload-modal-title">上傳音訊/影片並產生會議記錄</div>
       <button class="modal-close" aria-label="關閉上傳視窗" onclick="closeUploadModal()">×</button>
     </div>
-    <div class="upload-area" id="drop-zone" role="button" tabindex="0" aria-label="選擇要上傳的音訊或影片檔案" aria-describedby="file-name-display upload-limit-hint" onclick="openUploadFilePicker()">
+    <div class="upload-area" id="drop-zone" role="button" tabindex="0" aria-label="選擇要上傳的音訊或影片檔案" aria-describedby="file-name-display upload-limit-hint" aria-disabled="false" onclick="openUploadFilePicker()">
       <div class="icon">📤</div>
       <div id="file-name-display">點擊選擇檔案，或將檔案拖曳至此</div>
       <span id="upload-limit-hint">支援常見音訊/影片格式 (預設最高 500MB)</span>
@@ -1392,7 +1401,7 @@
       <label class="form-label" for="custom-title">自訂會議標題 (選填)</label>
       <input type="text" id="custom-title" class="form-input" placeholder="例如：2026 Q3 產品規畫會議" />
     </div>
-    <div class="progress-box" id="progress-box">
+    <div class="progress-box" id="progress-box" role="status" aria-live="polite" aria-atomic="true" aria-busy="false">
       <div class="progress-text">
         <div class="loading-spinner" style="width: 14px; height: 14px; border-width: 2px;"></div>
         <span id="progress-msg">正在準備上傳...</span>
@@ -3547,6 +3556,8 @@ function updateUploadActionState() {
   btnUpload.title = !selectedFile
     ? (uploadSelectionError || '請先選擇支援的音訊或影片檔')
     : '';
+  progressBox?.setAttribute('aria-busy', String(uploadBusy));
+  dropZone?.setAttribute('aria-disabled', String(uploadBusy));
 }
 
 function resetUploadForm() {
@@ -3566,6 +3577,7 @@ function resetUploadForm() {
 }
 
 function openUploadFilePicker() {
+  if (uploadBusy) return;
   fileInput.click();
 }
 
@@ -3582,6 +3594,7 @@ dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover
 dropZone.addEventListener('drop', e => {
   e.preventDefault();
   dropZone.classList.remove('dragover');
+  if (uploadBusy) return;
   if (e.dataTransfer.files.length) handleFileSelect(e.dataTransfer.files[0]);
 });
 fileInput.addEventListener('change', e => {
@@ -3589,6 +3602,7 @@ fileInput.addEventListener('change', e => {
 });
 
 function handleFileSelect(file) {
+  if (uploadBusy) return;
   selectedFile = null;
   uploadSelectionError = '';
   const sizeText = formatBytes(file.size);
