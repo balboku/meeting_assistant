@@ -2656,9 +2656,13 @@ function updateRecordingEstimate() {
 function cardWarningTypeLabel(warningPreview = '', hasReviewSegments = false) {
   const warning = String(warningPreview || '').trim();
   if (warning.startsWith('摘要品質警示')) return '摘要警示';
-  if (/錄音|音檔|媒體|音量|爆音|靜音|聲道|取樣率/.test(warning)) return '錄音警示';
+  if (isRecordingQualityWarning(warning)) return '錄音警示';
   if (warning.startsWith('逐字稿品質警示') || hasReviewSegments) return '逐字稿警示';
   return '品質警示';
+}
+
+function isRecordingQualityWarning(warning = '') {
+  return /錄音|音檔|媒體|音量|爆音|靜音|聲道|取樣率/.test(String(warning || ''));
 }
 
 function renderCardQuality(record) {
@@ -2713,6 +2717,8 @@ function renderCardQuality(record) {
     chips.push(`<span class="card-quality-chip needs-review" title="${escapeHtml(warningPreview || warningType)}">${escapeHtml(warningType)} ${warningCount}</span>`);
     if (warningPreview.startsWith('摘要品質警示') && hasRecordId) {
       chips.push(`<button type="button" class="card-quality-chip needs-review card-quality-action" title="沿用逐字稿，只重新產生摘要、決議與待辦" aria-label="重整摘要：${escapeHtml(record?.title || `#${recordId}`)}" onclick="rerunSummaryFromCard(event, ${recordId})">↻ 重整摘要</button>`);
+    } else if (isRecordingQualityWarning(warningPreview) && hasRecordId) {
+      chips.push(`<button type="button" class="card-quality-chip needs-review card-quality-action" title="開啟會議並檢查原始音訊或錄影" aria-label="檢查原始檔：${escapeHtml(record?.title || `#${recordId}`)}" onclick="openDetailAndFocusSourceMedia(event, ${recordId})">🎧 檢查原始檔</button>`);
     }
   }
   if (reviewSegments.length) {
@@ -2805,6 +2811,18 @@ async function rerunSummaryFromCard(event, id) {
   event?.stopPropagation();
   event?.preventDefault();
   await rerunMeeting(id, null, true, false);
+}
+
+async function openDetailAndFocusSourceMedia(event, id) {
+  event?.stopPropagation();
+  event?.preventDefault();
+  await openDetail(id);
+  const focus = () => focusSourceMediaEvidence();
+  if (window.requestAnimationFrame) {
+    window.requestAnimationFrame(focus);
+  } else {
+    setTimeout(focus, 0);
+  }
 }
 
 function setElementBusy(element, busy) {
@@ -3025,6 +3043,7 @@ function renderQualityActions(meeting, warnings = []) {
   if (!meetingId || !warnings.length) return '';
   const hasSummaryWarning = warnings.some(warning => String(warning).startsWith('摘要品質警示'));
   const hasTranscriptWarning = warnings.some(warning => String(warning).startsWith('逐字稿品質警示'));
+  const hasRecordingWarning = warnings.some(isRecordingQualityWarning);
   const actions = [];
   if (hasSummaryWarning) {
     actions.push(
@@ -3037,6 +3056,11 @@ function renderQualityActions(meeting, warnings = []) {
   if (hasTranscriptWarning) {
     actions.push(
       `<button id="quality-rerun-full-button" class="quality-action" aria-describedby="detail-status" aria-busy="false" title="重新轉錄並重新產生完整會議紀錄" onclick="rerunMeeting(${meetingId}, null, false, false, 'quality-rerun-full-button')">🔁 完整重跑</button>`
+    );
+  }
+  if (hasRecordingWarning) {
+    actions.push(
+      `<button id="quality-check-source-media-button" class="quality-action" aria-describedby="detail-status" title="跳到原始音訊或錄影播放器，手動抽查警示內容" onclick="focusSourceMediaEvidence()">🎧 檢查原始檔</button>`
     );
   }
   return actions.length ? `<div class="quality-actions">${actions.join('')}</div>` : '';
@@ -3367,6 +3391,19 @@ function cueSourceMedia(seconds = 0) {
   } catch (error) {
     return false;
   }
+}
+
+function focusSourceMediaEvidence() {
+  const evidence = document.getElementById('source-media-evidence');
+  const player = document.getElementById('source-media-player');
+  if (!evidence) {
+    setDetailStatus('找不到原始檔播放器');
+    return false;
+  }
+  evidence.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  player?.focus?.({ preventScroll: true });
+  setDetailStatus('已定位原始檔播放器，請抽查錄音或錄影品質警示時段');
+  return true;
 }
 
 function enhanceTranscriptTimecodes(container) {

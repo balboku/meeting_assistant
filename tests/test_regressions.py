@@ -5825,11 +5825,17 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('id="quality-rerun-full-button" class="quality-action" aria-describedby="detail-status" aria-busy="false"', html)
         self.assertIn("function renderCardQuality", html)
         self.assertIn("function cardWarningTypeLabel", html)
+        self.assertIn("function isRecordingQualityWarning", html)
         self.assertIn("function openDetailAndFocusSegment", html)
+        self.assertIn("function openDetailAndFocusSourceMedia", html)
         self.assertIn("function rerunSummaryFromCard", html)
         self.assertIn("event?.stopPropagation()", html)
         self.assertIn("await openDetail(id);", html)
         self.assertIn("await rerunMeeting(id, null, true, false);", html)
+        self.assertIn("function focusSourceMediaEvidence", html)
+        self.assertIn("const evidence = document.getElementById('source-media-evidence');", html)
+        self.assertIn("evidence.scrollIntoView({ block: 'center', behavior: 'smooth' });", html)
+        self.assertIn("setDetailStatus('已定位原始檔播放器，請抽查錄音或錄影品質警示時段');", html)
         self.assertIn("window.requestAnimationFrame(focus)", html)
         self.assertIn("function isNeedsReviewRecord", html)
         self.assertIn("const reviewSegmentCount = Number(record?.quality_review_segment_count || 0);", html)
@@ -5864,6 +5870,11 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("return '摘要警示';", html)
         self.assertIn("return '逐字稿警示';", html)
         self.assertIn("return '錄音警示';", html)
+        self.assertIn("const hasRecordingWarning = warnings.some(isRecordingQualityWarning);", html)
+        self.assertIn('id="quality-check-source-media-button"', html)
+        self.assertIn("onclick=\"focusSourceMediaEvidence()\"", html)
+        self.assertIn("openDetailAndFocusSourceMedia(event, ${recordId})", html)
+        self.assertIn("檢查原始檔：${escapeHtml(record?.title || `#${recordId}`)}", html)
         self.assertIn("const warningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0);", html)
         self.assertIn("${escapeHtml(warningType)} ${warningCount}", html)
         self.assertIn("onclick=\"rerunSummaryFromCard(event, ${recordId})\"", html)
@@ -6058,7 +6069,7 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('cardWarningTypeLabel'), grab('renderCardQuality')].join('\\n');
+const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('renderCardQuality')].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 const label1 = '第 1 段';
@@ -6127,7 +6138,7 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('cardWarningTypeLabel'), grab('renderCardQuality')].join('\\n');
+const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('renderCardQuality')].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderCardQuality({{
@@ -6181,7 +6192,7 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('cardWarningTypeLabel'), grab('renderCardQuality')].join('\\n');
+const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('renderCardQuality')].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderCardQuality({{
@@ -6201,11 +6212,64 @@ if (!sandbox.result.includes('分段：第 8 段 70:00-80:00')) {{
   console.error(sandbox.result);
   process.exit(5);
 }}
-if (sandbox.result.includes('逐字稿警示 1')) {{
+if (!sandbox.result.includes('openDetailAndFocusSourceMedia(event, 43)')) {{
   console.error(sandbox.result);
   process.exit(6);
 }}
+if (sandbox.result.includes('逐字稿警示 1')) {{
+  console.error(sandbox.result);
+  process.exit(7);
+}}
 console.log('audio_card_quality_label_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_render_quality_actions_offer_source_media_check_for_recording_warning(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function renderQualityActions'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [grab('isRecordingQualityWarning'), grab('renderQualityActions')].join('\\n');
+const sandbox = {{}};
+vm.runInNewContext(code + `
+result = renderQualityActions({{ id: 44 }}, ['偵測到可能的爆音；原始媒體檔已保留，重要內容請抽查。']);
+`, sandbox);
+if (!sandbox.result.includes('quality-check-source-media-button')) {{
+  console.error(sandbox.result);
+  process.exit(4);
+}}
+if (!sandbox.result.includes('focusSourceMediaEvidence()')) {{
+  console.error(sandbox.result);
+  process.exit(5);
+}}
+if (sandbox.result.includes('rerunMeeting')) {{
+  console.error(sandbox.result);
+  process.exit(6);
+}}
+console.log('recording_quality_action_ok');
 """
         try:
             result = subprocess.run(
