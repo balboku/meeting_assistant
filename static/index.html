@@ -460,6 +460,10 @@
       border-color: rgba(224,175,104,0.45);
       background: rgba(224,175,104,0.08);
     }
+    .card-quality-chip.review-segment-note {
+      color: var(--text-mid);
+      border-style: dashed;
+    }
     .card-quality-chip.card-quality-action {
       cursor: pointer;
       font: inherit;
@@ -2831,6 +2835,8 @@ function renderCardQuality(record) {
     }
     if (hasRecordId && rerunnableSegmentIndices.length) {
       chips.push(`<button type="button" id="card-rerun-review-segments-${recordId}" class="card-quality-chip needs-review card-quality-action" title="只重跑已標記需複核的分段，其他分段沿用快取" aria-label="重跑需複核分段：${escapeHtml(record?.title || `#${recordId}`)}" onclick="rerunReviewSegmentsFromCard(event, ${recordId}, [${rerunnableSegmentIndices.join(',')}])">↻ 重跑問題分段</button>`);
+    } else if (hasRecordId) {
+      chips.push(`<span class="card-quality-chip needs-review review-segment-note" title="此紀錄缺少可直接重跑的分段資料；請開啟問題分段後依原始檔時間複核">需詳情複核</span>`);
     }
   }
   const qualityRow = chips.length ? `<div class="card-quality-row">${chips.join('')}</div>` : '';

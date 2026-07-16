@@ -6085,6 +6085,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("clockText(segment.start_seconds)}-${clockText(segment.end_seconds)", html)
         self.assertIn("card-quality-chip needs-review review-segments", html)
         self.assertIn("card-quality-chip needs-review transcript-review", html)
+        self.assertIn("card-quality-chip needs-review review-segment-note", html)
         self.assertIn("問題分段：${escapeHtml(segmentText)}", html)
         self.assertIn("需複核：${escapeHtml(visibleReason)}", html)
         self.assertIn("逐字稿警示 ${reviewSegments.length} 段", html)
@@ -6092,6 +6093,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("id=\"card-rerun-review-segments-${recordId}\"", html)
         self.assertIn("onclick=\"rerunReviewSegmentsFromCard(event, ${recordId}, [${rerunnableSegmentIndices.join(',')}])\"", html)
         self.assertIn("↻ 重跑問題分段", html)
+        self.assertIn("需詳情複核", html)
         self.assertIn("card-quality-action", html)
         self.assertIn("onclick=\"openDetailAndFocusSegment(event, ${focusArgs})\"", html)
         self.assertIn("開啟會議並定位${escapeHtml(focusSegment.display)}", html)
@@ -6311,6 +6313,10 @@ if (!sandbox.result.includes('↻ 重跑問題分段')) {{
   console.error(sandbox.result);
   process.exit(10);
 }}
+if (sandbox.result.includes('需詳情複核')) {{
+  console.error(sandbox.result);
+  process.exit(11);
+}}
 console.log('grouped_card_reason_ok');
 """
         try:
@@ -6434,6 +6440,10 @@ if (!sandbox.result.includes('rerunReviewSegmentsFromCard(event, 43, [7])')) {{
   console.error(sandbox.result);
   process.exit(9);
 }}
+if (sandbox.result.includes('需詳情複核')) {{
+  console.error(sandbox.result);
+  process.exit(10);
+}}
 console.log('audio_card_quality_label_ok');
 """
         try:
@@ -6489,6 +6499,10 @@ if (sandbox.result.includes('rerunReviewSegmentsFromCard')) {{
 if (sandbox.result.includes('重跑問題分段')) {{
   console.error(sandbox.result);
   process.exit(6);
+}}
+if (!sandbox.result.includes('需詳情複核')) {{
+  console.error(sandbox.result);
+  process.exit(7);
 }}
 console.log('card_hides_unrerunnable_segments_ok');
 """
