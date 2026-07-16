@@ -3128,7 +3128,7 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
           <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
         </span>`;
       }
-      return `<button type="button" class="quality-review-segment" aria-describedby="detail-status" onclick="focusQualitySegment(${index})">
+      return `<button type="button" class="quality-review-segment" aria-describedby="detail-status" onclick="focusQualitySegment(${focusArgs})">
         <span class="quality-review-segment-label">第 ${index + 1} 段</span>
         <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
       </button>`;
