@@ -1227,6 +1227,21 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         if cleaned and cleaned not in review_segment_labels:
             review_segment_labels.append(cleaned)
 
+    def add_review_segment_labels_from_text(text: str) -> None:
+        content = str(text or "")
+        matchers = (
+            re.compile(r"第\s*(\d+)\s*段"),
+            re.compile(r"\bSegment\s*#?\s*(\d+)\b", flags=re.IGNORECASE),
+        )
+        for matcher in matchers:
+            for match in matcher.finditer(content):
+                try:
+                    index = int(match.group(1))
+                except (TypeError, ValueError):
+                    continue
+                if index > 0:
+                    add_review_segment_label(f"第 {index} 段")
+
     try:
         quality_report = json.loads(quality_report_json) if quality_report_json else None
     except json.JSONDecodeError:
@@ -1238,6 +1253,8 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             warning_count = len(warnings)
             if warnings:
                 warning_preview = str(warnings[0]).strip() or None
+            for warning in warnings:
+                add_review_segment_labels_from_text(str(warning))
         segment_issue_previews: list[str] = []
         for review_segment in quality_report.get("review_segments") or []:
             if not isinstance(review_segment, dict):

@@ -2755,6 +2755,40 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(searched["quality_review_segments"], ["第 2 段", "第 4 段"])
         self.assertEqual(searched["quality_review_segment_count"], 2)
 
+    def test_list_and_search_infer_review_segments_from_warning_text(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "warning-segments.md"
+        output_path.write_text("warning-segments-content", encoding="utf-8")
+        quality_report = {
+            "score": 88,
+            "label": "需複核",
+            "warnings": [
+                (
+                    "逐字稿品質警示：疑似連續重複轉錄"
+                    "（同一句連續重複 31 次：因為我是結所以我領車；"
+                    "疑似分段：第 2 段｜10:00-20:00、Segment #4｜30:00-40:00；"
+                    "重複時間：10:00-10:03），建議重跑上述分段或複核相關內容。"
+                )
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Warning Segment Labels",
+            date="2026/07/12",
+            source_audio="warning-segments.webm",
+            output_path=str(output_path),
+            summary="warning-segments-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Warning Segment Labels")[0]
+
+        self.assertEqual(listed["quality_warning_count"], 1)
+        self.assertEqual(listed["quality_review_segments"], ["第 2 段", "第 4 段"])
+        self.assertEqual(listed["quality_review_segment_count"], 2)
+        self.assertEqual(searched["quality_review_segments"], ["第 2 段", "第 4 段"])
+        self.assertEqual(searched["quality_review_segment_count"], 2)
+
     def test_list_and_search_include_source_media_type(self):
         database, tmp_path = self._isolated_database()
         video_output = tmp_path / "video.md"
