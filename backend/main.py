@@ -1546,41 +1546,101 @@ def _normalize_detail_turn_text(text: str) -> str:
     return re.sub(r"[，。,.、；;：:！!？?\-—~「」『』（）()\[\]【】\"'`*_]+", "", normalized)
 
 
+def _detail_format_clock(total_seconds: int) -> str:
+    minutes, seconds = divmod(max(0, int(total_seconds or 0)), 60)
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _detail_repetition_location(
+    timestamps: list[int],
+    segments: Optional[list[dict]] = None,
+) -> str:
+    if not timestamps:
+        return ""
+
+    start_time = min(timestamps)
+    end_time = max(timestamps)
+    time_range = f"重複時間：{_detail_format_clock(start_time)}-{_detail_format_clock(end_time)}"
+    if not segments:
+        return time_range
+
+    matched: list[str] = []
+    for segment in segments:
+        try:
+            index = int(segment.get("index", len(matched))) + 1
+            start_seconds = int(segment.get("start_seconds", 0))
+            end_seconds = int(segment.get("end_seconds", start_seconds + 1))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if end_seconds <= start_seconds:
+            end_seconds = start_seconds + 1
+        overlaps = (
+            any(start_seconds <= timestamp < end_seconds for timestamp in timestamps)
+            or (start_seconds <= start_time <= end_seconds)
+            or (start_seconds <= end_time <= end_seconds)
+        )
+        if overlaps:
+            matched.append(
+                f"第 {index} 段｜{_detail_format_clock(start_seconds)}-{_detail_format_clock(end_seconds)}"
+            )
+
+    if not matched:
+        return time_range
+
+    if len(matched) > 3:
+        segment_text = "、".join(matched[:3]) + f" 等 {len(matched)} 段"
+    else:
+        segment_text = "、".join(matched)
+    return f"疑似分段：{segment_text}；{time_range}"
+
+
 def _detail_transcript_repeated_turn_warning(
     transcript: str,
     *,
     limit: int = 3,
+    segments: Optional[list[dict]] = None,
 ) -> Optional[str]:
     pattern = re.compile(
-        r"\[\d{1,3}:[0-5]\d\]\s*(?:\*\*\[[^\]]+\]\*\*|\[[^\]]+\])?\s*[：:]?\s*(?P<text>.+)"
+        r"\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\d)\]\s*"
+        r"(?:\*\*\[[^\]]+\]\*\*|\[[^\]]+\])?\s*[：:]?\s*(?P<text>.+)"
     )
     max_run = 0
     max_text = ""
+    max_timestamps: list[int] = []
     current_text = ""
     current_run = 0
+    current_timestamps: list[int] = []
     for line in (transcript or "").splitlines():
         match = pattern.search(line)
         if not match:
             continue
         normalized = _normalize_detail_turn_text(match.group("text"))
+        timestamp = int(match.group("minutes")) * 60 + int(match.group("seconds"))
         if len(normalized) < 8:
             current_text = ""
             current_run = 0
+            current_timestamps = []
             continue
         if normalized == current_text:
             current_run += 1
+            current_timestamps.append(timestamp)
         else:
             current_text = normalized
             current_run = 1
+            current_timestamps = [timestamp]
         if current_run > max_run:
             max_run = current_run
             max_text = normalized
+            max_timestamps = list(current_timestamps)
 
     if max_run > limit:
         preview = max_text[:24]
+        location = _detail_repetition_location(max_timestamps, segments)
+        location_text = f"；{location}" if location else ""
         return (
             "逐字稿品質警示：疑似連續重複轉錄"
-            f"（同一句連續重複 {max_run} 次：{preview}），建議重跑或複核相關分段。"
+            f"（同一句連續重複 {max_run} 次：{preview}{location_text}），"
+            "建議重跑上述分段或複核相關內容。"
         )
     return None
 
@@ -1713,12 +1773,23 @@ async def get_meeting_detail(meeting_id: int):
             f"逐字稿品質警示：{issue}"
             for issue in _full_transcript_quality_issues(transcript)
         ]
-        repeated_turn_warning = _detail_transcript_repeated_turn_warning(transcript)
+        repeated_turn_warning = _detail_transcript_repeated_turn_warning(
+            transcript,
+            segments=quality_report.get("segments") or _transcript_segment_metadata(transcript),
+        )
         if repeated_turn_warning:
             transcript_warnings.append(repeated_turn_warning)
+        existing_warnings = [
+            warning
+            for warning in list(quality_report.get("warnings") or [])
+            if not (
+                repeated_turn_warning
+                and str(warning).startswith("逐字稿品質警示：疑似連續重複轉錄")
+            )
+        ]
         if transcript_warnings:
             warnings = [
-                *list(quality_report.get("warnings") or []),
+                *existing_warnings,
                 *transcript_warnings,
             ]
             quality_report.update({

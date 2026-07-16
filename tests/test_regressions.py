@@ -4766,7 +4766,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         import backend.main as main
 
         repeated_turns = "".join(
-            f"[00:{index:02d}] **[發言者 A]**：這一句不應該連續重複。\n"
+            f"[10:{index:02d}] **[發言者 A]**：這一句不應該連續重複。\n"
             for index in range(4)
         )
         record = {
@@ -4780,13 +4780,17 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             "quality_score": None,
             "quality_label": None,
             "created_at": "2026-07-08 10:00:00",
-            "quality_report": None,
+            "quality_report": {
+                "warnings": ["逐字稿品質警示：疑似連續重複轉錄（舊版未定位）"],
+            },
             "full_content": (
                 "## 一、討論摘要 (Discussion Summary)\n摘要\n"
                 "## 二、最終決議 (Final Decisions)\n決議\n"
                 "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
                 "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
                 "### 【第 1 段｜00:00 – 10:00】\n"
+                "[00:00] **[發言者 A]**：第一段正常。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n"
                 "*(註：為節省篇幅，已省略逐字稿中重複內容)*\n"
                 f"{repeated_turns}"
             ),
@@ -4800,6 +4804,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("逐字稿品質警示", warnings)
         self.assertIn("省略", warnings)
         self.assertIn("重複", warnings)
+        self.assertIn("第 2 段｜10:00-20:00", warnings)
+        self.assertIn("重複時間：10:00-10:03", warnings)
+        self.assertNotIn("舊版未定位", warnings)
         self.assertEqual(report["label"], "舊紀錄，已重建分段")
 
     def test_meeting_detail_flags_unlinked_legacy_summary_in_quality_report(self):
