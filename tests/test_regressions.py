@@ -2364,6 +2364,34 @@ class MetricsRegressionTests(unittest.TestCase):
                 summary="metrics needs review",
                 quality_report={"score": 91, "label": "ok", "warnings": ["review this"]},
             )
+            database.save_meeting(
+                title="Metrics Summary Warning",
+                date="2026/07/12",
+                source_audio="metrics-summary.webm",
+                output_path=str(output_path),
+                summary="metrics summary warning",
+                quality_report={"warnings": ["摘要品質警示：討論摘要未使用 D 編號"]},
+            )
+            database.save_meeting(
+                title="Metrics Recording Warning",
+                date="2026/07/12",
+                source_audio="metrics-recording.webm",
+                output_path=str(output_path),
+                summary="metrics recording warning",
+                quality_report={"warnings": ["偵測到可能的爆音；原始媒體檔已保留。"]},
+            )
+            database.save_meeting(
+                title="Metrics Transcript Warning",
+                date="2026/07/12",
+                source_audio="metrics-transcript.webm",
+                output_path=str(output_path),
+                summary="metrics transcript warning",
+                quality_report={
+                    "review_segments": [
+                        {"index": 0, "label": "第 1 段", "issues": ["需複核"]},
+                    ],
+                },
+            )
 
             response = asgi_request(main.app, "GET", "/metrics")
 
@@ -2372,8 +2400,12 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual(payload["jobs"]["total"], 2)
         self.assertEqual(payload["jobs"]["by_status"]["pending"], 1)
         self.assertEqual(payload["jobs"]["by_status"]["failed"], 1)
-        self.assertEqual(payload["meetings"]["total"], 1)
-        self.assertEqual(payload["meetings"]["needs_review"], 1)
+        self.assertEqual(payload["meetings"]["total"], 4)
+        self.assertEqual(payload["meetings"]["needs_review"], 4)
+        self.assertEqual(payload["meetings"]["quality_summary"], 1)
+        self.assertEqual(payload["meetings"]["quality_recording"], 1)
+        self.assertEqual(payload["meetings"]["quality_transcript"], 1)
+        self.assertEqual(payload["meetings"]["quality_other"], 1)
         self.assertEqual(payload["recent_errors"][0]["job_id"], "metrics-failed")
         self.assertEqual(payload["recent_errors"][0]["error_detail"], "metrics error")
         self.assertIn("storage", payload)
@@ -4099,10 +4131,25 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("維運狀態", html)
         self.assertIn('id="ops-needs-review"', html)
         self.assertIn('id="ops-needs-review-tile" title="顯示需複核會議" role="button" tabindex="0" aria-label="顯示需複核會議"', html)
+        self.assertIn('id="ops-quality-summary-tile" title="顯示摘要警示會議" role="button" tabindex="0" aria-label="顯示摘要警示會議"', html)
+        self.assertIn('id="ops-quality-recording-tile" title="顯示錄音警示會議" role="button" tabindex="0" aria-label="顯示錄音警示會議"', html)
+        self.assertIn('id="ops-quality-transcript-tile" title="顯示逐字稿警示會議" role="button" tabindex="0" aria-label="顯示逐字稿警示會議"', html)
+        self.assertIn('id="ops-quality-summary"', html)
+        self.assertIn('id="ops-quality-recording"', html)
+        self.assertIn('id="ops-quality-transcript"', html)
         self.assertIn('id="ops-source-storage-tile" title="原始錄音/錄影保留容量" role="button" tabindex="0" aria-label="開啟原始檔清單"', html)
         self.assertIn(".ops-tile.actionable:focus-visible", html)
         self.assertIn("outline: 2px solid var(--blue);", html)
         self.assertIn("data.meetings?.needs_review", html)
+        self.assertIn("data.meetings?.quality_summary", html)
+        self.assertIn("data.meetings?.quality_recording", html)
+        self.assertIn("data.meetings?.quality_transcript", html)
+        self.assertIn("function showQualityTypeMeetings", html)
+        self.assertIn("function selectedQualityFilterTypeValue", html)
+        self.assertIn("qualityTypeFilter.value = selectedQualityFilterTypeValue(type);", html)
+        self.assertIn("showQualityTypeMeetings('summary')", html)
+        self.assertIn("showQualityTypeMeetings('recording')", html)
+        self.assertIn("showQualityTypeMeetings('transcript')", html)
         self.assertIn('id="ops-source-storage"', html)
         self.assertIn('id="ops-source-storage-tile"', html)
         self.assertIn('id="source-storage-modal"', html)

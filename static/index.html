@@ -1559,10 +1559,28 @@
       <div class="ops-value" id="ops-failed-jobs">–</div>
     </div>
     <div class="ops-tile actionable" id="ops-needs-review-tile" title="顯示需複核會議" role="button" tabindex="0" aria-label="顯示需複核會議"
-         onclick="showNeedsReviewMeetings()"
-         onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showNeedsReviewMeetings(); }">
+         onclick="showQualityTypeMeetings('all')"
+         onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showQualityTypeMeetings('all'); }">
       <div class="ops-label">需複核</div>
       <div class="ops-value" id="ops-needs-review">–</div>
+    </div>
+    <div class="ops-tile actionable" id="ops-quality-summary-tile" title="顯示摘要警示會議" role="button" tabindex="0" aria-label="顯示摘要警示會議"
+         onclick="showQualityTypeMeetings('summary')"
+         onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showQualityTypeMeetings('summary'); }">
+      <div class="ops-label">摘要警示</div>
+      <div class="ops-value" id="ops-quality-summary">–</div>
+    </div>
+    <div class="ops-tile actionable" id="ops-quality-recording-tile" title="顯示錄音警示會議" role="button" tabindex="0" aria-label="顯示錄音警示會議"
+         onclick="showQualityTypeMeetings('recording')"
+         onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showQualityTypeMeetings('recording'); }">
+      <div class="ops-label">錄音警示</div>
+      <div class="ops-value" id="ops-quality-recording">–</div>
+    </div>
+    <div class="ops-tile actionable" id="ops-quality-transcript-tile" title="顯示逐字稿警示會議" role="button" tabindex="0" aria-label="顯示逐字稿警示會議"
+         onclick="showQualityTypeMeetings('transcript')"
+         onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showQualityTypeMeetings('transcript'); }">
+      <div class="ops-label">逐字稿警示</div>
+      <div class="ops-value" id="ops-quality-transcript">–</div>
     </div>
     <div class="ops-tile actionable" id="ops-source-storage-tile" title="原始錄音/錄影保留容量" role="button" tabindex="0" aria-label="開啟原始檔清單"
          onclick="openSourceStorageInventory()"
@@ -4301,13 +4319,16 @@ async function loadMetrics() {
   const totalEl = document.getElementById('ops-total-jobs');
   const failedEl = document.getElementById('ops-failed-jobs');
   const needsReviewEl = document.getElementById('ops-needs-review');
+  const qualitySummaryEl = document.getElementById('ops-quality-summary');
+  const qualityRecordingEl = document.getElementById('ops-quality-recording');
+  const qualityTranscriptEl = document.getElementById('ops-quality-transcript');
   const sourceStorageEl = document.getElementById('ops-source-storage');
   const sourceStorageTile = document.getElementById('ops-source-storage-tile');
   const averageEl = document.getElementById('ops-average-seconds');
   const ngrokEl = document.getElementById('ops-ngrok');
   const ngrokDetailEl = document.getElementById('ops-ngrok-detail');
   const ngrokTile = document.getElementById('ops-ngrok-tile');
-  if (!healthEl || !totalEl || !failedEl || !needsReviewEl || !sourceStorageEl || !sourceStorageTile || !averageEl || !ngrokEl || !ngrokDetailEl || !ngrokTile) return;
+  if (!healthEl || !totalEl || !failedEl || !needsReviewEl || !qualitySummaryEl || !qualityRecordingEl || !qualityTranscriptEl || !sourceStorageEl || !sourceStorageTile || !averageEl || !ngrokEl || !ngrokDetailEl || !ngrokTile) return;
 
   try {
     const [metricsRes, healthRes] = await Promise.all([
@@ -4328,6 +4349,15 @@ async function loadMetrics() {
     const needsReview = data.meetings?.needs_review ?? 0;
     needsReviewEl.textContent = needsReview;
     needsReviewEl.classList.toggle('attention', needsReview > 0);
+    const summaryWarnings = Number(data.meetings?.quality_summary || 0);
+    const recordingWarnings = Number(data.meetings?.quality_recording || 0);
+    const transcriptWarnings = Number(data.meetings?.quality_transcript || 0);
+    qualitySummaryEl.textContent = summaryWarnings;
+    qualityRecordingEl.textContent = recordingWarnings;
+    qualityTranscriptEl.textContent = transcriptWarnings;
+    qualitySummaryEl.classList.toggle('attention', summaryWarnings > 0);
+    qualityRecordingEl.classList.toggle('attention', recordingWarnings > 0);
+    qualityTranscriptEl.classList.toggle('attention', transcriptWarnings > 0);
     const storage = data.storage || {};
     const sourceFiles = Number(storage.source_media_files || 0);
     const sourceBytes = Number(storage.source_media_bytes || 0);
@@ -4366,12 +4396,24 @@ async function loadMetrics() {
   }
 }
 
-function showNeedsReviewMeetings() {
+function showQualityTypeMeetings(type = 'all') {
   const filter = document.getElementById('needs-review-filter');
+  const qualityTypeFilter = document.getElementById('quality-type-filter');
   const search = document.getElementById('search-input');
   if (!filter || !search) return;
   if (!filter.checked) filter.checked = true;
+  if (qualityTypeFilter) {
+    qualityTypeFilter.value = selectedQualityFilterTypeValue(type);
+  }
   loadMeetings(search.value.trim());
+}
+
+function selectedQualityFilterTypeValue(type = 'all') {
+  return ['summary', 'recording', 'transcript', 'other'].includes(type) ? type : 'all';
+}
+
+function showNeedsReviewMeetings() {
+  showQualityTypeMeetings('all');
 }
 
 // ── 上傳與輪詢邏輯 ──────────────────────────────────────────────────

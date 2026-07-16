@@ -950,6 +950,10 @@ async def metrics():
         meetings={
             "total": count_meetings(),
             "needs_review": count_meetings(needs_review=True),
+            "quality_summary": count_meetings(quality_type="summary"),
+            "quality_recording": count_meetings(quality_type="recording"),
+            "quality_transcript": count_meetings(quality_type="transcript"),
+            "quality_other": count_meetings(quality_type="other"),
         },
         storage=_storage_metrics(),
         ngrok=get_ngrok_status(expected_port=SERVER_PORT),
