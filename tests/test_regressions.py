@@ -6022,6 +6022,62 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("videoBitsPerSecond", html)
         self.assertIn("recording_profile", html)
 
+    def test_render_card_quality_groups_review_reasons_by_issue(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function renderCardQuality'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [grab('escapeHtml'), grab('clockText'), grab('renderCardQuality')].join('\\n');
+const sandbox = {{}};
+vm.runInNewContext(code + `
+const label1 = '第 1 段';
+const label2 = '第 2 段';
+const issue = '疑似連續重複轉錄；重複時間：09:59-10:02';
+result = renderCardQuality({{
+  quality_warning_count: 1,
+  quality_warning_preview: '逐字稿品質警示',
+  quality_review_segment_details: [
+    {{ label: label1, start_seconds: 599, end_seconds: 600, issues: [issue] }},
+    {{ label: label2, start_seconds: 600, end_seconds: 602, issues: [issue] }}
+  ]
+}});
+`, sandbox);
+const expected = '第 1 段 09:59-10:00、第 2 段 10:00-10:02：疑似連續重複轉錄；重複時間：09:59-10:02';
+if (!sandbox.result.includes(expected)) {{
+  console.error(sandbox.result);
+  process.exit(4);
+}}
+if (sandbox.result.includes('另有 1 段')) {{
+  console.error(sandbox.result);
+  process.exit(5);
+}}
+console.log('grouped_card_reason_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
