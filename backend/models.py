@@ -249,6 +249,7 @@ class MeetingRecord(BaseModel):
     quality_review_segment_details: list[dict] = Field(default_factory=list, description="需複核分段與時間範圍")
     quality_review_segment_summary: Optional[str] = Field(None, description="需複核分段、時間與原因摘要")
     quality_review_segment_count: int = Field(0, description="需複核分段數量")
+    quality_review_rerunnable_segments: list[int] = Field(default_factory=list, description="可直接指定重跑的零起算分段索引")
     source_media_type: Optional[str] = Field(None, description="原始檔媒體類型：audio 或 video")
     created_at: datetime
 

@@ -2965,9 +2965,11 @@ class SearchRegressionTests(unittest.TestCase):
                 {"label": "第 4 段", "index": 3, "start_seconds": 1800, "end_seconds": 2400, "issues": ["時間戳不連續"]},
             ],
         )
+        self.assertEqual(listed["quality_review_rerunnable_segments"], [1, 3])
         self.assertEqual(listed["quality_review_segment_count"], 2)
         self.assertEqual(searched["quality_review_segments"], ["第 2 段", "第 4 段"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
+        self.assertEqual(searched["quality_review_rerunnable_segments"], listed["quality_review_rerunnable_segments"])
         self.assertEqual(searched["quality_review_segment_count"], 2)
 
     def test_needs_review_filter_includes_review_segments_without_warnings(self):
@@ -3004,8 +3006,42 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(listed["quality_warning_count"], 0)
         self.assertEqual(listed["quality_review_segment_count"], 1)
         self.assertEqual(listed["quality_review_segments"], ["第 1 段"])
+        self.assertEqual(listed["quality_review_rerunnable_segments"], [])
         self.assertEqual([row["id"] for row in filtered], [meeting_id])
         self.assertEqual([row["id"] for row in searched], [meeting_id])
+
+    def test_list_marks_legacy_markdown_review_segments_rerunnable_when_headings_exist(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "legacy-rerunnable.md"
+        output_path.write_text(
+            "## 四、完整逐字稿 (Verbatim Transcript)\n"
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] [發言者 A]：第一段內容。\n",
+            encoding="utf-8",
+        )
+        quality_report = {
+            "score": 95,
+            "label": "ok",
+            "warnings": [],
+            "review_segments": [
+                {"index": 0, "label": "第 1 段", "issues": ["舊紀錄需複核"]},
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Legacy Rerunnable Segment",
+            date="2026/07/12",
+            source_audio="legacy-rerunnable.webm",
+            output_path=str(output_path),
+            summary="legacy-rerunnable-keyword",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("legacy-rerunnable-keyword")[0]
+
+        self.assertEqual(listed["quality_review_segments"], ["第 1 段"])
+        self.assertEqual(listed["quality_review_rerunnable_segments"], [0])
+        self.assertEqual(searched["quality_review_rerunnable_segments"], [0])
 
     def test_list_and_search_infer_review_segments_from_warning_text(self):
         database, tmp_path = self._isolated_database()
@@ -6017,6 +6053,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality_review_segments", html)
         self.assertIn("quality_review_segment_details", html)
         self.assertIn("quality_review_segment_summary", html)
+        self.assertIn("quality_review_rerunnable_segments", html)
         self.assertIn("return '摘要警示';", html)
         self.assertIn("return '逐字稿警示';", html)
         self.assertIn("return '錄音警示';", html)
@@ -6051,7 +6088,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("問題分段：${escapeHtml(segmentText)}", html)
         self.assertIn("需複核：${escapeHtml(visibleReason)}", html)
         self.assertIn("逐字稿警示 ${reviewSegments.length} 段", html)
-        self.assertIn("const rerunnableSegmentIndices = reviewSegmentDetails", html)
+        self.assertIn("const rerunnableSegmentIndices = normalizeSegmentIndices(record?.quality_review_rerunnable_segments || []);", html)
         self.assertIn("id=\"card-rerun-review-segments-${recordId}\"", html)
         self.assertIn("onclick=\"rerunReviewSegmentsFromCard(event, ${recordId}, [${rerunnableSegmentIndices.join(',')}])\"", html)
         self.assertIn("↻ 重跑問題分段", html)
@@ -6228,7 +6265,7 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('renderCardQuality')].join('\\n');
+const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('renderCardQuality')].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 const label1 = '第 1 段';
@@ -6238,6 +6275,7 @@ result = renderCardQuality({{
   id: 17,
   quality_warning_count: 1,
   quality_warning_preview: '逐字稿品質警示',
+  quality_review_rerunnable_segments: [0, 1],
   quality_review_segment_details: [
     {{ index: 0, label: label1, start_seconds: 599, end_seconds: 600, issues: [issue] }},
     {{ index: 1, label: label2, start_seconds: 600, end_seconds: 602, issues: [issue] }}
@@ -6305,7 +6343,7 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('renderCardQuality')].join('\\n');
+const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('renderCardQuality')].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderCardQuality({{
@@ -6359,13 +6397,14 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('renderCardQuality')].join('\\n');
+const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('renderCardQuality')].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderCardQuality({{
   id: 43,
   quality_warning_count: 1,
   quality_warning_preview: '偵測到可能的爆音；原始媒體檔已保留，重要內容請抽查。',
+  quality_review_rerunnable_segments: [7],
   quality_review_segment_details: [
     {{ index: 7, label: '第 8 段', start_seconds: 4200, end_seconds: 4800, issues: ['疑似連續重複轉錄'] }}
   ]
@@ -6396,6 +6435,62 @@ if (!sandbox.result.includes('rerunReviewSegmentsFromCard(event, 43, [7])')) {{
   process.exit(9);
 }}
 console.log('audio_card_quality_label_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_render_card_quality_hides_segment_rerun_without_rerunnable_indices(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function renderCardQuality'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('renderCardQuality')].join('\\n');
+const sandbox = {{}};
+vm.runInNewContext(code + `
+result = renderCardQuality({{
+  id: 99,
+  quality_warning_count: 0,
+  quality_review_segment_details: [
+    {{ index: 0, label: '第 1 段', start_seconds: 0, end_seconds: 600, issues: ['舊紀錄需複核'] }}
+  ],
+  quality_review_rerunnable_segments: []
+}});
+`, sandbox);
+if (!sandbox.result.includes('問題分段：第 1 段 00:00-10:00')) {{
+  console.error(sandbox.result);
+  process.exit(4);
+}}
+if (sandbox.result.includes('rerunReviewSegmentsFromCard')) {{
+  console.error(sandbox.result);
+  process.exit(5);
+}}
+if (sandbox.result.includes('重跑問題分段')) {{
+  console.error(sandbox.result);
+  process.exit(6);
+}}
+console.log('card_hides_unrerunnable_segments_ok');
 """
         try:
             result = subprocess.run(

@@ -2808,9 +2808,7 @@ function renderCardQuality(record) {
     }
   }
   if (reviewSegments.length) {
-    const rerunnableSegmentIndices = reviewSegmentDetails
-      .map(segment => Number(segment.index))
-      .filter(index => Number.isInteger(index) && index >= 0);
+    const rerunnableSegmentIndices = normalizeSegmentIndices(record?.quality_review_rerunnable_segments || []);
     if (!hasTranscriptWarningChip) {
       const transcriptTitle = reviewSegmentSummary || reviewSegmentTitles.join('、') || reviewSegments.join('、');
       chips.push(`<span class="card-quality-chip needs-review transcript-review" title="逐字稿需複核分段：${escapeHtml(transcriptTitle)}">逐字稿警示 ${reviewSegments.length} 段</span>`);

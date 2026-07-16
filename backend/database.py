@@ -117,6 +117,36 @@ def _quality_review_segment_summary(details: list[dict[str, Any]], limit: int = 
     return "；".join(summaries) or None
 
 
+_TRANSCRIPT_SEGMENT_HEADING_PATTERN = re.compile(
+    r"(?m)^#{1,6}\s*(?:"
+    r"【第\s*(?P<zh_index>\d+)\s*段\s*[｜|]\s*"
+    r"(?P<zh_start>\d{1,3}:[0-5]\d)\s*[–—-]\s*(?P<zh_end>\d{1,3}:[0-5]\d|end)】"
+    r"|\[?Segment\s+(?P<en_index>\d+)(?:/\d+)?\s*[|｜]\s*"
+    r"(?P<en_start>\d{1,3}:[0-5]\d)\s*[–—-]\s*(?P<en_end>\d{1,3}:[0-5]\d|end)\]?)\s*$",
+    flags=re.IGNORECASE,
+)
+
+
+def _markdown_transcript_segment_indices(output_path: str) -> set[int]:
+    path = Path(output_path or "")
+    if not path.is_file():
+        return set()
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return set()
+    indices: set[int] = set()
+    for match in _TRANSCRIPT_SEGMENT_HEADING_PATTERN.finditer(text):
+        raw_index = match.group("zh_index") or match.group("en_index")
+        try:
+            index = int(raw_index) - 1
+        except (TypeError, ValueError):
+            continue
+        if index >= 0:
+            indices.add(index)
+    return indices
+
+
 def _repeated_transcript_turn_review_segments(
     transcript: str,
     *,
@@ -1355,6 +1385,7 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
     quality_warning_text = ""
     review_segment_labels: list[str] = []
     review_segment_detail_by_label: dict[str, dict[str, Any]] = {}
+    known_segment_indices: set[int] = set()
 
     def add_review_segment_label(
         label: str,
@@ -1448,6 +1479,8 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             if not isinstance(segment, dict):
                 continue
             segment_index = int_or_none(segment.get("index"))
+            if segment_index is not None and segment_index >= 0:
+                known_segment_indices.add(segment_index)
             segment_label = review_segment_label(segment_index) if segment_index is not None else "分段"
             for issue in segment.get("issues") or []:
                 issue_text = str(issue).strip()
@@ -1518,6 +1551,13 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         record["quality_review_segment_details"]
     )
     record["quality_review_segment_count"] = len(sorted_review_segment_labels)
+    if not known_segment_indices and record["quality_review_segment_details"]:
+        known_segment_indices = _markdown_transcript_segment_indices(str(record.get("output_path") or ""))
+    record["quality_review_rerunnable_segments"] = [
+        detail["index"]
+        for detail in record["quality_review_segment_details"]
+        if isinstance(detail.get("index"), int) and detail["index"] in known_segment_indices
+    ]
     return record
 
 
