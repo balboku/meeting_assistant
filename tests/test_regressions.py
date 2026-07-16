@@ -5739,7 +5739,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("setElementBusy(listEl, true)", html)
         self.assertIn("setElementBusy(listEl, false)", html)
         self.assertIn("AbortController", html)
-        self.assertIn("找到 ${fetchedRecords.length} 筆${reviewOnly ? '需複核且相關' : '相關'}會議記錄", html)
+        self.assertIn("找到 ${records.length} 筆${reviewOnly ? `需複核${filterSuffix}且相關` : '相關'}會議記錄", html)
         self.assertIn("function renderQualityReport", html)
         self.assertIn("quality_report", html)
         self.assertIn("quality-warning", html)
@@ -5862,7 +5862,22 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function sourceMediaShortLabel", html)
         self.assertIn("title=\"${sourceMediaKindLabel(r)}：${escapeHtml(r.source_audio)}\"", html)
         self.assertIn('id="needs-review-filter"', html)
+        self.assertIn('id="quality-type-filter"', html)
+        self.assertIn('aria-label="依品質警示類型篩選"', html)
+        self.assertIn('<option value="summary">摘要警示</option>', html)
+        self.assertIn('<option value="recording">錄音警示</option>', html)
+        self.assertIn('<option value="transcript">逐字稿警示</option>', html)
+        self.assertIn('<option value="other">其他品質警示</option>', html)
         self.assertIn("review-filter", html)
+        self.assertIn(".quality-type-filter", html)
+        self.assertIn("function selectedQualityFilterType", html)
+        self.assertIn("function qualityFilterLabel", html)
+        self.assertIn("function recordQualityWarningTypes", html)
+        self.assertIn("function qualityTypeMatchesRecord", html)
+        self.assertIn("const qualityType = selectedQualityFilterType();", html)
+        self.assertIn("const reviewOnly = Boolean(document.getElementById('needs-review-filter')?.checked) || qualityType !== 'all';", html)
+        self.assertIn("const records = fetchedRecords.filter(record => qualityTypeMatchesRecord(record, qualityType));", html)
+        self.assertIn("if (selectedQualityFilterType() !== 'all' && filter) filter.checked = true;", html)
         self.assertIn("quality_warning_count", html)
         self.assertIn("quality_warning_preview", html)
         self.assertIn("quality_review_segments", html)
@@ -6270,6 +6285,59 @@ if (sandbox.result.includes('rerunMeeting')) {{
   process.exit(6);
 }}
 console.log('recording_quality_action_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_quality_type_filter_matches_warning_categories(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function qualityTypeMatchesRecord'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [
+  grab('isRecordingQualityWarning'),
+  grab('recordQualityWarningTypes'),
+  grab('qualityTypeMatchesRecord')
+].join('\\n');
+const sandbox = {{}};
+vm.runInNewContext(code + `
+const summary = {{ quality_warning_count: 1, quality_warning_preview: '摘要品質警示：討論摘要未使用 D 編號' }};
+const recording = {{ quality_warning_count: 1, quality_warning_preview: '偵測到可能的爆音；原始媒體檔已保留。' }};
+const transcript = {{ quality_warning_count: 0, quality_review_segment_count: 1, quality_review_segment_details: [{{ index: 0 }}] }};
+const other = {{ quality_score: 80, quality_label: '需注意', quality_warning_count: 0 }};
+result = [
+  qualityTypeMatchesRecord(summary, 'summary'),
+  qualityTypeMatchesRecord(recording, 'recording'),
+  qualityTypeMatchesRecord(transcript, 'transcript'),
+  qualityTypeMatchesRecord(other, 'other'),
+  !qualityTypeMatchesRecord(recording, 'summary'),
+  qualityTypeMatchesRecord(recording, 'all')
+].every(Boolean);
+`, sandbox);
+if (!sandbox.result) process.exit(4);
+console.log('quality_type_filter_ok');
 """
         try:
             result = subprocess.run(

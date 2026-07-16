@@ -111,6 +111,18 @@
       width: 15px; height: 15px; accent-color: var(--yellow);
       cursor: pointer;
     }
+    .quality-type-filter {
+      min-height: 42px; padding: 0 36px 0 12px;
+      border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--bg-card); color: var(--text-mid);
+      font-family: inherit; font-size: 13px;
+      cursor: pointer;
+    }
+    .quality-type-filter:focus-visible {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(122,162,247,0.15);
+      outline: none;
+    }
 
     /* ── Job Dashboard ── */
     .job-dashboard {
@@ -1487,6 +1499,13 @@
         <input id="needs-review-filter" type="checkbox" />
         <span>只看需複核</span>
       </label>
+      <select id="quality-type-filter" class="quality-type-filter" aria-label="依品質警示類型篩選">
+        <option value="all">全部警示類型</option>
+        <option value="summary">摘要警示</option>
+        <option value="recording">錄音警示</option>
+        <option value="transcript">逐字稿警示</option>
+        <option value="other">其他品質警示</option>
+      </select>
     </div>
   </div>
 
@@ -2665,6 +2684,46 @@ function isRecordingQualityWarning(warning = '') {
   return /錄音|音檔|媒體|音量|爆音|靜音|聲道|取樣率/.test(String(warning || ''));
 }
 
+function selectedQualityFilterType() {
+  const value = document.getElementById('quality-type-filter')?.value || 'all';
+  return ['summary', 'recording', 'transcript', 'other'].includes(value) ? value : 'all';
+}
+
+function qualityFilterLabel(type = 'all') {
+  return {
+    summary: '摘要警示',
+    recording: '錄音警示',
+    transcript: '逐字稿警示',
+    other: '其他品質警示',
+  }[type] || '';
+}
+
+function recordQualityWarningTypes(record) {
+  const warningPreview = String(record?.quality_warning_preview || '').trim();
+  const reviewSegmentCount = Number(record?.quality_review_segment_count || 0);
+  const reviewDetails = record?.quality_review_segment_details || [];
+  const warningCount = Number(record?.quality_warning_count || 0);
+  const score = record?.quality_score;
+  const label = String(record?.quality_label || '').trim();
+  const types = new Set();
+  if (warningPreview.startsWith('摘要品質警示')) types.add('summary');
+  if (isRecordingQualityWarning(warningPreview)) types.add('recording');
+  if (warningPreview.startsWith('逐字稿品質警示') || reviewSegmentCount > 0 || reviewDetails.length > 0) {
+    types.add('transcript');
+  }
+  const hasScore = score !== null && score !== undefined && score !== '';
+  const isOtherWarning = warningCount > 0 && !types.size;
+  const isOtherScore = hasScore && Number(score) < 85;
+  const isOtherLabel = /需|警|低|不/.test(label) && !types.size;
+  if (isOtherWarning || isOtherScore || isOtherLabel) types.add('other');
+  return types;
+}
+
+function qualityTypeMatchesRecord(record, type = 'all') {
+  if (!type || type === 'all') return true;
+  return recordQualityWarningTypes(record).has(type);
+}
+
 function renderCardQuality(record) {
   const warningCount = Number(record?.quality_warning_count || 0);
   const score = record?.quality_score;
@@ -2833,7 +2892,9 @@ function setElementBusy(element, busy) {
 async function loadMeetings(query = '') {
   const listEl = document.getElementById('list-panel');
   const statusEl = document.getElementById('search-status');
-  const reviewOnly = Boolean(document.getElementById('needs-review-filter')?.checked);
+  const qualityType = selectedQualityFilterType();
+  const qualityTypeLabelText = qualityFilterLabel(qualityType);
+  const reviewOnly = Boolean(document.getElementById('needs-review-filter')?.checked) || qualityType !== 'all';
   if (activeMeetingsRequest) activeMeetingsRequest.abort();
   const requestController = new AbortController();
   activeMeetingsRequest = requestController;
@@ -2853,19 +2914,24 @@ async function loadMeetings(query = '') {
     if (requestController.signal.aborted) return;
 
     const fetchedRecords = data.records ?? data;  // search 回傳陣列；list 回傳物件
-    const records = fetchedRecords;
+    const records = fetchedRecords.filter(record => qualityTypeMatchesRecord(record, qualityType));
     const total = data.total ?? fetchedRecords.length;
+    const filterSuffix = qualityTypeLabelText ? `，${qualityTypeLabelText}` : '';
     const statusPrefix = query
-      ? `找到 ${fetchedRecords.length} 筆${reviewOnly ? '需複核且相關' : '相關'}會議記錄`
+      ? `找到 ${records.length} 筆${reviewOnly ? `需複核${filterSuffix}且相關` : '相關'}會議記錄`
+      : qualityTypeLabelText
+      ? `共 ${total} 筆需複核會議記錄，顯示 ${records.length} 筆${qualityTypeLabelText}`
       : `共 ${total} 筆${reviewOnly ? '需複核' : ''}會議記錄`;
 
-    document.getElementById('total-count').textContent = total;
+    document.getElementById('total-count').textContent = qualityTypeLabelText ? records.length : total;
     statusEl.textContent = statusPrefix;
 
     if (!records.length) {
       const safeQuery = escapeHtml(query);
       const emptyText = reviewOnly
-        ? (query ? `找不到包含「${safeQuery}」且需複核的會議記錄` : '目前沒有需複核的會議記錄')
+        ? (query
+          ? `找不到包含「${safeQuery}」且符合${qualityTypeLabelText || '需複核'}的會議記錄`
+          : `目前沒有${qualityTypeLabelText || '需複核'}的會議記錄`)
         : (query ? `找不到包含「${safeQuery}」的會議記錄` : '尚無會議記錄<br>請先透過 LINE Bot、上傳音訊/影片或桌面 GUI 建立一筆記錄');
       listEl.innerHTML = `
         <div class="empty-state">
@@ -2873,7 +2939,7 @@ async function loadMeetings(query = '') {
           <p>${emptyText}</p>
         </div>`;
       statusEl.textContent = reviewOnly
-        ? (query ? `找不到包含「${query}」且需複核的會議記錄` : '目前沒有需複核的會議記錄')
+        ? (query ? `找不到包含「${query}」且符合${qualityTypeLabelText || '需複核'}的會議記錄` : `目前沒有${qualityTypeLabelText || '需複核'}的會議記錄`)
         : (query ? `找不到包含「${query}」的會議記錄` : '目前沒有會議記錄');
       return;
     }
@@ -4015,6 +4081,11 @@ document.getElementById('search-input').addEventListener('input', e => {
   debounceTimer = setTimeout(() => loadMeetings(e.target.value.trim()), 300);
 });
 document.getElementById('needs-review-filter').addEventListener('change', () => {
+  loadMeetings(document.getElementById('search-input').value.trim());
+});
+document.getElementById('quality-type-filter').addEventListener('change', () => {
+  const filter = document.getElementById('needs-review-filter');
+  if (selectedQualityFilterType() !== 'all' && filter) filter.checked = true;
   loadMeetings(document.getElementById('search-input').value.trim());
 });
 
