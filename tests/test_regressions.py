@@ -2989,6 +2989,50 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
         self.assertEqual(searched["quality_review_segment_count"], 2)
 
+    def test_list_and_search_parse_full_transcript_repetition_warning_segments(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "full-transcript-warning.md"
+        output_path.write_text("full-transcript-warning-content", encoding="utf-8")
+        quality_report = {
+            "score": 70,
+            "label": "需複核",
+            "warnings": [
+                (
+                    "逐字稿品質警示：完整逐字稿區塊第 2 段｜10:00-20:00："
+                    "分段疑似重複轉錄幻覺（連續重複 31 句，重複比例 100%）"
+                )
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Full Transcript Warning Segment",
+            date="2026/07/12",
+            source_audio="full-transcript-warning.webm",
+            output_path=str(output_path),
+            summary="full-transcript-warning-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Full Transcript Warning Segment")[0]
+
+        self.assertEqual(listed["quality_review_segments"], ["第 2 段"])
+        self.assertEqual(
+            listed["quality_review_segment_details"],
+            [
+                {
+                    "label": "第 2 段",
+                    "index": 1,
+                    "start_seconds": 600,
+                    "end_seconds": 1200,
+                    "issues": ["品質警示提及此分段"],
+                },
+            ],
+        )
+        self.assertEqual(listed["quality_review_segment_count"], 1)
+        self.assertEqual(listed["quality_warning_preview"], quality_report["warnings"][0])
+        self.assertEqual(searched["quality_review_segments"], ["第 2 段"])
+        self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
+
     def test_list_and_search_include_source_media_type(self):
         database, tmp_path = self._isolated_database()
         video_output = tmp_path / "video.md"
