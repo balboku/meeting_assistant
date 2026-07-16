@@ -5914,6 +5914,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality-review-segment", html)
         self.assertIn("quality-review-segment-label", html)
         self.assertIn("quality-rerun-review-segments", html)
+        self.assertIn("quality-review-note", html)
         self.assertIn("segment-issue", html)
         self.assertIn("segment-status${issues.length ? ' has-issue' : ''}", html)
         self.assertIn("(segment.issues || [])", html)
@@ -5963,6 +5964,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality-review-title", html)
         self.assertIn('id="quality-rerun-review-segments-button"', html)
         self.assertIn("↻ 重跑需複核分段", html)
+        self.assertIn("此紀錄缺少可直接重跑的分段資料；可定位原始檔時間複核，必要時使用完整重跑。", html)
         self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, [${rerunnableSegmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')\"", html)
         self.assertIn("const segmentStartSeconds = Number(segment?.dataset.startSeconds);", html)
         self.assertIn("const startSeconds = hasFallbackSeconds", html)
@@ -6505,6 +6507,67 @@ if (!sandbox.result.includes('需詳情複核')) {{
   process.exit(7);
 }}
 console.log('card_hides_unrerunnable_segments_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_render_quality_review_segments_explains_when_segment_rerun_unavailable(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function renderQualityReviewSegments'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [grab('escapeHtml'), grab('clockText'), grab('normalizeSegmentIndices'), grab('renderQualityReviewSegments')].join('\\n');
+const sandbox = {{}};
+vm.runInNewContext(code + `
+const reviewSegments = [
+  {{ index: 10, label: '第 11 段', start_seconds: 6000, end_seconds: 6600, issues: ['疑似連續重複轉錄'] }}
+];
+unavailable = renderQualityReviewSegments(31, reviewSegments, []);
+available = renderQualityReviewSegments(43, [{{ index: 7, start_seconds: 4200, end_seconds: 4800, issues: ['疑似連續重複轉錄'] }}], [{{ index: 7 }}]);
+`, sandbox);
+if (!sandbox.unavailable.includes('quality-review-note')) {{
+  console.error(sandbox.unavailable);
+  process.exit(4);
+}}
+if (!sandbox.unavailable.includes('此紀錄缺少可直接重跑的分段資料')) {{
+  console.error(sandbox.unavailable);
+  process.exit(5);
+}}
+if (sandbox.unavailable.includes('quality-rerun-review-segments-button')) {{
+  console.error(sandbox.unavailable);
+  process.exit(6);
+}}
+if (!sandbox.available.includes('quality-rerun-review-segments-button')) {{
+  console.error(sandbox.available);
+  process.exit(7);
+}}
+if (sandbox.available.includes('quality-review-note')) {{
+  console.error(sandbox.available);
+  process.exit(8);
+}}
+console.log('quality_review_segment_note_ok');
 """
         try:
             result = subprocess.run(

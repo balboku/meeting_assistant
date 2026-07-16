@@ -641,6 +641,12 @@
     }
     .quality-rerun-review-segments:hover { background: rgba(122,162,247,0.18); }
     .quality-rerun-review-segments:disabled { opacity: 0.55; cursor: wait; }
+    .quality-review-note {
+      flex-basis: 100%;
+      color: var(--text-mid);
+      font-size: 12px;
+      line-height: 1.5;
+    }
     .quality-actions {
       display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
       margin-top: 10px;
@@ -3355,9 +3361,13 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
   const rerunButton = rerunnableSegmentIndices.length
     ? `<button id="quality-rerun-review-segments-button" type="button" class="quality-rerun-review-segments" aria-describedby="detail-status" aria-busy="false" title="只重跑已標記需複核且可定位的分段" onclick="rerunMeeting(${Number(meetingId) || 0}, [${rerunnableSegmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')">↻ 重跑需複核分段</button>`
     : '';
+  const fallbackNote = !rerunnableSegmentIndices.length
+    ? '<span class="quality-review-note">此紀錄缺少可直接重跑的分段資料；可定位原始檔時間複核，必要時使用完整重跑。</span>'
+    : '';
   return `<div class="quality-review-segments" aria-label="需複核分段">
     <span class="quality-review-title">需複核分段</span>
     ${rerunButton}
+    ${fallbackNote}
     ${items}
   </div>`;
 }
