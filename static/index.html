@@ -711,6 +711,9 @@
     .source-storage-status.error {
       color: var(--red);
     }
+    .source-storage-status.loading {
+      color: var(--blue);
+    }
     .source-storage-preview {
       display: none;
       margin-bottom: 12px;
@@ -1525,14 +1528,14 @@
         <option value="name_asc">檔名 A-Z</option>
         <option value="name_desc">檔名 Z-A</option>
       </select>
-      <button id="source-storage-refresh" type="button" class="source-media-action source-storage-refresh" aria-label="更新原始檔清單" onclick="refreshSourceStorageInventory()">更新</button>
+      <button id="source-storage-refresh" type="button" class="source-media-action source-storage-refresh" aria-label="更新原始檔清單" aria-busy="false" onclick="refreshSourceStorageInventory()">更新</button>
       <button id="source-storage-reset" type="button" class="source-media-action source-storage-reset" aria-label="清除原始檔篩選條件" onclick="resetSourceStorageFilters()">清除</button>
     </div>
-    <div id="source-storage-status" class="source-storage-status" role="status" aria-live="polite"></div>
+    <div id="source-storage-status" class="source-storage-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></div>
     <div id="source-storage-preview" class="source-storage-preview" role="region" aria-label="原始檔預覽" aria-live="polite" tabindex="-1"></div>
     <div id="source-storage-list" class="source-storage-list" role="list" aria-label="原始檔清單" aria-live="polite" aria-busy="false"></div>
     <div id="source-storage-more" class="source-storage-more" hidden>
-      <button id="source-storage-load-more" type="button" class="source-media-action source-storage-load-more" aria-label="載入更多原始檔" onclick="loadMoreSourceStorageInventory()">載入更多</button>
+      <button id="source-storage-load-more" type="button" class="source-media-action source-storage-load-more" aria-label="載入更多原始檔" aria-busy="false" onclick="loadMoreSourceStorageInventory()">載入更多</button>
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" aria-label="關閉原始檔清單" onclick="closeSourceStorageInventory()">關閉</button>
@@ -1800,11 +1803,13 @@ function closeSourceMediaPreview(restoreFocus = true) {
   }
 }
 
-function setSourceStorageStatus(message = '', isError = false) {
+function setSourceStorageStatus(message = '', isError = false, busy = false) {
   const status = document.getElementById('source-storage-status');
   if (!status) return;
   status.textContent = message;
   status.classList.toggle('error', Boolean(isError));
+  status.classList.toggle('loading', Boolean(busy) && Boolean(message));
+  status.setAttribute('aria-busy', String(Boolean(busy)));
 }
 
 function sourceStorageExtension(file = {}) {
@@ -2042,6 +2047,7 @@ async function refreshSourceStorageInventory() {
   const previousLabel = refresh?.textContent || '更新';
   if (refresh) {
     refresh.disabled = true;
+    refresh.setAttribute('aria-busy', 'true');
     refresh.textContent = '更新中';
   }
   try {
@@ -2050,6 +2056,7 @@ async function refreshSourceStorageInventory() {
   } finally {
     if (refresh) {
       refresh.disabled = false;
+      refresh.setAttribute('aria-busy', 'false');
       refresh.textContent = previousLabel;
     }
   }
@@ -2203,8 +2210,10 @@ async function loadMoreSourceStorageInventory() {
   setElementBusy(list, true);
   if (button) {
     button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
     button.textContent = '載入中';
   }
+  setSourceStorageStatus('正在載入更多原始檔...', false, true);
   try {
     const page = await fetchSourceStorageInventoryPage(
       sourceStorageInventoryState.files.length,
@@ -2226,6 +2235,7 @@ async function loadMoreSourceStorageInventory() {
     setElementBusy(list, false);
     if (button) {
       button.disabled = false;
+      button.setAttribute('aria-busy', 'false');
       button.textContent = previousLabel;
     }
     syncSourceStorageLoadMoreButton();
@@ -2241,7 +2251,7 @@ async function openSourceStorageInventory() {
   sourceStorageInventoryState.loaded = false;
   setElementBusy(list, true);
   list.innerHTML = '<div class="detail-placeholder"><div class="loading-spinner"></div><p>載入原始檔清單...</p></div>';
-  setSourceStorageStatus('正在更新原始檔清單...');
+  setSourceStorageStatus('正在更新原始檔清單...', false, true);
   syncSourceStorageLoadMoreButton();
 
   try {
