@@ -3720,7 +3720,8 @@ class UiRegressionTests(unittest.TestCase):
 
         self.assertIn('id="upload-limit-hint"', html)
         self.assertIn('id="drop-zone" role="button" tabindex="0"', html)
-        self.assertIn('aria-label="搜尋會議標題或內容關鍵字"', html)
+        self.assertIn('aria-label="搜尋會議標題、內容或品質警示"', html)
+        self.assertIn('placeholder="搜尋會議標題、內容或品質警示..."', html)
         self.assertIn('class="form-label" for="custom-title"', html)
         self.assertIn('aria-label="選擇要上傳的音訊或影片檔案"', html)
         self.assertIn('aria-describedby="file-name-display upload-limit-hint"', html)
