@@ -1416,13 +1416,7 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             warning_preview = f"舊紀錄需複核：已偵測到 {warning_count} 個品質警示"
     should_infer_legacy_review_segments = (
         not review_segment_labels
-        and (
-            (quality_report is None and warning_count > 0)
-            or (
-                isinstance(quality_report, dict)
-                and "逐字稿品質警示" in quality_warning_text
-            )
-        )
+        and warning_count > 0
     )
     if should_infer_legacy_review_segments:
         for detail in _legacy_markdown_repeated_turn_review_segments(str(record.get("output_path") or "")):

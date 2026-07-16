@@ -3211,6 +3211,57 @@ class SearchRegressionTests(unittest.TestCase):
         )
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
 
+    def test_list_and_search_infer_repeat_segments_from_generic_warning(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "generic-warning-repeat.md"
+        repeated_turns = "\n".join(
+            f"[21:0{index}] **[發言者 A]**：因為我是結所以我領車。"
+            for index in range(4)
+        )
+        output_path.write_text(
+            "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+            "## 二、最終決議 (Final Decisions)\n決議\n"
+            "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "[20:59] **[發言者 B]**：前一句正常。\n"
+            f"{repeated_turns}\n",
+            encoding="utf-8",
+        )
+        quality_report = {
+            "warnings": ["舊紀錄需複核：早期測試未建立分段定位"],
+        }
+        meeting_id = database.save_meeting(
+            title="Generic Warning Repeat",
+            date="2026/07/12",
+            source_audio="generic-warning-repeat.webm",
+            output_path=str(output_path),
+            summary="generic-warning-repeat-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Generic Warning Repeat")[0]
+
+        self.assertEqual(listed["quality_warning_count"], 1)
+        self.assertEqual(listed["quality_warning_preview"], quality_report["warnings"][0])
+        self.assertEqual(listed["quality_review_segments"], ["第 3 段"])
+        self.assertEqual(listed["quality_review_segment_count"], 1)
+        self.assertEqual(
+            listed["quality_review_segment_details"],
+            [
+                {
+                    "label": "第 3 段",
+                    "index": 2,
+                    "start_seconds": 1200,
+                    "end_seconds": 1800,
+                    "issues": ["疑似連續重複轉錄：同一句連續重複 4 次（21:00-21:03）"],
+                },
+            ],
+        )
+        self.assertEqual(searched["quality_review_segments"], ["第 3 段"])
+        self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
+
     def test_needs_review_filter_scans_beyond_regular_list_limit(self):
         database, tmp_path = self._isolated_database()
         review_output = tmp_path / "older-review.md"
