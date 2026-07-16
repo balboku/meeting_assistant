@@ -18,6 +18,12 @@ from pathlib import Path
 from typing import Any, Optional
 from contextlib import contextmanager
 
+from backend.quality_segments import (
+    review_segment_indices_from_text,
+    review_segment_label,
+    review_segment_label_sort_key,
+)
+
 logger = logging.getLogger("MeetingAssistant.DB")
 
 DEFAULT_JOB_MAX_ATTEMPTS = int(os.getenv("JOB_QUEUE_MAX_ATTEMPTS", "5"))
@@ -1227,35 +1233,9 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         if cleaned and cleaned not in review_segment_labels:
             review_segment_labels.append(cleaned)
 
-    def review_segment_label_sort_key(label: str) -> tuple[int, int, str]:
-        cleaned = str(label or "").strip()
-        match = re.search(
-            r"第\s*(\d+)\s*段|\bSegment\s*#?\s*(\d+)\b",
-            cleaned,
-            flags=re.IGNORECASE,
-        )
-        if match:
-            number = match.group(1) or match.group(2)
-            try:
-                return (0, int(number), cleaned)
-            except (TypeError, ValueError):
-                pass
-        return (1, 0, cleaned)
-
     def add_review_segment_labels_from_text(text: str) -> None:
-        content = str(text or "")
-        matchers = (
-            re.compile(r"第\s*(\d+)\s*段"),
-            re.compile(r"\bSegment\s*#?\s*(\d+)\b", flags=re.IGNORECASE),
-        )
-        for matcher in matchers:
-            for match in matcher.finditer(content):
-                try:
-                    index = int(match.group(1))
-                except (TypeError, ValueError):
-                    continue
-                if index > 0:
-                    add_review_segment_label(f"第 {index} 段")
+        for index in review_segment_indices_from_text(text):
+            add_review_segment_label(review_segment_label(index))
 
     try:
         quality_report = json.loads(quality_report_json) if quality_report_json else None
@@ -1277,7 +1257,7 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             label = str(review_segment.get("label") or "").strip()
             if not label:
                 try:
-                    label = f"第 {int(review_segment.get('index', 0)) + 1} 段"
+                    label = review_segment_label(int(review_segment.get("index", 0)))
                 except (TypeError, ValueError):
                     label = "分段"
             add_review_segment_label(label)
@@ -1285,7 +1265,7 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             if not isinstance(segment, dict):
                 continue
             try:
-                segment_label = f"第 {int(segment.get('index', 0)) + 1} 段"
+                segment_label = review_segment_label(int(segment.get("index", 0)))
             except (TypeError, ValueError):
                 segment_label = "分段"
             for issue in segment.get("issues") or []:

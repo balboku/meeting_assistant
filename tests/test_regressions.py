@@ -2567,6 +2567,22 @@ class MetricsRegressionTests(unittest.TestCase):
 
 
 class SearchRegressionTests(unittest.TestCase):
+    def test_review_segment_helpers_parse_and_sort_labels(self):
+        from backend.quality_segments import (
+            review_segment_indices_from_text,
+            review_segment_label,
+            review_segment_label_sort_key,
+        )
+
+        text = "疑似分段：Segment #10｜90:00-100:00、第 2 段｜10:00-20:00、Segment #4、第 2 段"
+
+        self.assertEqual(review_segment_indices_from_text(text), [1, 3, 9])
+        self.assertEqual(review_segment_label(3), "第 4 段")
+        self.assertEqual(
+            sorted(["第 10 段", "無法定位", "第 2 段", "Segment #4"], key=review_segment_label_sort_key),
+            ["第 2 段", "Segment #4", "第 10 段", "無法定位"],
+        )
+
     def _isolated_database(self):
         import backend.database as database
 

@@ -97,6 +97,7 @@ from backend.cleanup import cleanup_stale_temp_files_for_jobs, cleanup_terminal_
 from backend.maintenance import cleanup_source_media_archives, run_startup_health_checks, run_startup_maintenance
 from backend.media_validation import validate_media_magic
 from backend.ngrok_status import get_ngrok_status
+from backend.quality_segments import review_segment_indices_from_text, review_segment_label
 from backend.source_audio import finalize_source_audio_upload
 from backend.tasks import (
     GEMINI_MODEL,
@@ -1718,23 +1719,6 @@ def _add_detail_segment_issue(
         segment["issues"] = issues
 
 
-def _detail_review_segment_indices_from_text(text: str) -> list[int]:
-    indices: list[int] = []
-    matchers = (
-        re.compile(r"第\s*(\d+)\s*段"),
-        re.compile(r"\bSegment\s*#?\s*(\d+)\b", flags=re.IGNORECASE),
-    )
-    for matcher in matchers:
-        for match in matcher.finditer(str(text or "")):
-            try:
-                index = int(match.group(1)) - 1
-            except (TypeError, ValueError):
-                continue
-            if index >= 0 and index not in indices:
-                indices.append(index)
-    return indices
-
-
 def _refresh_quality_report_review_segments(quality_report: dict) -> None:
     """Summarize review targets so clients can jump to affected transcript segments."""
     if not isinstance(quality_report, dict):
@@ -1760,7 +1744,7 @@ def _refresh_quality_report_review_segments(quality_report: dict) -> None:
             index,
             {
                 "index": index,
-                "label": f"第 {index + 1} 段",
+                "label": review_segment_label(index),
                 "issues": [],
             },
         )
@@ -1816,7 +1800,7 @@ def _refresh_quality_report_review_segments(quality_report: dict) -> None:
     if isinstance(warnings, str):
         warnings = [warnings]
     for warning in warnings:
-        for index in _detail_review_segment_indices_from_text(str(warning)):
+        for index in review_segment_indices_from_text(str(warning)):
             existing = review_segments_by_index.get(index)
             if existing and existing.get("issues"):
                 add_review_segment(index, [])
