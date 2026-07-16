@@ -2017,6 +2017,7 @@ function restoreMediaPlayerPlayback(player, snapshot = {}) {
         player.currentTime = Number.isFinite(duration) && duration > 0
           ? Math.min(target, Math.max(0, duration - 0.05))
           : target;
+        syncActiveTimecode(target);
       }
     } catch (err) {
       console.warn('Unable to restore source media playback position.', err);
@@ -3108,13 +3109,29 @@ function parseTimecodeSeconds(label = '') {
   return (Number(match[1]) * 60) + Number(match[2]);
 }
 
+function syncActiveTimecode(seconds = 0) {
+  const currentSeconds = Math.max(0, Number(seconds) || 0);
+  const buttons = Array.from(document.querySelectorAll('.timecode-button[data-seconds]'));
+  if (!buttons.length) return;
+  let activeButton = null;
+  let activeSeconds = -1;
+  buttons.forEach(button => {
+    const buttonSeconds = Number(button.dataset.seconds);
+    if (!Number.isFinite(buttonSeconds)) return;
+    if (buttonSeconds <= currentSeconds + 0.75 && buttonSeconds >= activeSeconds) {
+      activeButton = button;
+      activeSeconds = buttonSeconds;
+    }
+  });
+  buttons.forEach(button => button.classList.toggle('active', button === activeButton));
+}
+
 function seekSourceAudio(seconds = 0) {
   const player = document.getElementById('source-media-player');
   if (!player) return;
-  player.currentTime = Math.max(0, Number(seconds) || 0);
-  document.querySelectorAll('.timecode-button.active').forEach(button => button.classList.remove('active'));
-  const active = document.querySelector(`.timecode-button[data-seconds="${Math.max(0, Number(seconds) || 0)}"]`);
-  active?.classList.add('active');
+  const targetSeconds = Math.max(0, Number(seconds) || 0);
+  player.currentTime = targetSeconds;
+  syncActiveTimecode(targetSeconds);
   player.play().catch(() => {});
 }
 
@@ -3361,6 +3378,7 @@ function bindSourceMediaPlayerStatus(player, statusEl) {
   ['loadedmetadata', 'canplay', 'error', 'stalled', 'emptied'].forEach(eventName => {
     player.addEventListener(eventName, sync);
   });
+  player.addEventListener('timeupdate', () => syncActiveTimecode(player.currentTime));
   sync();
 }
 
