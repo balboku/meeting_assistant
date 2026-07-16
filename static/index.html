@@ -2641,8 +2641,10 @@ async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQu
     ? document.getElementById('rerun-meeting-button')
     : document.getElementById(`rerun-segment-${segmentIndex}`);
   const originalButtonText = button?.innerHTML;
+  setDetailStatus(`正在建立重跑任務：${segmentText}`);
   if (button) {
     button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
     button.innerHTML = '<span class="loading-spinner"></span> 重跑中';
   }
 
@@ -2660,12 +2662,15 @@ async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQu
     const data = await res.json();
     await loadJobs();
     await loadMetrics();
+    setDetailStatus(`已建立重跑任務：${data.job_id}`);
     alert(`已建立重跑任務：${data.job_id}\n可在「任務狀態」查看進度。`);
   } catch (err) {
+    setDetailStatus(`重跑失敗：${err.message}`);
     alert(`重跑失敗：${err.message}`);
   } finally {
     if (button) {
       button.disabled = false;
+      button.setAttribute('aria-busy', 'false');
       button.innerHTML = originalButtonText;
     }
   }
@@ -2679,15 +2684,15 @@ function renderQualityActions(meeting, warnings = []) {
   const actions = [];
   if (hasSummaryWarning) {
     actions.push(
-      `<button id="quality-rerun-summary-button" class="quality-action" title="沿用逐字稿，只重新產生摘要、決議與待辦" onclick="rerunMeeting(${meetingId}, null, true, false, 'quality-rerun-summary-button')">↻ 重整摘要</button>`
+      `<button id="quality-rerun-summary-button" class="quality-action" aria-describedby="detail-status" aria-busy="false" title="沿用逐字稿，只重新產生摘要、決議與待辦" onclick="rerunMeeting(${meetingId}, null, true, false, 'quality-rerun-summary-button')">↻ 重整摘要</button>`
     );
     actions.push(
-      `<button id="quality-rerun-summary-high-quality-button" class="quality-action" title="沿用逐字稿，增加一次第二模型證據查核" onclick="rerunMeeting(${meetingId}, null, true, true, 'quality-rerun-summary-high-quality-button')">✓ 高品質重整</button>`
+      `<button id="quality-rerun-summary-high-quality-button" class="quality-action" aria-describedby="detail-status" aria-busy="false" title="沿用逐字稿，增加一次第二模型證據查核" onclick="rerunMeeting(${meetingId}, null, true, true, 'quality-rerun-summary-high-quality-button')">✓ 高品質重整</button>`
     );
   }
   if (hasTranscriptWarning) {
     actions.push(
-      `<button id="quality-rerun-full-button" class="quality-action" title="重新轉錄並重新產生完整會議紀錄" onclick="rerunMeeting(${meetingId}, null, false, false, 'quality-rerun-full-button')">🔁 完整重跑</button>`
+      `<button id="quality-rerun-full-button" class="quality-action" aria-describedby="detail-status" aria-busy="false" title="重新轉錄並重新產生完整會議紀錄" onclick="rerunMeeting(${meetingId}, null, false, false, 'quality-rerun-full-button')">🔁 完整重跑</button>`
     );
   }
   return actions.length ? `<div class="quality-actions">${actions.join('')}</div>` : '';
@@ -2718,7 +2723,7 @@ function renderQualityReport(meeting) {
       : '已轉錄';
     return `<div class="segment-status">
       <span>第 ${index + 1} 段 · ${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)} · ${escapeHtml(state)}</span>
-      <button id="rerun-segment-${index}" title="只重跑這一段" onclick="rerunMeeting(${meeting.id}, ${index})">↻ 重跑</button>
+      <button id="rerun-segment-${index}" aria-describedby="detail-status" aria-busy="false" title="只重跑這一段" onclick="rerunMeeting(${meeting.id}, ${index})">↻ 重跑</button>
     </div>`;
   }).join('');
   const scoreText = report.score === null || report.score === undefined
@@ -3308,9 +3313,9 @@ async function openDetail(id) {
             <button id="edit-summary-button" class="btn-secondary" title="編輯摘要、決議與待辦" onclick="openSummaryEditor()">✎ 摘要</button>
             <button id="edit-transcript-button" class="btn-secondary" title="編輯完整逐字稿" onclick="openTranscriptEditor()">📝 逐字稿</button>
             <button id="revision-history-button" class="btn-secondary" title="查看 AI 原稿與修改前版本" onclick="openRevisionHistory()">☷ 版本</button>
-            <button id="rerun-summary-button" class="btn-secondary" title="沿用逐字稿，只重新產生摘要、決議與待辦" onclick="rerunMeeting(${id}, null, true)">↻ 重整摘要</button>
-            <button id="rerun-summary-high-quality-button" class="btn-secondary" title="沿用逐字稿，增加一次第二模型證據查核" onclick="rerunMeeting(${id}, null, true, true)">✓ 高品質重整</button>
-            <button id="rerun-meeting-button" class="btn-secondary" onclick="rerunMeeting(${id})">🔁 重跑</button>
+            <button id="rerun-summary-button" class="btn-secondary" aria-describedby="detail-status" aria-busy="false" title="沿用逐字稿，只重新產生摘要、決議與待辦" onclick="rerunMeeting(${id}, null, true)">↻ 重整摘要</button>
+            <button id="rerun-summary-high-quality-button" class="btn-secondary" aria-describedby="detail-status" aria-busy="false" title="沿用逐字稿，增加一次第二模型證據查核" onclick="rerunMeeting(${id}, null, true, true)">✓ 高品質重整</button>
+            <button id="rerun-meeting-button" class="btn-secondary" aria-describedby="detail-status" aria-busy="false" onclick="rerunMeeting(${id})">🔁 重跑</button>
             <button id="evidence-upload-button" class="btn-secondary" aria-describedby="evidence-upload-status" aria-busy="false" onclick="document.getElementById('evidence-file-input').click()">📎 補充資料</button>
             <input id="evidence-file-input"
                    type="file"
