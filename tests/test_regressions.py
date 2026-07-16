@@ -1264,9 +1264,32 @@ class TaskRegressionTests(unittest.TestCase):
             self.assertEqual(quality_report["review_segments"][0]["index"], 0)
             self.assertEqual(quality_report["review_segments"][0]["start_seconds"], 0)
             self.assertEqual(quality_report["review_segments"][0]["end_seconds"], 600)
+            self.assertEqual(quality_report["label"], "可用，建議抽查")
             warnings = "\n".join(quality_report["warnings"])
             self.assertIn("逐字稿品質警示", warnings)
             self.assertIn("第 1 段｜00:00-10:00", warnings)
+
+    def test_quality_report_label_does_not_say_good_when_review_is_needed(self):
+        import backend.tasks as tasks
+
+        report = tasks._build_quality_report(
+            audio_report={"warnings": []},
+            segment_report=[
+                {
+                    "index": 0,
+                    "start_seconds": 0,
+                    "end_seconds": 600,
+                    "status": "recovered",
+                    "issues": ["曾觸發轉錄補救：非最後分段含自動過濾/截斷提示"],
+                }
+            ],
+            full_transcript="[00:00] **[發言者 A]**：測試逐字稿。",
+        )
+
+        self.assertEqual(report["score"], 95)
+        self.assertEqual(report["label"], "可用，建議抽查")
+        self.assertEqual(report["review_segments"][0]["index"], 0)
+        self.assertTrue(any("逐字稿品質警示" in warning for warning in report["warnings"]))
 
     def test_single_segment_audio_task_uses_dual_model_pipeline(self):
         import backend.tasks as tasks

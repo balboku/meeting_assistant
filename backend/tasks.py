@@ -2529,7 +2529,14 @@ def _build_quality_report(
     if silence_ratio >= 0.9:
         score -= 10
     score = max(0, score)
-    label = "良好" if score >= 90 else "可用，建議抽查" if score >= 75 else "需人工確認"
+    has_review_signal = bool(warnings or review_segments)
+    label = (
+        "需人工確認"
+        if score < 75
+        else "可用，建議抽查"
+        if has_review_signal or score < 90
+        else "良好"
+    )
     speakers = sorted(set(re.findall(r"\*\*\[([^\]]+)\]\*\*", full_transcript or "")))
     return {
         "score": score,
