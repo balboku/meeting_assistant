@@ -1999,31 +1999,48 @@ function mediaPlayerCurrentSeconds(player) {
   return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
 }
 
-function restoreMediaPlayerSeconds(player, seconds = 0) {
-  const target = Math.max(0, Number(seconds) || 0);
-  if (!player || target <= 0) return;
-  const applySeek = () => {
+function mediaPlayerPlaybackSnapshot(player) {
+  return {
+    seconds: mediaPlayerCurrentSeconds(player),
+    wasPlaying: Boolean(player && !player.paused && !player.ended),
+  };
+}
+
+function restoreMediaPlayerPlayback(player, snapshot = {}) {
+  const target = Math.max(0, Number(snapshot.seconds || 0));
+  const shouldPlay = Boolean(snapshot.wasPlaying);
+  if (!player || (!target && !shouldPlay)) return;
+  const applyRestore = () => {
     try {
-      const duration = Number(player.duration || 0);
-      player.currentTime = Number.isFinite(duration) && duration > 0
-        ? Math.min(target, Math.max(0, duration - 0.05))
-        : target;
+      if (target > 0) {
+        const duration = Number(player.duration || 0);
+        player.currentTime = Number.isFinite(duration) && duration > 0
+          ? Math.min(target, Math.max(0, duration - 0.05))
+          : target;
+      }
     } catch (err) {
       console.warn('Unable to restore source media playback position.', err);
     }
+    if (shouldPlay) {
+      player.play()?.catch(err => console.warn('Unable to resume source media playback after switch.', err));
+    }
   };
-  if (Number(player.readyState || 0) >= 1) {
-    applySeek();
+  if (Number(player.readyState || 0) >= 1 || target <= 0) {
+    applyRestore();
   } else {
-    player.addEventListener('loadedmetadata', applySeek, { once: true });
+    player.addEventListener('loadedmetadata', applyRestore, { once: true });
   }
+}
+
+function restoreMediaPlayerSeconds(player, seconds = 0) {
+  restoreMediaPlayerPlayback(player, { seconds, wasPlaying: false });
 }
 
 function previewSourceMedia(url = '', mediaType = '', name = '', requestedMode = '') {
   const preview = document.getElementById('source-storage-preview');
   if (!preview || !url) return;
   const previousPlayer = preview.querySelector('video.source-storage-media-player, audio');
-  const previousSeconds = mediaPlayerCurrentSeconds(previousPlayer);
+  const previousPlayback = mediaPlayerPlaybackSnapshot(previousPlayer);
   const activeElement = document.activeElement;
   if (activeElement instanceof HTMLElement && !preview.contains(activeElement)) {
     sourceMediaPreviewReturnFocus = activeElement;
@@ -2062,7 +2079,7 @@ function previewSourceMedia(url = '', mediaType = '', name = '', requestedMode =
     <div class="source-media-player-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></div>`;
   preview.classList.add('show');
   enhanceSourceStoragePreviewPlayer(preview);
-  restoreMediaPlayerSeconds(preview.querySelector('video.source-storage-media-player, audio'), previousSeconds);
+  restoreMediaPlayerPlayback(preview.querySelector('video.source-storage-media-player, audio'), previousPlayback);
   preview.focus({ preventScroll: true });
   preview.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
@@ -3191,10 +3208,10 @@ function switchSourceMediaPlayer(mode) {
   if (!currentMeetingData) return;
   const evidence = document.getElementById('source-media-evidence');
   if (!evidence) return;
-  const previousSeconds = mediaPlayerCurrentSeconds(document.getElementById('source-media-player'));
+  const previousPlayback = mediaPlayerPlaybackSnapshot(document.getElementById('source-media-player'));
   evidence.outerHTML = renderAudioEvidence(currentMeetingData, mode);
   enhanceSourceMediaPlayer();
-  restoreMediaPlayerSeconds(document.getElementById('source-media-player'), previousSeconds);
+  restoreMediaPlayerPlayback(document.getElementById('source-media-player'), previousPlayback);
 }
 
 function sourceMediaKindLabel(meeting) {
