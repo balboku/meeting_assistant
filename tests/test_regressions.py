@@ -5821,6 +5821,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('id="quality-rerun-summary-high-quality-button" class="quality-action" aria-describedby="detail-status" aria-busy="false"', html)
         self.assertIn('id="quality-rerun-full-button" class="quality-action" aria-describedby="detail-status" aria-busy="false"', html)
         self.assertIn("function renderCardQuality", html)
+        self.assertIn("function openDetailAndFocusSegment", html)
+        self.assertIn("event?.stopPropagation()", html)
+        self.assertIn("await openDetail(id);", html)
+        self.assertIn("window.requestAnimationFrame(focus)", html)
         self.assertIn("function isNeedsReviewRecord", html)
         self.assertIn("const reviewSegmentCount = Number(record?.quality_review_segment_count || 0);", html)
         self.assertIn("warningCount > 0 || reviewSegmentCount > 0", html)
@@ -5868,6 +5872,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const reasonTitle = [...new Set([warningPreview, ...reviewSegmentReasons].filter(Boolean))].join('\\n');", html)
         self.assertIn("clockText(segment.start_seconds)}-${clockText(segment.end_seconds)", html)
         self.assertIn("card-quality-chip needs-review review-segments", html)
+        self.assertIn("card-quality-action", html)
+        self.assertIn("onclick=\"openDetailAndFocusSegment(event, ${focusArgs})\"", html)
+        self.assertIn("開啟會議並定位${escapeHtml(focusSegment.display)}", html)
         self.assertIn("需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}", html)
         self.assertIn("分段：${escapeHtml(segmentText)}", html)
         self.assertIn("card-quality-chip", html)
@@ -6045,11 +6052,12 @@ const label1 = '第 1 段';
 const label2 = '第 2 段';
 const issue = '疑似連續重複轉錄；重複時間：09:59-10:02';
 result = renderCardQuality({{
+  id: 17,
   quality_warning_count: 1,
   quality_warning_preview: '逐字稿品質警示',
   quality_review_segment_details: [
-    {{ label: label1, start_seconds: 599, end_seconds: 600, issues: [issue] }},
-    {{ label: label2, start_seconds: 600, end_seconds: 602, issues: [issue] }}
+    {{ index: 0, label: label1, start_seconds: 599, end_seconds: 600, issues: [issue] }},
+    {{ index: 1, label: label2, start_seconds: 600, end_seconds: 602, issues: [issue] }}
   ]
 }});
 `, sandbox);
@@ -6061,6 +6069,14 @@ if (!sandbox.result.includes(expected)) {{
 if (sandbox.result.includes('另有 1 段')) {{
   console.error(sandbox.result);
   process.exit(5);
+}}
+if (!sandbox.result.includes('openDetailAndFocusSegment(event, 17, 0, 599)')) {{
+  console.error(sandbox.result);
+  process.exit(6);
+}}
+if (!sandbox.result.includes('開啟會議並定位第 1 段 09:59-10:00')) {{
+  console.error(sandbox.result);
+  process.exit(7);
 }}
 console.log('grouped_card_reason_ok');
 """

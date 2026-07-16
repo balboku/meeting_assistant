@@ -443,6 +443,17 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .card-quality-chip.card-quality-action {
+      cursor: pointer;
+      font: inherit;
+      text-align: left;
+    }
+    .card-quality-chip.card-quality-action:hover,
+    .card-quality-chip.card-quality-action:focus-visible {
+      border-color: var(--yellow);
+      background: rgba(224,175,104,0.16);
+      outline: none;
+    }
     .card-review-reason {
       margin-top: 8px;
       color: var(--yellow);
@@ -2651,6 +2662,8 @@ function renderCardQuality(record) {
     .map(segment => {
       const label = String(segment?.label || '').trim();
       if (!label) return '';
+      const index = Number(segment?.index);
+      const hasIndex = Number.isInteger(index) && index >= 0;
       const issues = (segment?.issues || [])
         .map(issue => String(issue || '').trim())
         .filter(Boolean);
@@ -2661,6 +2674,8 @@ function renderCardQuality(record) {
       const display = `${label}${timeText}`;
       const issueText = issues[0] ? `：${issues[0]}` : '';
       return {
+        index: hasIndex ? index : null,
+        start_seconds: segment?.start_seconds,
         display,
         issue: issues[0] || '',
         reason: issues[0] ? `${display}：${issues[0]}` : '',
@@ -2690,7 +2705,20 @@ function renderCardQuality(record) {
     const segmentText = reviewSegments.length > 3
       ? `${reviewSegments.slice(0, 3).join('、')} 等 ${reviewSegments.length} 段`
       : reviewSegments.join('、');
-    chips.push(`<span class="card-quality-chip needs-review review-segments" title="需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}">分段：${escapeHtml(segmentText)}</span>`);
+    const recordId = Number(record?.id);
+    const focusSegment = Number.isInteger(recordId) && recordId > 0
+      ? reviewSegmentDetails.find(segment => Number.isInteger(segment.index) && segment.index >= 0)
+      : null;
+    if (focusSegment) {
+      const startSeconds = Number(focusSegment.start_seconds);
+      const hasStartSeconds = Number.isFinite(startSeconds) && startSeconds >= 0;
+      const focusArgs = hasStartSeconds
+        ? `${recordId}, ${focusSegment.index}, ${startSeconds}`
+        : `${recordId}, ${focusSegment.index}`;
+      chips.push(`<button type="button" class="card-quality-chip needs-review review-segments card-quality-action" title="開啟會議並定位需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}" aria-label="開啟會議並定位${escapeHtml(focusSegment.display)}" onclick="openDetailAndFocusSegment(event, ${focusArgs})">分段：${escapeHtml(segmentText)}</button>`);
+    } else {
+      chips.push(`<span class="card-quality-chip needs-review review-segments" title="需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}">分段：${escapeHtml(segmentText)}</span>`);
+    }
   }
   const qualityRow = chips.length ? `<div class="card-quality-row">${chips.join('')}</div>` : '';
   const groupedReasonMap = new Map();
@@ -2746,6 +2774,18 @@ function handleMeetingCardKeydown(event, id) {
   if (event.key !== 'Enter' && event.key !== ' ') return;
   event.preventDefault();
   openDetail(id);
+}
+
+async function openDetailAndFocusSegment(event, id, segmentIndex, fallbackStartSeconds = null) {
+  event?.stopPropagation();
+  event?.preventDefault();
+  await openDetail(id);
+  const focus = () => focusQualitySegment(segmentIndex, fallbackStartSeconds);
+  if (window.requestAnimationFrame) {
+    window.requestAnimationFrame(focus);
+  } else {
+    setTimeout(focus, 0);
+  }
 }
 
 function setElementBusy(element, busy) {
