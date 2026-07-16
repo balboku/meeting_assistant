@@ -2866,8 +2866,16 @@ class SearchRegressionTests(unittest.TestCase):
 
         self.assertEqual(listed["quality_warning_count"], 1)
         self.assertEqual(listed["quality_review_segments"], ["第 2 段", "第 4 段"])
+        self.assertEqual(
+            listed["quality_review_segment_details"],
+            [
+                {"label": "第 2 段", "index": 1, "issues": ["品質警示提及此分段"]},
+                {"label": "第 4 段", "index": 3, "issues": ["品質警示提及此分段"]},
+            ],
+        )
         self.assertEqual(listed["quality_review_segment_count"], 2)
         self.assertEqual(searched["quality_review_segments"], ["第 2 段", "第 4 段"])
+        self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
         self.assertEqual(searched["quality_review_segment_count"], 2)
 
     def test_list_and_search_include_source_media_type(self):

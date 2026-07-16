@@ -1264,7 +1264,11 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
 
     def add_review_segment_labels_from_text(text: str) -> None:
         for index in review_segment_indices_from_text(text):
-            add_review_segment_label(review_segment_label(index), index=index)
+            add_review_segment_label(
+                review_segment_label(index),
+                index=index,
+                issues=["品質警示提及此分段"],
+            )
 
     def int_or_none(value: Any) -> Optional[int]:
         try:
