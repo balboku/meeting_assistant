@@ -2685,6 +2685,14 @@ class SearchRegressionTests(unittest.TestCase):
                 {"index": 9, "label": "第 10 段", "start_seconds": 5400, "end_seconds": 6000},
             ],
         )
+        time_only_text = "逐字稿品質警示：疑似連續重複轉錄（重複時間：31:00-31:03）"
+        self.assertEqual(review_segment_indices_from_text(time_only_text), [3])
+        self.assertEqual(
+            review_segment_details_from_text(time_only_text),
+            [
+                {"index": 3, "label": "第 4 段", "start_seconds": 1860, "end_seconds": 1863},
+            ],
+        )
         self.assertEqual(review_segment_label(3), "第 4 段")
         self.assertEqual(
             sorted(["第 10 段", "無法定位", "第 2 段", "Segment #4"], key=review_segment_label_sort_key),
@@ -3031,6 +3039,46 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(listed["quality_review_segment_count"], 1)
         self.assertEqual(listed["quality_warning_preview"], quality_report["warnings"][0])
         self.assertEqual(searched["quality_review_segments"], ["第 2 段"])
+        self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
+
+    def test_list_and_search_parse_time_only_warning_segments(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "time-only-warning.md"
+        output_path.write_text("time-only-warning-content", encoding="utf-8")
+        quality_report = {
+            "score": 70,
+            "label": "需複核",
+            "warnings": [
+                "逐字稿品質警示：疑似連續重複轉錄（同一句連續重複 31 次；重複時間：31:00-31:03）"
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Time Only Warning Segment",
+            date="2026/07/12",
+            source_audio="time-only-warning.webm",
+            output_path=str(output_path),
+            summary="time-only-warning-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Time Only Warning Segment")[0]
+
+        self.assertEqual(listed["quality_review_segments"], ["第 4 段"])
+        self.assertEqual(
+            listed["quality_review_segment_details"],
+            [
+                {
+                    "label": "第 4 段",
+                    "index": 3,
+                    "start_seconds": 1860,
+                    "end_seconds": 1863,
+                    "issues": ["品質警示提及此分段"],
+                },
+            ],
+        )
+        self.assertEqual(listed["quality_review_segment_count"], 1)
+        self.assertEqual(searched["quality_review_segments"], ["第 4 段"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
 
     def test_list_and_search_include_source_media_type(self):
