@@ -1358,6 +1358,10 @@ def _meeting_record_needs_review(record: dict[str, Any]) -> bool:
     if warning_count > 0:
         return True
 
+    review_segment_count = int(record.get("quality_review_segment_count") or 0)
+    if review_segment_count > 0:
+        return True
+
     score = record.get("quality_score")
     if score is not None:
         try:

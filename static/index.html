@@ -2694,10 +2694,11 @@ function renderCardQuality(record) {
 
 function isNeedsReviewRecord(record) {
   const warningCount = Number(record?.quality_warning_count || 0);
+  const reviewSegmentCount = Number(record?.quality_review_segment_count || 0);
   const score = record?.quality_score;
   const label = String(record?.quality_label || '').trim();
   const hasScore = score !== null && score !== undefined && score !== '';
-  return warningCount > 0 || (hasScore && Number(score) < 85) || /需|警|低|不/.test(label);
+  return warningCount > 0 || reviewSegmentCount > 0 || (hasScore && Number(score) < 85) || /需|警|低|不/.test(label);
 }
 
 function sourceMediaIcon(record) {

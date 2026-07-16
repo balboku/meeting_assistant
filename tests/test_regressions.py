@@ -2799,6 +2799,43 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
         self.assertEqual(searched["quality_review_segment_count"], 2)
 
+    def test_needs_review_filter_includes_review_segments_without_warnings(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "review-segment-only.md"
+        output_path.write_text("segment-only-keyword", encoding="utf-8")
+        quality_report = {
+            "score": 95,
+            "label": "ok",
+            "warnings": [],
+            "review_segments": [
+                {
+                    "index": 0,
+                    "label": "第 1 段",
+                    "start_seconds": 0,
+                    "end_seconds": 600,
+                    "issues": ["曾觸發轉錄補救"],
+                },
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Review Segment Only",
+            date="2026/07/12",
+            source_audio="review-segment-only.webm",
+            output_path=str(output_path),
+            summary="segment-only-keyword",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        filtered = database.list_meetings(needs_review=True)
+        searched = database.search_meetings("segment-only-keyword", needs_review=True)
+
+        self.assertEqual(listed["quality_warning_count"], 0)
+        self.assertEqual(listed["quality_review_segment_count"], 1)
+        self.assertEqual(listed["quality_review_segments"], ["第 1 段"])
+        self.assertEqual([row["id"] for row in filtered], [meeting_id])
+        self.assertEqual([row["id"] for row in searched], [meeting_id])
+
     def test_list_and_search_infer_review_segments_from_warning_text(self):
         database, tmp_path = self._isolated_database()
         output_path = tmp_path / "warning-segments.md"
@@ -5338,6 +5375,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('id="quality-rerun-full-button" class="quality-action" aria-describedby="detail-status" aria-busy="false"', html)
         self.assertIn("function renderCardQuality", html)
         self.assertIn("function isNeedsReviewRecord", html)
+        self.assertIn("const reviewSegmentCount = Number(record?.quality_review_segment_count || 0);", html)
+        self.assertIn("warningCount > 0 || reviewSegmentCount > 0", html)
         self.assertIn("function sourceMediaIcon", html)
         self.assertIn("function handleMeetingCardKeydown", html)
         self.assertIn("event.target !== event.currentTarget", html)
