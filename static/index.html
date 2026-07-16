@@ -2662,6 +2662,7 @@ function renderCardQuality(record) {
       const issueText = issues[0] ? `：${issues[0]}` : '';
       return {
         display,
+        issue: issues[0] || '',
         reason: issues[0] ? `${display}：${issues[0]}` : '',
         title: `${display}${issueText}`,
       };
@@ -2692,12 +2693,29 @@ function renderCardQuality(record) {
     chips.push(`<span class="card-quality-chip needs-review review-segments" title="需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}">分段：${escapeHtml(segmentText)}</span>`);
   }
   const qualityRow = chips.length ? `<div class="card-quality-row">${chips.join('')}</div>` : '';
-  const reviewSegmentReasons = reviewSegmentDetails
-    .map(segment => String(segment.reason || '').trim())
-    .filter(Boolean);
+  const groupedReasonMap = new Map();
+  reviewSegmentDetails.forEach(segment => {
+    const issue = String(segment.issue || '').trim();
+    const display = String(segment.display || '').trim();
+    if (!issue || !display) return;
+    if (!groupedReasonMap.has(issue)) groupedReasonMap.set(issue, []);
+    groupedReasonMap.get(issue).push(display);
+  });
+  const groupedReasons = Array.from(groupedReasonMap.entries())
+    .map(([issue, displays]) => {
+      const displayText = displays.length > 2
+        ? `${displays.slice(0, 2).join('、')} 等 ${displays.length} 段`
+        : displays.join('、');
+      return `${displayText}：${issue}`;
+    });
+  const reviewSegmentReasons = groupedReasons.length
+    ? groupedReasons
+    : reviewSegmentDetails
+      .map(segment => String(segment.reason || '').trim())
+      .filter(Boolean);
   const visibleReason = reviewSegmentReasons[0] || warningPreview;
   const extraReasonText = reviewSegmentReasons.length > 1
-    ? `；另有 ${reviewSegmentReasons.length - 1} 段`
+    ? `；另有 ${reviewSegmentReasons.length - 1} 項`
     : '';
   const reasonTitle = [...new Set([warningPreview, ...reviewSegmentReasons].filter(Boolean))].join('\n');
   const reason = visibleReason
