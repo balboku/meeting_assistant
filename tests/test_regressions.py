@@ -5109,6 +5109,50 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertTrue(any("疑似連續重複轉錄" in issue for issue in report["review_segments"][0]["issues"]))
         self.assertEqual(report["label"], "舊紀錄，已重建分段")
 
+    def test_meeting_detail_infers_repeated_transcript_segment_from_timestamps(self):
+        import backend.main as main
+
+        repeated_turns = "".join(
+            f"[31:{index:02d}] **[發言者 A]**：因為我是結所以我領車。\n"
+            for index in range(4)
+        )
+        record = {
+            "id": 17,
+            "title": "無分段標題重複舊紀錄",
+            "date": "2026/07/08",
+            "source_audio": "timestamp-only.webm",
+            "output_path": "timestamp-only.md",
+            "summary": "摘要",
+            "job_id": None,
+            "quality_score": None,
+            "quality_label": None,
+            "created_at": "2026-07-08 10:00:00",
+            "quality_report": {
+                "warnings": ["逐字稿品質警示：疑似連續重複轉錄（舊版未定位）"],
+            },
+            "full_content": (
+                "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+                "## 二、最終決議 (Final Decisions)\n決議\n"
+                "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "[30:59] **[發言者 B]**：前一句正常。\n"
+                f"{repeated_turns}"
+            ),
+        }
+        with mock.patch.object(main, "get_meeting", return_value=record):
+            response = asgi_request(main.app, "GET", "/meetings/17")
+
+        self.assertEqual(response.status_code, 200)
+        report = response.json()["quality_report"]
+        warnings = "\n".join(report["warnings"])
+        self.assertIn("第 4 段｜30:00-40:00", warnings)
+        self.assertIn("重複時間：31:00-31:03", warnings)
+        self.assertNotIn("舊版未定位", warnings)
+        self.assertEqual([segment["index"] for segment in report["review_segments"]], [3])
+        self.assertEqual(report["review_segments"][0]["start_seconds"], 1800)
+        self.assertEqual(report["review_segments"][0]["end_seconds"], 2400)
+        self.assertTrue(any("品質警示提及此分段" in issue for issue in report["review_segments"][0]["issues"]))
+
     def test_meeting_detail_infers_review_segments_from_warning_text(self):
         import backend.main as main
 

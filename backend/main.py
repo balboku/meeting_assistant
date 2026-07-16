@@ -101,6 +101,7 @@ from backend.quality_segments import review_segment_details_from_text, review_se
 from backend.source_audio import finalize_source_audio_upload
 from backend.tasks import (
     GEMINI_MODEL,
+    SEGMENT_TARGET_SECONDS,
     SUMMARY_FALLBACK_MODEL,
     SUMMARY_MODEL,
     SUMMARY_VERIFIER_MODEL,
@@ -1556,13 +1557,25 @@ def _detail_repetition_segment_matches(
     timestamps: list[int],
     segments: Optional[list[dict]] = None,
 ) -> list[dict]:
-    if not timestamps or not segments:
+    if not timestamps:
         return []
 
     start_time = min(timestamps)
     end_time = max(timestamps)
     matched: list[dict] = []
     seen_indices: set[int] = set()
+    if not segments:
+        first_index = max(0, start_time // SEGMENT_TARGET_SECONDS)
+        last_index = max(first_index, end_time // SEGMENT_TARGET_SECONDS)
+        return [
+            {
+                "index": index,
+                "start_seconds": index * SEGMENT_TARGET_SECONDS,
+                "end_seconds": (index + 1) * SEGMENT_TARGET_SECONDS,
+            }
+            for index in range(first_index, last_index + 1)
+        ]
+
     for position, segment in enumerate(segments):
         try:
             index = int(segment.get("index", position))
@@ -1597,9 +1610,6 @@ def _detail_repetition_location(
     start_time = min(timestamps)
     end_time = max(timestamps)
     time_range = f"重複時間：{_detail_format_clock(start_time)}-{_detail_format_clock(end_time)}"
-    if not segments:
-        return time_range
-
     matches = _detail_repetition_segment_matches(timestamps, segments)
     if not matches:
         return time_range
