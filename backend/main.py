@@ -97,7 +97,7 @@ from backend.cleanup import cleanup_stale_temp_files_for_jobs, cleanup_terminal_
 from backend.maintenance import cleanup_source_media_archives, run_startup_health_checks, run_startup_maintenance
 from backend.media_validation import validate_media_magic
 from backend.ngrok_status import get_ngrok_status
-from backend.quality_segments import review_segment_indices_from_text, review_segment_label
+from backend.quality_segments import review_segment_details_from_text, review_segment_label
 from backend.source_audio import finalize_source_audio_upload
 from backend.tasks import (
     GEMINI_MODEL,
@@ -1810,12 +1810,21 @@ def _refresh_quality_report_review_segments(quality_report: dict) -> None:
     if isinstance(warnings, str):
         warnings = [warnings]
     for warning in warnings:
-        for index in review_segment_indices_from_text(str(warning)):
+        for detail in review_segment_details_from_text(str(warning)):
+            try:
+                index = int(detail.get("index", -1))
+            except (TypeError, ValueError):
+                continue
+            source_segment = {
+                key: detail[key]
+                for key in ("label", "start_seconds", "end_seconds")
+                if key in detail
+            }
             existing = review_segments_by_index.get(index)
             if existing and existing.get("issues"):
-                add_review_segment(index, [])
+                add_review_segment(index, [], source_segment)
             else:
-                add_review_segment(index, ["品質警示提及此分段"])
+                add_review_segment(index, ["品質警示提及此分段"], source_segment)
 
     quality_report["review_segments"] = [
         review_segments_by_index[index]

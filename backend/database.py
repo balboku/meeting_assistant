@@ -19,7 +19,7 @@ from typing import Any, Optional
 from contextlib import contextmanager
 
 from backend.quality_segments import (
-    review_segment_indices_from_text,
+    review_segment_details_from_text,
     review_segment_label,
     review_segment_label_sort_key,
 )
@@ -1263,10 +1263,12 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             detail["issues"] = list(dict.fromkeys([*existing_issues, *clean_issues]))
 
     def add_review_segment_labels_from_text(text: str) -> None:
-        for index in review_segment_indices_from_text(text):
+        for detail in review_segment_details_from_text(text):
             add_review_segment_label(
-                review_segment_label(index),
-                index=index,
+                detail.get("label") or review_segment_label(int(detail["index"])),
+                index=int(detail["index"]),
+                start_seconds=int_or_none(detail.get("start_seconds")),
+                end_seconds=int_or_none(detail.get("end_seconds")),
                 issues=["品質警示提及此分段"],
             )
 

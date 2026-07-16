@@ -2578,6 +2578,7 @@ class MetricsRegressionTests(unittest.TestCase):
 class SearchRegressionTests(unittest.TestCase):
     def test_review_segment_helpers_parse_and_sort_labels(self):
         from backend.quality_segments import (
+            review_segment_details_from_text,
             review_segment_indices_from_text,
             review_segment_label,
             review_segment_label_sort_key,
@@ -2586,6 +2587,14 @@ class SearchRegressionTests(unittest.TestCase):
         text = "疑似分段：Segment #10｜90:00-100:00、第 2 段｜10:00-20:00、Segment #4、第 2 段"
 
         self.assertEqual(review_segment_indices_from_text(text), [1, 3, 9])
+        self.assertEqual(
+            review_segment_details_from_text(text),
+            [
+                {"index": 1, "label": "第 2 段", "start_seconds": 600, "end_seconds": 1200},
+                {"index": 3, "label": "第 4 段"},
+                {"index": 9, "label": "第 10 段", "start_seconds": 5400, "end_seconds": 6000},
+            ],
+        )
         self.assertEqual(review_segment_label(3), "第 4 段")
         self.assertEqual(
             sorted(["第 10 段", "無法定位", "第 2 段", "Segment #4"], key=review_segment_label_sort_key),
@@ -2869,8 +2878,20 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(
             listed["quality_review_segment_details"],
             [
-                {"label": "第 2 段", "index": 1, "issues": ["品質警示提及此分段"]},
-                {"label": "第 4 段", "index": 3, "issues": ["品質警示提及此分段"]},
+                {
+                    "label": "第 2 段",
+                    "index": 1,
+                    "start_seconds": 600,
+                    "end_seconds": 1200,
+                    "issues": ["品質警示提及此分段"],
+                },
+                {
+                    "label": "第 4 段",
+                    "index": 3,
+                    "start_seconds": 1800,
+                    "end_seconds": 2400,
+                    "issues": ["品質警示提及此分段"],
+                },
             ],
         )
         self.assertEqual(listed["quality_review_segment_count"], 2)
@@ -5108,7 +5129,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             "quality_label": "需複核",
             "created_at": "2026-07-08 10:00:00",
             "quality_report": {
-                "warnings": ["逐字稿品質警示：疑似分段：Segment #99，建議複核。"],
+                "warnings": ["逐字稿品質警示：疑似分段：Segment #99｜980:00-990:00，建議複核。"],
             },
             "full_content": (
                 "## 一、討論摘要 (Discussion Summary)\n摘要\n"
@@ -5123,6 +5144,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         report = response.json()["quality_report"]
         self.assertEqual([segment["index"] for segment in report["review_segments"]], [98])
         self.assertEqual(report["review_segments"][0]["label"], "第 99 段")
+        self.assertEqual(report["review_segments"][0]["start_seconds"], 58800)
+        self.assertEqual(report["review_segments"][0]["end_seconds"], 59400)
 
     def test_meeting_detail_flags_unlinked_legacy_summary_in_quality_report(self):
         import backend.main as main
