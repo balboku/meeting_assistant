@@ -1143,6 +1143,16 @@
 
     .modal-footer { display: flex; justify-content: flex-end; gap: 12px; margin-top: 32px; }
     .modal-wide { max-width: min(1040px, calc(100vw - 32px)); }
+    .editor-save-status {
+      margin-right: auto;
+      align-self: center;
+      min-height: 18px;
+      color: var(--text-mid);
+      font-size: 13px;
+    }
+    .editor-save-status.success { color: var(--green); }
+    .editor-save-status.error { color: var(--red); }
+    .editor-save-status.loading { color: var(--blue); }
     .summary-editor {
       width: 100%; min-height: min(62vh, 680px); resize: vertical;
       padding: 16px; border: 1px solid var(--border); border-radius: 6px;
@@ -1469,8 +1479,9 @@
     </div>
     <textarea id="summary-editor" class="summary-editor" aria-label="摘要、決議與待辦 Markdown"></textarea>
     <div class="modal-footer">
+      <span id="summary-editor-status" class="editor-save-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></span>
       <button class="btn-secondary" onclick="closeSummaryEditor()">取消</button>
-      <button class="btn-primary" id="save-summary-button" onclick="saveSummaryEdit()">儲存版本</button>
+      <button class="btn-primary" id="save-summary-button" aria-describedby="summary-editor-status" aria-busy="false" onclick="saveSummaryEdit()">儲存版本</button>
     </div>
   </div>
 </div>
@@ -1484,8 +1495,9 @@
     </div>
     <textarea id="transcript-editor" class="summary-editor" aria-label="完整逐字稿 Markdown"></textarea>
     <div class="modal-footer">
+      <span id="transcript-editor-status" class="editor-save-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></span>
       <button class="btn-secondary" onclick="closeTranscriptEditor()">取消</button>
-      <button class="btn-primary" id="save-transcript-button" onclick="saveTranscriptEdit()">儲存版本</button>
+      <button class="btn-primary" id="save-transcript-button" aria-describedby="transcript-editor-status" aria-busy="false" onclick="saveTranscriptEdit()">儲存版本</button>
     </div>
   </div>
 </div>
@@ -3000,11 +3012,23 @@ function openSummaryEditor() {
   if (!currentMeetingData) return;
   const editor = document.getElementById('summary-editor');
   editor.value = extractEditableSummaryMarkdown(currentMeetingData.full_content);
+  setEditorSaveStatus('summary-editor-status');
+  document.getElementById('save-summary-button')?.setAttribute('aria-busy', 'false');
   openAccessibleModal(document.getElementById('summary-editor-modal'), editor);
 }
 
 function closeSummaryEditor() {
   closeAccessibleModal(document.getElementById('summary-editor-modal'));
+}
+
+function setEditorSaveStatus(statusId, message = '', level = '', busy = false) {
+  const status = document.getElementById(statusId);
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle('success', level === 'success' && Boolean(message));
+  status.classList.toggle('error', level === 'error' && Boolean(message));
+  status.classList.toggle('loading', level === 'loading' && Boolean(message));
+  status.setAttribute('aria-busy', String(Boolean(busy)));
 }
 
 async function saveSummaryEdit() {
@@ -3013,13 +3037,16 @@ async function saveSummaryEdit() {
   const button = document.getElementById('save-summary-button');
   const summaryMarkdown = editor.value.trim();
   if (summaryMarkdown.length < 20) {
+    setEditorSaveStatus('summary-editor-status', '摘要內容過短，請確認三個區塊均已保留。', 'error');
     alert('摘要內容過短，請確認三個區塊均已保留。');
     return;
   }
 
   const originalText = button.innerHTML;
   button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
   button.innerHTML = '<span class="loading-spinner"></span> 儲存中';
+  setEditorSaveStatus('summary-editor-status', '正在儲存版本...', 'loading', true);
   try {
     const res = await fetch(`${API}/meetings/${currentId}/summary`, {
       method: 'PUT',
@@ -3027,13 +3054,16 @@ async function saveSummaryEdit() {
       body: JSON.stringify({ summary_markdown: summaryMarkdown }),
     });
     if (!res.ok) throw new Error(await apiErrorMessage(res));
+    setEditorSaveStatus('summary-editor-status', '已儲存版本。', 'success');
     closeSummaryEditor();
     await openDetail(currentId);
     await loadMeetings(document.getElementById('search-input').value.trim());
   } catch (err) {
+    setEditorSaveStatus('summary-editor-status', `儲存失敗：${err.message}`, 'error');
     alert(`儲存失敗：${err.message}`);
   } finally {
     button.disabled = false;
+    button.setAttribute('aria-busy', 'false');
     button.innerHTML = originalText;
   }
 }
@@ -3047,6 +3077,8 @@ function openTranscriptEditor() {
   }
   const editor = document.getElementById('transcript-editor');
   editor.value = transcript;
+  setEditorSaveStatus('transcript-editor-status');
+  document.getElementById('save-transcript-button')?.setAttribute('aria-busy', 'false');
   openAccessibleModal(document.getElementById('transcript-editor-modal'), editor);
 }
 
@@ -3060,13 +3092,16 @@ async function saveTranscriptEdit() {
   const button = document.getElementById('save-transcript-button');
   const transcriptMarkdown = editor.value.trim();
   if (transcriptMarkdown.length < 20) {
+    setEditorSaveStatus('transcript-editor-status', '逐字稿內容過短，請確認是否貼上完整內容。', 'error');
     alert('逐字稿內容過短，請確認是否貼上完整內容。');
     return;
   }
 
   const originalText = button.innerHTML;
   button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
   button.innerHTML = '<span class="loading-spinner"></span> 儲存中';
+  setEditorSaveStatus('transcript-editor-status', '正在儲存版本...', 'loading', true);
   try {
     const res = await fetch(`${API}/meetings/${currentId}/transcript`, {
       method: 'PUT',
@@ -3074,13 +3109,16 @@ async function saveTranscriptEdit() {
       body: JSON.stringify({ transcript_markdown: transcriptMarkdown }),
     });
     if (!res.ok) throw new Error(await apiErrorMessage(res));
+    setEditorSaveStatus('transcript-editor-status', '已儲存版本。', 'success');
     closeTranscriptEditor();
     await openDetail(currentId);
     await loadMeetings(document.getElementById('search-input').value.trim());
   } catch (err) {
+    setEditorSaveStatus('transcript-editor-status', `儲存失敗：${err.message}`, 'error');
     alert(`儲存失敗：${err.message}`);
   } finally {
     button.disabled = false;
+    button.setAttribute('aria-busy', 'false');
     button.innerHTML = originalText;
   }
 }
