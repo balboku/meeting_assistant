@@ -511,7 +511,22 @@
     }
     .quality-summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .quality-score { color: var(--green); font-size: 16px; font-weight: 700; }
-    .quality-warning { color: var(--yellow); font-size: 13px; line-height: 1.6; }
+    .quality-warning {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+      color: var(--yellow); font-size: 13px; line-height: 1.6;
+    }
+    .quality-warning-actions { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .quality-warning-jump {
+      border: 1px solid rgba(242, 213, 207, 0.45);
+      border-radius: 999px;
+      background: rgba(242, 213, 207, 0.08);
+      color: var(--yellow);
+      padding: 2px 8px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .quality-warning-jump:hover { border-color: var(--yellow); background: rgba(242, 213, 207, 0.16); }
     .quality-actions {
       display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
       margin-top: 10px;
@@ -537,6 +552,10 @@
       display: inline-flex; align-items: center; gap: 7px;
       padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
       color: var(--text-mid); font-size: 12px;
+    }
+    .segment-status.highlight {
+      border-color: var(--yellow);
+      box-shadow: 0 0 0 2px rgba(242, 213, 207, 0.18);
     }
     .segment-status button {
       border: 0; background: transparent; color: var(--blue); cursor: pointer;
@@ -2704,15 +2723,57 @@ function clockText(totalSeconds = 0) {
   return `${String(minutes).padStart(2, '0')}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
 }
 
+function qualityWarningSegmentIndices(warning = '', segments = []) {
+  const knownIndices = new Set((segments || [])
+    .map(segment => Number(segment.index))
+    .filter(index => Number.isInteger(index) && index >= 0));
+  const indices = [];
+  const matcher = /第\s*(\d+)\s*段/g;
+  let match;
+  while ((match = matcher.exec(String(warning || ''))) !== null) {
+    const index = Number(match[1]) - 1;
+    if (index < 0) continue;
+    if (knownIndices.size && !knownIndices.has(index)) continue;
+    if (!indices.includes(index)) indices.push(index);
+  }
+  return indices;
+}
+
+function focusQualitySegment(segmentIndex) {
+  const index = Number(segmentIndex);
+  const button = document.getElementById(`rerun-segment-${index}`);
+  if (!button) {
+    setDetailStatus(`找不到第 ${index + 1} 段的重跑控制`);
+    return;
+  }
+  const segment = button.closest('.segment-status');
+  segment?.classList.add('highlight');
+  segment?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  button.focus({ preventScroll: true });
+  setDetailStatus(`已定位第 ${index + 1} 段，可按「重跑」重新處理此分段`);
+  setTimeout(() => segment?.classList.remove('highlight'), 2600);
+}
+
+function renderQualityWarning(warning = '', segments = []) {
+  const indices = qualityWarningSegmentIndices(warning, segments);
+  const actions = indices.length
+    ? `<span class="quality-warning-actions">${indices
+        .map(index => `<button type="button" class="quality-warning-jump" aria-describedby="detail-status" onclick="focusQualitySegment(${index})">定位第 ${index + 1} 段</button>`)
+        .join('')}</span>`
+    : '';
+  return `<div class="quality-warning">${escapeHtml(warning)}${actions}</div>`;
+}
+
 function renderQualityReport(meeting) {
   const report = meeting.quality_report;
   if (!report) return '';
   const warningItems = report.warnings || [];
-  const warnings = warningItems
-    .map(warning => `<div class="quality-warning">${escapeHtml(warning)}</div>`)
-    .join('');
   const qualityActions = renderQualityActions(meeting, warningItems);
-  const segments = (report.segments || []).map(segment => {
+  const segmentItems = report.segments || [];
+  const warnings = warningItems
+    .map(warning => renderQualityWarning(warning, segmentItems))
+    .join('');
+  const segments = segmentItems.map(segment => {
     const index = Number(segment.index) || 0;
     const state = segment.status === 'reused'
       ? '沿用快取'
