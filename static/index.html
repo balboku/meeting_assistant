@@ -761,6 +761,13 @@
       border-color: var(--blue);
       background: rgba(122,162,247,0.16);
     }
+    .source-media-mode-action[aria-pressed="true"],
+    .source-media-mode-action.active {
+      border-color: rgba(125,207,255,0.62);
+      background: rgba(125,207,255,0.14);
+      color: var(--cyan);
+      box-shadow: inset 0 0 0 1px rgba(125,207,255,0.16);
+    }
     .source-media-action:disabled {
       opacity: 0.55;
       cursor: wait;
@@ -2004,9 +2011,9 @@ function previewSourceMedia(url = '', mediaType = '', name = '', requestedMode =
   const isVideo = playerMode === 'video';
   const mediaTitle = isVideo ? '原始錄影' : playerMode === 'audio' ? '原始音檔' : '原始檔案';
   const previewToggle = canAudioFallback
-    ? isVideo
-      ? `<button type="button" class="source-media-action" aria-label="切換為音訊預覽" data-source-url="${safeUrl}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${safeName}" data-source-mode="audio" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile, this.dataset.sourceMode)">🔊 音訊預覽</button>`
-      : `<button type="button" class="source-media-action" aria-label="切換為影片預覽" data-source-url="${safeUrl}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${safeName}" data-source-mode="video" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile, this.dataset.sourceMode)">🎥 影片預覽</button>`
+    ? `
+        <button type="button" class="source-media-action source-media-mode-action${playerMode === 'video' ? ' active' : ''}" aria-label="${playerMode === 'video' ? '目前為影片預覽' : '切換為影片預覽'}" aria-pressed="${playerMode === 'video'}" data-source-url="${safeUrl}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${safeName}" data-source-mode="video" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile, this.dataset.sourceMode)">🎥 影片</button>
+        <button type="button" class="source-media-action source-media-mode-action${playerMode === 'audio' ? ' active' : ''}" aria-label="${playerMode === 'audio' ? '目前為音訊預覽' : '切換為音訊預覽'}" aria-pressed="${playerMode === 'audio'}" data-source-url="${safeUrl}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${safeName}" data-source-mode="audio" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile, this.dataset.sourceMode)">🔊 音訊</button>`
     : '';
   const player = isVideo
     ? `<video controls preload="metadata" playsinline class="source-storage-media-player" src="${safeUrl}"></video>`
@@ -3198,9 +3205,9 @@ function renderAudioEvidence(meeting, requestedMode = null) {
   const mediaLabel = playerMode === 'video' ? '原始錄影' : '原始音檔';
   const canVideoPreview = sourceMediaVideoPreviewCapable(meeting);
   const previewToggle = canVideoPreview
-    ? playerMode === 'video'
-      ? `<button type="button" class="source-media-action" data-source-mode="audio" onclick="switchSourceMediaPlayer('audio')" aria-label="切換為音訊預覽">🔊 音訊預覽</button>`
-      : `<button type="button" class="source-media-action" data-source-mode="video" onclick="switchSourceMediaPlayer('video')" aria-label="切換為影片預覽">🎥 影片預覽</button>`
+    ? `
+      <button type="button" class="source-media-action source-media-mode-action${playerMode === 'video' ? ' active' : ''}" data-source-mode="video" onclick="switchSourceMediaPlayer('video')" aria-label="${playerMode === 'video' ? '目前為影片預覽' : '切換為影片預覽'}" aria-pressed="${playerMode === 'video'}">🎥 影片</button>
+      <button type="button" class="source-media-action source-media-mode-action${playerMode === 'audio' ? ' active' : ''}" data-source-mode="audio" onclick="switchSourceMediaPlayer('audio')" aria-label="${playerMode === 'audio' ? '目前為音訊預覽' : '切換為音訊預覽'}" aria-pressed="${playerMode === 'audio'}">🔊 音訊</button>`
     : '';
   const actions = `<div class="source-media-actions">
     ${previewToggle}
