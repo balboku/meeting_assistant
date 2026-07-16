@@ -247,6 +247,7 @@ class MeetingRecord(BaseModel):
     quality_warning_preview: Optional[str] = Field(None, description="第一個品質警示摘要")
     quality_review_segments: list[str] = Field(default_factory=list, description="需複核的分段標籤")
     quality_review_segment_details: list[dict] = Field(default_factory=list, description="需複核分段與時間範圍")
+    quality_review_segment_summary: Optional[str] = Field(None, description="需複核分段、時間與原因摘要")
     quality_review_segment_count: int = Field(0, description="需複核分段數量")
     source_media_type: Optional[str] = Field(None, description="原始檔媒體類型：audio 或 video")
     created_at: datetime

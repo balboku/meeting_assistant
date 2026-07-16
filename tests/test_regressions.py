@@ -2913,11 +2913,16 @@ class SearchRegressionTests(unittest.TestCase):
                 },
             ],
         )
+        self.assertEqual(
+            listed["quality_review_segment_summary"],
+            "第 2 段：疑似連續重複轉錄：同一句連續重複 31 次",
+        )
         self.assertEqual(listed["quality_review_segment_count"], 1)
         self.assertEqual(searched["quality_warning_count"], listed["quality_warning_count"])
         self.assertEqual(searched["quality_warning_preview"], listed["quality_warning_preview"])
         self.assertEqual(searched["quality_review_segments"], ["第 2 段"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
+        self.assertEqual(searched["quality_review_segment_summary"], listed["quality_review_segment_summary"])
         self.assertEqual(searched["quality_review_segment_count"], 1)
         self.assertEqual(issue_search["id"], meeting_id)
         self.assertEqual(issue_review_search["id"], meeting_id)
@@ -3137,8 +3142,13 @@ class SearchRegressionTests(unittest.TestCase):
             ],
         )
         self.assertEqual(listed["quality_review_segment_count"], 1)
+        self.assertEqual(
+            listed["quality_review_segment_summary"],
+            "第 4 段 31:00-31:03：疑似連續重複轉錄；同一句連續重複 31 次；重複時間：31:00-31:03",
+        )
         self.assertEqual(searched["quality_review_segments"], ["第 4 段"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
+        self.assertEqual(searched["quality_review_segment_summary"], listed["quality_review_segment_summary"])
 
     def test_list_and_search_include_source_media_type(self):
         database, tmp_path = self._isolated_database()
@@ -6004,6 +6014,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality_warning_preview", html)
         self.assertIn("quality_review_segments", html)
         self.assertIn("quality_review_segment_details", html)
+        self.assertIn("quality_review_segment_summary", html)
         self.assertIn("return '摘要警示';", html)
         self.assertIn("return '逐字稿警示';", html)
         self.assertIn("return '錄音警示';", html)
@@ -6017,6 +6028,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("onclick=\"rerunSummaryFromCard(event, ${recordId})\"", html)
         self.assertIn("重整摘要：${escapeHtml(record?.title || `#${recordId}`)}", html)
         self.assertIn("const reviewSegmentDetails = (record?.quality_review_segment_details || [])", html)
+        self.assertIn("const reviewSegmentSummary = String(record?.quality_review_segment_summary || '').trim();", html)
         self.assertIn("const issues = (segment?.issues || [])", html)
         self.assertIn("const issueText = issues[0] ? `：${issues[0]}` : '';", html)
         self.assertIn("issue: issues[0] || ''", html)
@@ -6028,11 +6040,15 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const groupedReasons = Array.from(groupedReasonMap.entries())", html)
         self.assertIn("return `${displayText}：${issue}`;", html)
         self.assertIn("const reviewSegmentReasons = groupedReasons.length", html)
-        self.assertIn("const visibleReason = reviewSegmentReasons[0] || warningPreview;", html)
+        self.assertIn("const visibleReason = reviewSegmentSummary || reviewSegmentReasons[0] || warningPreview;", html)
         self.assertIn("；另有 ${reviewSegmentReasons.length - 1} 項", html)
-        self.assertIn("const reasonTitle = [...new Set([warningPreview, ...reviewSegmentReasons].filter(Boolean))].join('\\n');", html)
+        self.assertIn("const reasonTitle = [...new Set([warningPreview, reviewSegmentSummary, ...reviewSegmentReasons].filter(Boolean))].join('\\n');", html)
         self.assertIn("clockText(segment.start_seconds)}-${clockText(segment.end_seconds)", html)
         self.assertIn("card-quality-chip needs-review review-segments", html)
+        self.assertIn("card-quality-chip needs-review transcript-review", html)
+        self.assertIn("問題分段：${escapeHtml(segmentText)}", html)
+        self.assertIn("需複核：${escapeHtml(visibleReason)}", html)
+        self.assertIn("逐字稿警示 ${reviewSegments.length} 段", html)
         self.assertIn("card-quality-action", html)
         self.assertIn("onclick=\"openDetailAndFocusSegment(event, ${focusArgs})\"", html)
         self.assertIn("開啟會議並定位${escapeHtml(focusSegment.display)}", html)
@@ -6040,7 +6056,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("分段：${escapeHtml(segmentText)}", html)
         self.assertIn("card-quality-chip", html)
         self.assertIn("card-review-reason", html)
-        self.assertIn("原因：${escapeHtml(visibleReason)}${escapeHtml(extraReasonText)}", html)
+        self.assertIn("需複核：${escapeHtml(visibleReason)}${escapeHtml(extraReasonText)}", html)
         self.assertNotIn("需複核 ${warningCount}", html)
         self.assertIn("const reviewParam = reviewOnly ? '&needs_review=true' : ''", html)
         self.assertIn("/meetings/search?q=${encodeURIComponent(query)}&limit=100${reviewParam}", html)
@@ -6345,17 +6361,21 @@ if (!sandbox.result.includes('錄音警示 1')) {{
   console.error(sandbox.result);
   process.exit(4);
 }}
-if (!sandbox.result.includes('分段：第 8 段 70:00-80:00')) {{
+if (!sandbox.result.includes('逐字稿警示 1 段')) {{
   console.error(sandbox.result);
   process.exit(5);
 }}
-if (!sandbox.result.includes('openDetailAndFocusSourceMedia(event, 43)')) {{
+if (!sandbox.result.includes('問題分段：第 8 段 70:00-80:00')) {{
   console.error(sandbox.result);
   process.exit(6);
 }}
-if (sandbox.result.includes('逐字稿警示 1')) {{
+if (!sandbox.result.includes('需複核：第 8 段 70:00-80:00：疑似連續重複轉錄')) {{
   console.error(sandbox.result);
   process.exit(7);
+}}
+if (!sandbox.result.includes('openDetailAndFocusSourceMedia(event, 43)')) {{
+  console.error(sandbox.result);
+  process.exit(8);
 }}
 console.log('audio_card_quality_label_ok');
 """

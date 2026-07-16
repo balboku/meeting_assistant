@@ -78,6 +78,45 @@ def _format_clock(total_seconds: int) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
+def _quality_review_segment_summary(details: list[dict[str, Any]], limit: int = 3) -> Optional[str]:
+    if not details:
+        return None
+
+    def int_or_none(value: Any) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    summaries: list[str] = []
+    for detail in details[:limit]:
+        label = str(detail.get("label") or "").strip()
+        index = int_or_none(detail.get("index"))
+        if not label and index is not None:
+            label = review_segment_label(index)
+        if not label:
+            label = "分段"
+        start_seconds = int_or_none(detail.get("start_seconds"))
+        end_seconds = int_or_none(detail.get("end_seconds"))
+        time_text = ""
+        if start_seconds is not None or end_seconds is not None:
+            start = start_seconds if start_seconds is not None else end_seconds
+            end = end_seconds if end_seconds is not None else start_seconds
+            time_text = f" {_format_clock(start or 0)}-{_format_clock(end or start or 0)}"
+        issue = next(
+            (
+                str(issue).strip()
+                for issue in detail.get("issues") or []
+                if str(issue).strip()
+            ),
+            "",
+        )
+        summaries.append(f"{label}{time_text}{f'：{issue}' if issue else ''}")
+    if len(details) > limit:
+        summaries.append(f"另有 {len(details) - limit} 段")
+    return "；".join(summaries) or None
+
+
 def _repeated_transcript_turn_review_segments(
     transcript: str,
     *,
@@ -1475,6 +1514,9 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         for label in sorted_review_segment_labels
         if label in review_segment_detail_by_label
     ]
+    record["quality_review_segment_summary"] = _quality_review_segment_summary(
+        record["quality_review_segment_details"]
+    )
     record["quality_review_segment_count"] = len(sorted_review_segment_labels)
     return record
 

@@ -455,6 +455,11 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .card-quality-chip.transcript-review {
+      color: var(--yellow);
+      border-color: rgba(224,175,104,0.45);
+      background: rgba(224,175,104,0.08);
+    }
     .card-quality-chip.card-quality-action {
       cursor: pointer;
       font: inherit;
@@ -471,8 +476,9 @@
       color: var(--yellow);
       font-size: 12px;
       line-height: 1.5;
+      overflow-wrap: anywhere;
       display: -webkit-box;
-      -webkit-line-clamp: 2;
+      -webkit-line-clamp: 3;
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
@@ -2780,7 +2786,9 @@ function renderCardQuality(record) {
   const reviewSegmentTitles = (reviewSegmentDetails.length ? reviewSegmentDetails : reviewSegments)
     .map(segment => String(segment?.title || segment || '').trim())
     .filter(Boolean);
+  const reviewSegmentSummary = String(record?.quality_review_segment_summary || '').trim();
   const chips = [];
+  let hasTranscriptWarningChip = false;
   if (score !== null && score !== undefined) {
     const reviewClass = Number(score) < 85 || /需|警|低|不/.test(label)
       ? 'needs-review'
@@ -2791,6 +2799,7 @@ function renderCardQuality(record) {
   }
   if (warningCount > 0) {
     const warningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0);
+    hasTranscriptWarningChip = warningType === '逐字稿警示';
     chips.push(`<span class="card-quality-chip needs-review" title="${escapeHtml(warningPreview || warningType)}">${escapeHtml(warningType)} ${warningCount}</span>`);
     if (warningPreview.startsWith('摘要品質警示') && hasRecordId) {
       chips.push(`<button type="button" class="card-quality-chip needs-review card-quality-action" title="沿用逐字稿，只重新產生摘要、決議與待辦" aria-label="重整摘要：${escapeHtml(record?.title || `#${recordId}`)}" onclick="rerunSummaryFromCard(event, ${recordId})">↻ 重整摘要</button>`);
@@ -2799,6 +2808,10 @@ function renderCardQuality(record) {
     }
   }
   if (reviewSegments.length) {
+    if (!hasTranscriptWarningChip) {
+      const transcriptTitle = reviewSegmentSummary || reviewSegmentTitles.join('、') || reviewSegments.join('、');
+      chips.push(`<span class="card-quality-chip needs-review transcript-review" title="逐字稿需複核分段：${escapeHtml(transcriptTitle)}">逐字稿警示 ${reviewSegments.length} 段</span>`);
+    }
     const segmentText = reviewSegments.length > 3
       ? `${reviewSegments.slice(0, 3).join('、')} 等 ${reviewSegments.length} 段`
       : reviewSegments.join('、');
@@ -2811,9 +2824,9 @@ function renderCardQuality(record) {
       const focusArgs = hasStartSeconds
         ? `${recordId}, ${focusSegment.index}, ${startSeconds}`
         : `${recordId}, ${focusSegment.index}`;
-      chips.push(`<button type="button" class="card-quality-chip needs-review review-segments card-quality-action" title="開啟會議並定位需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}" aria-label="開啟會議並定位${escapeHtml(focusSegment.display)}" onclick="openDetailAndFocusSegment(event, ${focusArgs})">分段：${escapeHtml(segmentText)}</button>`);
+      chips.push(`<button type="button" class="card-quality-chip needs-review review-segments card-quality-action" title="開啟會議並定位需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}" aria-label="開啟會議並定位${escapeHtml(focusSegment.display)}" onclick="openDetailAndFocusSegment(event, ${focusArgs})">問題分段：${escapeHtml(segmentText)}</button>`);
     } else {
-      chips.push(`<span class="card-quality-chip needs-review review-segments" title="需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}">分段：${escapeHtml(segmentText)}</span>`);
+      chips.push(`<span class="card-quality-chip needs-review review-segments" title="需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}">問題分段：${escapeHtml(segmentText)}</span>`);
     }
   }
   const qualityRow = chips.length ? `<div class="card-quality-row">${chips.join('')}</div>` : '';
@@ -2837,13 +2850,13 @@ function renderCardQuality(record) {
     : reviewSegmentDetails
       .map(segment => String(segment.reason || '').trim())
       .filter(Boolean);
-  const visibleReason = reviewSegmentReasons[0] || warningPreview;
+  const visibleReason = reviewSegmentSummary || reviewSegmentReasons[0] || warningPreview;
   const extraReasonText = reviewSegmentReasons.length > 1
     ? `；另有 ${reviewSegmentReasons.length - 1} 項`
     : '';
-  const reasonTitle = [...new Set([warningPreview, ...reviewSegmentReasons].filter(Boolean))].join('\n');
+  const reasonTitle = [...new Set([warningPreview, reviewSegmentSummary, ...reviewSegmentReasons].filter(Boolean))].join('\n');
   const reason = visibleReason
-    ? `<div class="card-review-reason" title="${escapeHtml(reasonTitle || visibleReason)}">原因：${escapeHtml(visibleReason)}${escapeHtml(extraReasonText)}</div>`
+    ? `<div class="card-review-reason" title="${escapeHtml(reasonTitle || visibleReason)}">需複核：${escapeHtml(visibleReason)}${escapeHtml(extraReasonText)}</div>`
     : '';
   return `${qualityRow}${reason}`;
 }
