@@ -2958,18 +2958,30 @@ function clockText(totalSeconds = 0) {
   return `${String(minutes).padStart(2, '0')}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
 }
 
-function qualityWarningSegmentIndices(warning = '', segments = []) {
+function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegments = []) {
   const knownIndices = new Set((segments || [])
     .map(segment => Number(segment.index))
     .filter(index => Number.isInteger(index) && index >= 0));
-  if (!knownIndices.size) return [];
-  const indices = [];
+  const reviewSegmentByIndex = new Map((reviewSegments || [])
+    .map(segment => [Number(segment?.index), segment])
+    .filter(([index]) => Number.isInteger(index) && index >= 0));
+  const targets = [];
   const text = String(warning || '');
+  const addTarget = (index, sourceSegment = null) => {
+    if (!Number.isInteger(index) || index < 0) return;
+    const startSeconds = Number(sourceSegment?.start_seconds);
+    const hasStartSeconds = Number.isFinite(startSeconds) && startSeconds >= 0;
+    if (knownIndices.size && !knownIndices.has(index) && !hasStartSeconds) return;
+    if (!knownIndices.size && !hasStartSeconds) return;
+    if (targets.some(target => target.index === index)) return;
+    targets.push({
+      index,
+      start_seconds: hasStartSeconds ? startSeconds : null,
+    });
+  };
   const addIndex = rawIndex => {
     const index = Number(rawIndex) - 1;
-    if (index < 0) return;
-    if (knownIndices.size && !knownIndices.has(index)) return;
-    if (!indices.includes(index)) indices.push(index);
+    addTarget(index, reviewSegmentByIndex.get(index));
   };
   const matchers = [/第\s*(\d+)\s*段/g, /\bSegment\s*#?\s*(\d+)\b/gi];
   matchers.forEach(matcher => {
@@ -2978,7 +2990,15 @@ function qualityWarningSegmentIndices(warning = '', segments = []) {
       addIndex(match[1]);
     }
   });
-  return indices;
+  const isTranscriptWarning = text.startsWith('逐字稿品質警示');
+  if (!targets.length && isTranscriptWarning) {
+    (reviewSegments || []).forEach(segment => addTarget(Number(segment?.index), segment));
+  }
+  return targets.sort((a, b) => a.index - b.index);
+}
+
+function qualityWarningSegmentIndices(warning = '', segments = [], reviewSegments = []) {
+  return qualityWarningSegmentTargets(warning, segments, reviewSegments).map(target => target.index);
 }
 
 function focusQualitySegment(segmentIndex, fallbackStartSeconds = null) {
@@ -3010,11 +3030,17 @@ function focusQualitySegment(segmentIndex, fallbackStartSeconds = null) {
   setTimeout(() => segment?.classList.remove('highlight'), 2600);
 }
 
-function renderQualityWarning(warning = '', segments = []) {
-  const indices = qualityWarningSegmentIndices(warning, segments);
-  const actions = indices.length
-    ? `<span class="quality-warning-actions">${indices
-        .map(index => `<button type="button" class="quality-warning-jump" aria-describedby="detail-status" onclick="focusQualitySegment(${index})">定位第 ${index + 1} 段</button>`)
+function renderQualityWarning(warning = '', segments = [], reviewSegments = []) {
+  const targets = qualityWarningSegmentTargets(warning, segments, reviewSegments);
+  const actions = targets.length
+    ? `<span class="quality-warning-actions">${targets
+        .map(target => {
+          const focusArgs = target.start_seconds !== null ? `${target.index}, ${target.start_seconds}` : `${target.index}`;
+          const title = target.start_seconds !== null
+            ? `定位第 ${target.index + 1} 段，並跳到原始檔 ${clockText(target.start_seconds)}`
+            : `定位第 ${target.index + 1} 段`;
+          return `<button type="button" class="quality-warning-jump" aria-describedby="detail-status" title="${escapeHtml(title)}" onclick="focusQualitySegment(${focusArgs})">定位第 ${target.index + 1} 段</button>`;
+        })
         .join('')}</span>`
     : '';
   return `<div class="quality-warning">${escapeHtml(warning)}${actions}</div>`;
@@ -3082,7 +3108,7 @@ function renderQualityReport(meeting) {
   const segmentItems = report.segments || [];
   const reviewSegments = renderQualityReviewSegments(meeting.id, report.review_segments || [], segmentItems);
   const warnings = warningItems
-    .map(warning => renderQualityWarning(warning, segmentItems))
+    .map(warning => renderQualityWarning(warning, segmentItems, report.review_segments || []))
     .join('');
   const segments = segmentItems.map(segment => {
     const index = Number(segment.index) || 0;
