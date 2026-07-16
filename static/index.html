@@ -1497,12 +1497,12 @@
     </div>
 
     <!-- 模式選擇 -->
-    <div class="rec-mode-tabs">
-      <button class="rec-tab active" id="tab-audio" onclick="switchRecMode('audio')">🎙 僅錄音</button>
-      <button class="rec-tab" id="tab-video" onclick="switchRecMode('video')">🎥 鏡頭錄影</button>
-      <button class="rec-tab" id="tab-screen" onclick="switchRecMode('screen')">🖥 螢幕錄影/分頁音訊</button>
+    <div class="rec-mode-tabs" role="radiogroup" aria-label="錄製模式">
+      <button class="rec-tab active" id="tab-audio" role="radio" aria-checked="true" tabindex="0" onclick="switchRecMode('audio')" onkeydown="handleRecordingModeKeydown(event)">🎙 僅錄音</button>
+      <button class="rec-tab" id="tab-video" role="radio" aria-checked="false" tabindex="-1" onclick="switchRecMode('video')" onkeydown="handleRecordingModeKeydown(event)">🎥 鏡頭錄影</button>
+      <button class="rec-tab" id="tab-screen" role="radio" aria-checked="false" tabindex="-1" onclick="switchRecMode('screen')" onkeydown="handleRecordingModeKeydown(event)" aria-controls="rec-screen-options">🖥 螢幕錄影/分頁音訊</button>
     </div>
-    <div class="rec-screen-options" id="rec-screen-options">
+    <div class="rec-screen-options" id="rec-screen-options" aria-labelledby="tab-screen" hidden>
       <label class="rec-check">
         <input type="checkbox" id="rec-include-mic" checked />
         <span>同時錄麥克風，錄製中可關閉</span>
@@ -3859,7 +3859,42 @@ function resetRecorder() {
 }
 
 function updateRecordingModeOptions() {
+  syncRecordingModeTabs();
   recScreenOptions?.classList.toggle('show', recMode === 'screen');
+  if (recScreenOptions) recScreenOptions.hidden = recMode !== 'screen';
+}
+
+function syncRecordingModeTabs() {
+  const modes = ['audio', 'video', 'screen'];
+  modes.forEach(mode => {
+    const tab = document.getElementById(`tab-${mode}`);
+    if (!tab) return;
+    const selected = recMode === mode;
+    tab.classList.toggle('active', selected);
+    tab.setAttribute('aria-checked', String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+  });
+}
+
+function handleRecordingModeKeydown(event) {
+  const modes = ['audio', 'video', 'screen'];
+  const currentIndex = modes.indexOf(recMode);
+  let nextIndex = currentIndex;
+  if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+    nextIndex = (currentIndex + 1 + modes.length) % modes.length;
+  } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+    nextIndex = (currentIndex - 1 + modes.length) % modes.length;
+  } else if (event.key === 'Home') {
+    nextIndex = 0;
+  } else if (event.key === 'End') {
+    nextIndex = modes.length - 1;
+  } else {
+    return;
+  }
+  event.preventDefault();
+  const nextMode = modes[nextIndex];
+  switchRecMode(nextMode);
+  document.getElementById(`tab-${nextMode}`)?.focus();
 }
 
 function setRecordingConfigurationLocked(locked) {
@@ -3878,9 +3913,6 @@ function setRecordingSubmissionLocked(locked) {
 function switchRecMode(mode) {
   if (document.getElementById('rec-quality-profile').disabled) return;
   recMode = mode;
-  document.getElementById('tab-audio').classList.toggle('active', mode === 'audio');
-  document.getElementById('tab-video').classList.toggle('active', mode === 'video');
-  document.getElementById('tab-screen').classList.toggle('active', mode === 'screen');
   updateRecordingModeOptions();
   syncRecordingProfileOptions();
 }
