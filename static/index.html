@@ -706,6 +706,10 @@
       display: grid;
       gap: 10px;
     }
+    .source-storage-preview:focus-visible {
+      outline: 2px solid var(--blue);
+      outline-offset: 3px;
+    }
     .source-storage-preview-header {
       display: flex;
       align-items: center;
@@ -1505,7 +1509,7 @@
       <button id="source-storage-reset" type="button" class="source-media-action source-storage-reset" aria-label="清除原始檔篩選條件" onclick="resetSourceStorageFilters()">清除</button>
     </div>
     <div id="source-storage-status" class="source-storage-status" role="status" aria-live="polite"></div>
-    <div id="source-storage-preview" class="source-storage-preview" aria-label="原始檔預覽" aria-live="polite"></div>
+    <div id="source-storage-preview" class="source-storage-preview" role="region" aria-label="原始檔預覽" aria-live="polite" tabindex="-1"></div>
     <div id="source-storage-list" class="source-storage-list" role="list" aria-label="原始檔清單" aria-live="polite" aria-busy="false"></div>
     <div id="source-storage-more" class="source-storage-more" hidden>
       <button id="source-storage-load-more" type="button" class="source-media-action source-storage-load-more" aria-label="載入更多原始檔" onclick="loadMoreSourceStorageInventory()">載入更多</button>
@@ -1626,6 +1630,7 @@ let sourceStorageInventoryState = {
   loadedAt: null,
   loaded: false
 };
+let sourceMediaPreviewReturnFocus = null;
 const SOURCE_STORAGE_FETCH_LIMIT = 500;
 
 function getFocusableModalElements(modal) {
@@ -1754,15 +1759,25 @@ function sourceStorageTitle(sourceFiles = 0, sourceBytes = 0, unlinkedFiles = 0,
 }
 
 function closeSourceStorageInventory() {
-  closeSourceMediaPreview();
+  closeSourceMediaPreview(false);
   closeAccessibleModal(document.getElementById('source-storage-modal'));
 }
 
-function closeSourceMediaPreview() {
+function closeSourceMediaPreview(restoreFocus = true) {
   const preview = document.getElementById('source-storage-preview');
   if (!preview) return;
+  const returnTarget = sourceMediaPreviewReturnFocus;
   preview.classList.remove('show');
   preview.innerHTML = '';
+  sourceMediaPreviewReturnFocus = null;
+  if (
+    restoreFocus &&
+    returnTarget &&
+    document.body.contains(returnTarget) &&
+    typeof returnTarget.focus === 'function'
+  ) {
+    returnTarget.focus();
+  }
 }
 
 function setSourceStorageStatus(message = '', isError = false) {
@@ -1796,6 +1811,10 @@ function sourceStorageAudioFallbackCapable(file = {}) {
 function previewSourceMedia(url = '', mediaType = '', name = '', requestedMode = '') {
   const preview = document.getElementById('source-storage-preview');
   if (!preview || !url) return;
+  const activeElement = document.activeElement;
+  if (activeElement instanceof HTMLElement && !preview.contains(activeElement)) {
+    sourceMediaPreviewReturnFocus = activeElement;
+  }
   const safeUrl = escapeHtml(url);
   const downloadUrl = url.includes('?') ? `${url}&download=1` : `${url}?download=1`;
   const safeDownloadUrl = escapeHtml(downloadUrl);
@@ -1829,6 +1848,7 @@ function previewSourceMedia(url = '', mediaType = '', name = '', requestedMode =
     <div class="source-media-player-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></div>`;
   preview.classList.add('show');
   enhanceSourceStoragePreviewPlayer(preview);
+  preview.focus({ preventScroll: true });
   preview.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
@@ -2079,7 +2099,7 @@ function syncSourceStorageLoadMoreButton() {
 function renderSourceStorageInventory() {
   const list = document.getElementById('source-storage-list');
   if (!list || !sourceStorageInventoryState.loaded) return;
-  closeSourceMediaPreview();
+  closeSourceMediaPreview(false);
   const searchValue = document.getElementById('source-storage-search')?.value || '';
   const filter = document.getElementById('source-storage-filter')?.value || 'all';
   const mediaFilter = document.getElementById('source-storage-media-filter')?.value || 'all';
@@ -2197,7 +2217,7 @@ async function openSourceStorageInventory() {
   const list = document.getElementById('source-storage-list');
   if (!modal || !list) return;
   openAccessibleModal(modal, document.getElementById('source-storage-search'));
-  closeSourceMediaPreview();
+  closeSourceMediaPreview(false);
   sourceStorageInventoryState.loaded = false;
   setElementBusy(list, true);
   list.innerHTML = '<div class="detail-placeholder"><div class="loading-spinner"></div><p>載入原始檔清單...</p></div>';
