@@ -1478,7 +1478,7 @@
     </div>
     <div id="source-storage-status" class="source-storage-status" role="status" aria-live="polite"></div>
     <div id="source-storage-preview" class="source-storage-preview" aria-label="原始檔預覽" aria-live="polite"></div>
-    <div id="source-storage-list" class="source-storage-list" role="list" aria-label="原始檔清單" aria-live="polite"></div>
+    <div id="source-storage-list" class="source-storage-list" role="list" aria-label="原始檔清單" aria-live="polite" aria-busy="false"></div>
     <div id="source-storage-more" class="source-storage-more" hidden>
       <button id="source-storage-load-more" type="button" class="source-media-action source-storage-load-more" aria-label="載入更多原始檔" onclick="loadMoreSourceStorageInventory()">載入更多</button>
     </div>
@@ -2129,8 +2129,10 @@ async function fetchSourceStorageInventoryPage(liveOffset = 0, archiveOffset = 0
 
 async function loadMoreSourceStorageInventory() {
   if (!sourceStorageInventoryState.loaded) return;
+  const list = document.getElementById('source-storage-list');
   const button = document.getElementById('source-storage-load-more');
   const previousLabel = button?.textContent || '載入更多';
+  setElementBusy(list, true);
   if (button) {
     button.disabled = true;
     button.textContent = '載入中';
@@ -2153,6 +2155,7 @@ async function loadMoreSourceStorageInventory() {
   } catch (err) {
     setSourceStorageStatus(`載入更多失敗：${err.message}`, true);
   } finally {
+    setElementBusy(list, false);
     if (button) {
       button.disabled = false;
       button.textContent = previousLabel;
@@ -2168,6 +2171,7 @@ async function openSourceStorageInventory() {
   openAccessibleModal(modal, document.getElementById('source-storage-search'));
   closeSourceMediaPreview();
   sourceStorageInventoryState.loaded = false;
+  setElementBusy(list, true);
   list.innerHTML = '<div class="detail-placeholder"><div class="loading-spinner"></div><p>載入原始檔清單...</p></div>';
   setSourceStorageStatus('正在更新原始檔清單...');
   syncSourceStorageLoadMoreButton();
@@ -2189,6 +2193,8 @@ async function openSourceStorageInventory() {
     setSourceStorageStatus(`更新失敗：${err.message}`, true);
     syncSourceStorageLoadMoreButton();
     list.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>無法讀取原始檔清單：${escapeHtml(err.message)}</p></div>`;
+  } finally {
+    setElementBusy(list, false);
   }
 }
 
