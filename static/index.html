@@ -3008,10 +3008,17 @@ function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegment
       : reviewSegmentByIndex.get(index);
     addTarget(index, sourceSegment);
   };
-  const addTimeRangeTarget = startSeconds => {
+  const addTimeRangeTarget = (startSeconds, endSeconds = startSeconds) => {
     if (!Number.isFinite(startSeconds) || startSeconds < 0) return;
-    const index = Math.floor(startSeconds / REVIEW_SEGMENT_SECONDS);
-    addTarget(index, { start_seconds: startSeconds });
+    const normalizedEnd = Math.max(startSeconds, Number(endSeconds) || startSeconds);
+    const inclusiveEnd = normalizedEnd > startSeconds ? normalizedEnd - 1 : normalizedEnd;
+    const firstIndex = Math.floor(startSeconds / REVIEW_SEGMENT_SECONDS);
+    const lastIndex = Math.max(firstIndex, Math.floor(inclusiveEnd / REVIEW_SEGMENT_SECONDS));
+    for (let index = firstIndex; index <= lastIndex; index += 1) {
+      addTarget(index, {
+        start_seconds: Math.max(startSeconds, index * REVIEW_SEGMENT_SECONDS)
+      });
+    }
   };
   const matchers = [/第\s*(\d+)\s*段/g, /\bSegment\s*#?\s*(\d+)\b/gi];
   matchers.forEach(matcher => {
@@ -3024,7 +3031,8 @@ function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegment
   let timeMatch;
   while ((timeMatch = warningTimeRangeMatcher.exec(text)) !== null) {
     const startSeconds = parseClockSeconds(timeMatch[1]);
-    if (startSeconds !== null) addTimeRangeTarget(startSeconds);
+    const endSeconds = parseClockSeconds(timeMatch[2]);
+    if (startSeconds !== null) addTimeRangeTarget(startSeconds, endSeconds);
   }
   const isTranscriptWarning = text.startsWith('逐字稿品質警示');
   if (!targets.length && isTranscriptWarning) {
