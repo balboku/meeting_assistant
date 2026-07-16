@@ -2270,7 +2270,7 @@ async def rerun_meeting_record(
             else "已沿用既有逐字稿建立摘要重整任務，完成後會產生新的會議紀錄。"
             if summary_only
             else (
-                f"已建立指定分段重跑任務：第 {', '.join(str(index + 1) for index in force_segment_indices)} 段。"
+                f"已建立指定分段重跑任務：第 {'、'.join(str(index + 1) for index in force_segment_indices)} 段。"
                 if request_body is not None and request_body.segments is not None
                 else "已用原始媒體檔建立完整重跑任務，完成後會產生新的會議紀錄。"
             )

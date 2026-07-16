@@ -4573,7 +4573,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(payload["source_media_size_bytes"], 5)
         self.assertEqual(payload["source_media_sha256"], "abc123def4567890")
 
-    def test_meeting_rerun_api_can_force_only_one_segment(self):
+    def test_meeting_rerun_api_can_force_selected_segments(self):
         import backend.main as main
 
         record = {
@@ -4599,13 +4599,13 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                     main.app,
                     "POST",
                     "/meetings/8/rerun",
-                    json={"segments": [1]},
+                    json={"segments": [1, 0, 1]},
                 )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(enqueue.call_args.kwargs["force_segment_indices"], [1])
+        self.assertEqual(enqueue.call_args.kwargs["force_segment_indices"], [0, 1])
         self.assertEqual(enqueue.call_args.kwargs["transcript_reuse_source_path"], meeting_path)
-        self.assertIn("第 2 段", response.json()["message"])
+        self.assertIn("第 1、2 段", response.json()["message"])
 
     def test_meeting_rerun_api_can_rebuild_summary_without_forcing_transcription(self):
         import backend.main as main
@@ -5069,12 +5069,14 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality-review-segments", html)
         self.assertIn("quality-review-segment", html)
         self.assertIn("quality-review-segment-label", html)
+        self.assertIn("quality-rerun-review-segments", html)
         self.assertIn("segment-issue", html)
         self.assertIn("segment-status${issues.length ? ' has-issue' : ''}", html)
         self.assertIn("(segment.issues || [])", html)
         self.assertIn("const issueBadges = issues", html)
         self.assertIn("report.warnings", html)
         self.assertIn("function renderQualityActions", html)
+        self.assertIn("function normalizeSegmentIndices", html)
         self.assertIn("function qualityWarningSegmentIndices", html)
         self.assertIn("function focusQualitySegment", html)
         self.assertIn("function renderQualityWarning", html)
@@ -5082,10 +5084,13 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const matchers = [/第\\s*(\\d+)\\s*段/g, /\\bSegment\\s*#?\\s*(\\d+)\\b/gi];", html)
         self.assertIn("matchers.forEach(matcher => {", html)
         self.assertIn("addIndex(match[1]);", html)
-        self.assertIn("const reviewSegments = renderQualityReviewSegments(report.review_segments || []);", html)
+        self.assertIn("const reviewSegments = renderQualityReviewSegments(meeting.id, report.review_segments || []);", html)
         self.assertIn("aria-label=\"需複核分段\"", html)
         self.assertIn("onclick=\"focusQualitySegment(${index})\"", html)
         self.assertIn("quality-review-title", html)
+        self.assertIn('id="quality-rerun-review-segments-button"', html)
+        self.assertIn("↻ 重跑需複核分段", html)
+        self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, [${segmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')\"", html)
         self.assertIn("button.focus({ preventScroll: true });", html)
         self.assertIn("已定位第 ${index + 1} 段，可按「重跑」重新處理此分段", html)
         self.assertIn("找不到第 ${index + 1} 段的重跑控制", html)
@@ -5130,7 +5135,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("triggerButtonId", html)
         self.assertIn("rerun-segment-${index}", html)
         self.assertIn('id="rerun-segment-${index}" aria-describedby="detail-status" aria-busy="false"', html)
-        self.assertIn("JSON.stringify({ segments: [segmentIndex] })", html)
+        self.assertIn("const segmentIndices = normalizeSegmentIndices(segmentIndex);", html)
+        self.assertIn("JSON.stringify({ segments: segmentIndices })", html)
         self.assertIn('id="rerun-summary-button"', html)
         self.assertIn("summary_only: true, high_quality: highQuality", html)
         self.assertIn('id="rerun-summary-high-quality-button"', html)
