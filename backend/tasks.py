@@ -2522,10 +2522,11 @@ def _build_quality_report(
 
     review_segments = _quality_report_review_segments(segment_report)
     segment_warnings = _quality_report_segment_warnings(review_segments)
+    quality_penalty_units = len(warnings) + len(review_segments)
     warnings.extend(segment_warnings)
 
     score = 100
-    score -= min(20, len(warnings) * 5)
+    score -= min(20, quality_penalty_units * 5)
     if silence_ratio >= 0.9:
         score -= 10
     score = max(0, score)
