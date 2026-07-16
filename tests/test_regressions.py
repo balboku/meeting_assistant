@@ -2702,6 +2702,8 @@ class SearchRegressionTests(unittest.TestCase):
 
         listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
         searched = database.search_meetings("Segment Issue Badge")[0]
+        issue_search = database.search_meetings("連續重複轉錄")[0]
+        issue_review_search = database.search_meetings("連續重複轉錄", needs_review=True)[0]
         needs_review = database.list_meetings(needs_review=True)
 
         self.assertEqual(listed["quality_warning_count"], 1)
@@ -2711,6 +2713,8 @@ class SearchRegressionTests(unittest.TestCase):
         )
         self.assertEqual(searched["quality_warning_count"], listed["quality_warning_count"])
         self.assertEqual(searched["quality_warning_preview"], listed["quality_warning_preview"])
+        self.assertEqual(issue_search["id"], meeting_id)
+        self.assertEqual(issue_review_search["id"], meeting_id)
         self.assertIn(meeting_id, [row["id"] for row in needs_review])
 
     def test_list_and_search_include_source_media_type(self):

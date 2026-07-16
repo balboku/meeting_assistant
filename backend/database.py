@@ -1563,7 +1563,7 @@ def list_audit_logs(limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
 
 def search_meetings(query: str, limit: int = 50, needs_review: bool = False) -> list[dict]:
     """
-    搜尋會議記錄的標題、媒體檔名、摘要與完整 Markdown 內容。
+    搜尋會議記錄的標題、媒體檔名、摘要、完整 Markdown 內容與品質報告。
 
     FTS5 負責快速的完整詞組搜尋，LIKE 後備則補足中文連續字串的部分匹配。
     此函式只讀取索引，不會在每次搜尋時重建索引。
@@ -1639,10 +1639,11 @@ def search_meetings(query: str, limit: int = 50, needs_review: bool = False) -> 
                        OR COALESCE(m.summary, '') LIKE ? ESCAPE '\\'
                        OR m.source_audio LIKE ? ESCAPE '\\'
                        OR m.output_path LIKE ? ESCAPE '\\'
+                       OR COALESCE(m.quality_report_json, '') LIKE ? ESCAPE '\\'
                        OR COALESCE(c.content, '') LIKE ? ESCAPE '\\'
                     ORDER BY m.created_at DESC
                     LIMIT ?""",
-                (pattern, pattern, pattern, pattern, pattern, query_limit),
+                (pattern, pattern, pattern, pattern, pattern, pattern, query_limit),
             ).fetchall()
             add_rows(rows)
         except sqlite3.OperationalError as exc:
@@ -1658,9 +1659,10 @@ def search_meetings(query: str, limit: int = 50, needs_review: bool = False) -> 
                       OR COALESCE(summary, '') LIKE ? ESCAPE '\\'
                       OR source_audio LIKE ? ESCAPE '\\'
                       OR output_path LIKE ? ESCAPE '\\'
+                      OR COALESCE(quality_report_json, '') LIKE ? ESCAPE '\\'
                    ORDER BY created_at DESC
                    LIMIT ?""",
-                (pattern, pattern, pattern, pattern, query_limit),
+                (pattern, pattern, pattern, pattern, pattern, query_limit),
             ).fetchall()
             add_rows(rows)
 
