@@ -1603,6 +1603,7 @@ def _detail_repetition_segment_matches(
 def _detail_repetition_location(
     timestamps: list[int],
     segments: Optional[list[dict]] = None,
+    segment_matches: Optional[list[dict]] = None,
 ) -> str:
     if not timestamps:
         return ""
@@ -1610,7 +1611,9 @@ def _detail_repetition_location(
     start_time = min(timestamps)
     end_time = max(timestamps)
     time_range = f"重複時間：{_detail_format_clock(start_time)}-{_detail_format_clock(end_time)}"
-    matches = _detail_repetition_segment_matches(timestamps, segments)
+    matches = segment_matches
+    if matches is None:
+        matches = _detail_repetition_segment_matches(timestamps, segments)
     if not matches:
         return time_range
 
@@ -1667,7 +1670,8 @@ def _detail_transcript_repeated_turn_diagnostic(
 
     if max_run > limit:
         preview = max_text[:24]
-        location = _detail_repetition_location(max_timestamps, segments)
+        segment_matches = _detail_repetition_segment_matches(max_timestamps, segments)
+        location = _detail_repetition_location(max_timestamps, segments, segment_matches)
         location_text = f"；{location}" if location else ""
         warning = (
             "逐字稿品質警示：疑似連續重複轉錄"
@@ -1681,9 +1685,10 @@ def _detail_transcript_repeated_turn_diagnostic(
         return {
             "warning": warning,
             "issue": issue,
+            "segment_matches": segment_matches,
             "segment_indices": [
                 match["index"]
-                for match in _detail_repetition_segment_matches(max_timestamps, segments)
+                for match in segment_matches
             ],
         }
     return None
@@ -1727,6 +1732,63 @@ def _add_detail_segment_issue(
         if issue not in issues:
             issues.append(issue)
         segment["issues"] = issues
+
+
+def _add_detail_review_segment_issue(
+    quality_report: dict,
+    segment_matches: list[dict],
+    issue: str,
+) -> None:
+    if not segment_matches or not issue:
+        return
+    review_segments = quality_report.setdefault("review_segments", [])
+    if not isinstance(review_segments, list):
+        review_segments = []
+        quality_report["review_segments"] = review_segments
+    review_segment_by_index: dict[int, dict] = {}
+    for review_segment in review_segments:
+        if not isinstance(review_segment, dict):
+            continue
+        try:
+            index = int(review_segment.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        if index >= 0:
+            review_segment_by_index[index] = review_segment
+
+    for match in segment_matches:
+        if not isinstance(match, dict):
+            continue
+        try:
+            index = int(match.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        if index < 0:
+            continue
+        review_segment = review_segment_by_index.get(index)
+        if review_segment is None:
+            review_segment = {
+                "index": index,
+                "label": review_segment_label(index),
+                "issues": [],
+            }
+            review_segments.append(review_segment)
+            review_segment_by_index[index] = review_segment
+        for key in ("start_seconds", "end_seconds"):
+            if key in review_segment:
+                continue
+            try:
+                review_segment[key] = int(match[key])
+            except (KeyError, TypeError, ValueError):
+                pass
+        issues = [
+            str(value).strip()
+            for value in review_segment.get("issues") or []
+            if str(value).strip()
+        ]
+        if issue not in issues:
+            issues.append(issue)
+        review_segment["issues"] = issues
 
 
 def _refresh_quality_report_review_segments(quality_report: dict) -> None:
@@ -1983,6 +2045,11 @@ async def get_meeting_detail(meeting_id: int):
             _add_detail_segment_issue(
                 quality_report,
                 repeated_turn_diagnostic.get("segment_indices") or [],
+                repeated_turn_diagnostic.get("issue") or "",
+            )
+            _add_detail_review_segment_issue(
+                quality_report,
+                repeated_turn_diagnostic.get("segment_matches") or [],
                 repeated_turn_diagnostic.get("issue") or "",
             )
         existing_warnings = [

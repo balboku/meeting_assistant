@@ -5151,7 +5151,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual([segment["index"] for segment in report["review_segments"]], [3])
         self.assertEqual(report["review_segments"][0]["start_seconds"], 1800)
         self.assertEqual(report["review_segments"][0]["end_seconds"], 2400)
-        self.assertTrue(any("品質警示提及此分段" in issue for issue in report["review_segments"][0]["issues"]))
+        self.assertTrue(any("疑似連續重複轉錄" in issue for issue in report["review_segments"][0]["issues"]))
+        self.assertFalse(any("品質警示提及此分段" in issue for issue in report["review_segments"][0]["issues"]))
 
     def test_meeting_detail_infers_review_segments_from_warning_text(self):
         import backend.main as main
