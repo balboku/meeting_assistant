@@ -4807,6 +4807,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("第 2 段｜10:00-20:00", warnings)
         self.assertIn("重複時間：10:00-10:03", warnings)
         self.assertNotIn("舊版未定位", warnings)
+        segment_issues = report["segments"][1]["issues"]
+        self.assertTrue(any("疑似連續重複轉錄" in issue for issue in segment_issues))
+        self.assertEqual(report["segments"][0]["issues"], [])
         self.assertEqual(report["label"], "舊紀錄，已重建分段")
 
     def test_meeting_detail_flags_unlinked_legacy_summary_in_quality_report(self):
@@ -5018,6 +5021,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality-warning", html)
         self.assertIn("quality-warning-actions", html)
         self.assertIn("quality-warning-jump", html)
+        self.assertIn("segment-issue", html)
+        self.assertIn("segment-status${issues.length ? ' has-issue' : ''}", html)
+        self.assertIn("(segment.issues || [])", html)
+        self.assertIn("const issueBadges = issues", html)
         self.assertIn("report.warnings", html)
         self.assertIn("function renderQualityActions", html)
         self.assertIn("function qualityWarningSegmentIndices", html)
@@ -5048,6 +5055,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('onkeydown="handleMeetingCardKeydown(event, ${r.id})"', html)
         self.assertIn(".card:focus-visible", html)
         self.assertIn(".segment-status.highlight", html)
+        self.assertIn(".segment-status.has-issue", html)
+        self.assertIn(".segment-issue", html)
         self.assertIn(".quality-warning-jump:hover", html)
         self.assertIn("${sourceMediaIcon(r)} ${escapeHtml(r.source_audio)}", html)
         self.assertIn('id="needs-review-filter"', html)

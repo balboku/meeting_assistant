@@ -557,6 +557,17 @@
       border-color: var(--yellow);
       box-shadow: 0 0 0 2px rgba(242, 213, 207, 0.18);
     }
+    .segment-status.has-issue { border-color: rgba(242, 213, 207, 0.65); }
+    .segment-issue {
+      color: var(--yellow);
+      background: rgba(242, 213, 207, 0.08);
+      border: 1px solid rgba(242, 213, 207, 0.3);
+      border-radius: 999px;
+      padding: 1px 7px;
+      max-width: min(100%, 360px);
+      overflow-wrap: break-word;
+      word-break: keep-all;
+    }
     .segment-status button {
       border: 0; background: transparent; color: var(--blue); cursor: pointer;
       padding: 2px 4px; font: inherit;
@@ -2782,8 +2793,15 @@ function renderQualityReport(meeting) {
       : segment.status === 'existing_record'
       ? '既有逐字稿'
       : '已轉錄';
-    return `<div class="segment-status">
+    const issues = (segment.issues || [])
+      .map(issue => String(issue || '').trim())
+      .filter(Boolean);
+    const issueBadges = issues
+      .map(issue => `<span class="segment-issue">${escapeHtml(issue)}</span>`)
+      .join('');
+    return `<div class="segment-status${issues.length ? ' has-issue' : ''}">
       <span>第 ${index + 1} 段 · ${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)} · ${escapeHtml(state)}</span>
+      ${issueBadges}
       <button id="rerun-segment-${index}" aria-describedby="detail-status" aria-busy="false" title="只重跑這一段" onclick="rerunMeeting(${meeting.id}, ${index})">↻ 重跑</button>
     </div>`;
   }).join('');

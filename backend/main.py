@@ -1551,6 +1551,41 @@ def _detail_format_clock(total_seconds: int) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
+def _detail_repetition_segment_matches(
+    timestamps: list[int],
+    segments: Optional[list[dict]] = None,
+) -> list[dict]:
+    if not timestamps or not segments:
+        return []
+
+    start_time = min(timestamps)
+    end_time = max(timestamps)
+    matched: list[dict] = []
+    seen_indices: set[int] = set()
+    for position, segment in enumerate(segments):
+        try:
+            index = int(segment.get("index", position))
+            start_seconds = int(segment.get("start_seconds", 0))
+            end_seconds = int(segment.get("end_seconds", start_seconds + 1))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if end_seconds <= start_seconds:
+            end_seconds = start_seconds + 1
+        overlaps = (
+            any(start_seconds <= timestamp < end_seconds for timestamp in timestamps)
+            or (start_seconds <= start_time < end_seconds)
+            or (start_seconds < end_time < end_seconds)
+        )
+        if overlaps and index not in seen_indices:
+            matched.append({
+                "index": index,
+                "start_seconds": start_seconds,
+                "end_seconds": end_seconds,
+            })
+            seen_indices.add(index)
+    return matched
+
+
 def _detail_repetition_location(
     timestamps: list[int],
     segments: Optional[list[dict]] = None,
@@ -1564,42 +1599,28 @@ def _detail_repetition_location(
     if not segments:
         return time_range
 
-    matched: list[str] = []
-    for segment in segments:
-        try:
-            index = int(segment.get("index", len(matched))) + 1
-            start_seconds = int(segment.get("start_seconds", 0))
-            end_seconds = int(segment.get("end_seconds", start_seconds + 1))
-        except (TypeError, ValueError, AttributeError):
-            continue
-        if end_seconds <= start_seconds:
-            end_seconds = start_seconds + 1
-        overlaps = (
-            any(start_seconds <= timestamp < end_seconds for timestamp in timestamps)
-            or (start_seconds <= start_time <= end_seconds)
-            or (start_seconds <= end_time <= end_seconds)
-        )
-        if overlaps:
-            matched.append(
-                f"第 {index} 段｜{_detail_format_clock(start_seconds)}-{_detail_format_clock(end_seconds)}"
-            )
-
-    if not matched:
+    matches = _detail_repetition_segment_matches(timestamps, segments)
+    if not matches:
         return time_range
 
-    if len(matched) > 3:
-        segment_text = "、".join(matched[:3]) + f" 等 {len(matched)} 段"
+    labels = [
+        f"第 {match['index'] + 1} 段｜"
+        f"{_detail_format_clock(match['start_seconds'])}-{_detail_format_clock(match['end_seconds'])}"
+        for match in matches
+    ]
+    if len(labels) > 3:
+        segment_text = "、".join(labels[:3]) + f" 等 {len(labels)} 段"
     else:
-        segment_text = "、".join(matched)
+        segment_text = "、".join(labels)
     return f"疑似分段：{segment_text}；{time_range}"
 
 
-def _detail_transcript_repeated_turn_warning(
+def _detail_transcript_repeated_turn_diagnostic(
     transcript: str,
     *,
     limit: int = 3,
     segments: Optional[list[dict]] = None,
-) -> Optional[str]:
+) -> Optional[dict]:
     pattern = re.compile(
         r"\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\d)\]\s*"
         r"(?:\*\*\[[^\]]+\]\*\*|\[[^\]]+\])?\s*[：:]?\s*(?P<text>.+)"
@@ -1637,12 +1658,64 @@ def _detail_transcript_repeated_turn_warning(
         preview = max_text[:24]
         location = _detail_repetition_location(max_timestamps, segments)
         location_text = f"；{location}" if location else ""
-        return (
+        warning = (
             "逐字稿品質警示：疑似連續重複轉錄"
             f"（同一句連續重複 {max_run} 次：{preview}{location_text}），"
             "建議重跑上述分段或複核相關內容。"
         )
+        issue = (
+            f"疑似連續重複轉錄：同一句連續重複 {max_run} 次"
+            f"（{_detail_format_clock(min(max_timestamps))}-{_detail_format_clock(max(max_timestamps))}）"
+        )
+        return {
+            "warning": warning,
+            "issue": issue,
+            "segment_indices": [
+                match["index"]
+                for match in _detail_repetition_segment_matches(max_timestamps, segments)
+            ],
+        }
     return None
+
+
+def _detail_transcript_repeated_turn_warning(
+    transcript: str,
+    *,
+    limit: int = 3,
+    segments: Optional[list[dict]] = None,
+) -> Optional[str]:
+    diagnostic = _detail_transcript_repeated_turn_diagnostic(
+        transcript,
+        limit=limit,
+        segments=segments,
+    )
+    return diagnostic["warning"] if diagnostic else None
+
+
+def _add_detail_segment_issue(
+    quality_report: dict,
+    segment_indices: list[int],
+    issue: str,
+) -> None:
+    if not segment_indices or not issue:
+        return
+    segments = quality_report.get("segments")
+    if not isinstance(segments, list):
+        return
+    affected = set(segment_indices)
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        try:
+            index = int(segment.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        if index not in affected:
+            continue
+        issues = [str(value) for value in segment.get("issues") or [] if str(value).strip()]
+        if issue not in issues:
+            issues.append(issue)
+        segment["issues"] = issues
 
 
 def _detail_section(text: str, heading_terms: tuple[str, ...], next_terms: tuple[str, ...]) -> str:
@@ -1773,12 +1846,21 @@ async def get_meeting_detail(meeting_id: int):
             f"逐字稿品質警示：{issue}"
             for issue in _full_transcript_quality_issues(transcript)
         ]
-        repeated_turn_warning = _detail_transcript_repeated_turn_warning(
+        repeated_turn_diagnostic = _detail_transcript_repeated_turn_diagnostic(
             transcript,
             segments=quality_report.get("segments") or _transcript_segment_metadata(transcript),
         )
+        repeated_turn_warning = (
+            repeated_turn_diagnostic["warning"]
+            if repeated_turn_diagnostic else None
+        )
         if repeated_turn_warning:
             transcript_warnings.append(repeated_turn_warning)
+            _add_detail_segment_issue(
+                quality_report,
+                repeated_turn_diagnostic.get("segment_indices") or [],
+                repeated_turn_diagnostic.get("issue") or "",
+            )
         existing_warnings = [
             warning
             for warning in list(quality_report.get("warnings") or [])
