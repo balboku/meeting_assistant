@@ -4929,6 +4929,58 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertTrue(any("疑似連續重複轉錄" in issue for issue in report["review_segments"][0]["issues"]))
         self.assertEqual(report["label"], "舊紀錄，已重建分段")
 
+    def test_meeting_detail_infers_review_segments_from_warning_text(self):
+        import backend.main as main
+
+        record = {
+            "id": 15,
+            "title": "已定位警示舊紀錄",
+            "date": "2026/07/08",
+            "source_audio": "warning-located.webm",
+            "output_path": "warning-located.md",
+            "summary": "摘要",
+            "job_id": None,
+            "quality_score": 88,
+            "quality_label": "需複核",
+            "created_at": "2026-07-08 10:00:00",
+            "quality_report": {
+                "warnings": [
+                    (
+                        "逐字稿品質警示：疑似連續重複轉錄"
+                        "（疑似分段：Segment #4｜30:00-40:00、第 2 段｜10:00-20:00；"
+                        "重複時間：10:00-10:03），建議重跑上述分段或複核相關內容。"
+                    )
+                ],
+                "segments": [
+                    {"index": 0, "start_seconds": 0, "end_seconds": 600, "issues": []},
+                    {"index": 1, "start_seconds": 600, "end_seconds": 1200, "issues": []},
+                    {"index": 2, "start_seconds": 1200, "end_seconds": 1800, "issues": []},
+                    {"index": 3, "start_seconds": 1800, "end_seconds": 2400, "issues": []},
+                ],
+            },
+            "full_content": (
+                "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+                "## 二、最終決議 (Final Decisions)\n決議\n"
+                "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n[00:00] **[發言者 A]**：第一段。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n[10:00] **[發言者 B]**：第二段。\n"
+                "### 【第 3 段｜20:00 – 30:00】\n[20:00] **[發言者 A]**：第三段。\n"
+                "### 【第 4 段｜30:00 – 40:00】\n[30:00] **[發言者 B]**：第四段。"
+            ),
+        }
+        with mock.patch.object(main, "get_meeting", return_value=record):
+            response = asgi_request(main.app, "GET", "/meetings/15")
+
+        self.assertEqual(response.status_code, 200)
+        report = response.json()["quality_report"]
+        self.assertEqual([segment["index"] for segment in report["review_segments"]], [1, 3])
+        self.assertEqual(report["review_segments"][0]["label"], "第 2 段")
+        self.assertEqual(report["review_segments"][0]["start_seconds"], 600)
+        self.assertEqual(report["review_segments"][1]["label"], "第 4 段")
+        self.assertEqual(report["review_segments"][1]["start_seconds"], 1800)
+        self.assertTrue(all("品質警示提及此分段" in segment["issues"] for segment in report["review_segments"]))
+
     def test_meeting_detail_flags_unlinked_legacy_summary_in_quality_report(self):
         import backend.main as main
 

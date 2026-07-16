@@ -26,7 +26,7 @@ import ipaddress
 from pathlib import Path
 from datetime import datetime
 from contextlib import asynccontextmanager
-from typing import Any, Optional
+from typing import Optional
 
 import aiofiles
 from dotenv import load_dotenv
@@ -1718,11 +1718,84 @@ def _add_detail_segment_issue(
         segment["issues"] = issues
 
 
+def _detail_review_segment_indices_from_text(text: str) -> list[int]:
+    indices: list[int] = []
+    matchers = (
+        re.compile(r"第\s*(\d+)\s*段"),
+        re.compile(r"\bSegment\s*#?\s*(\d+)\b", flags=re.IGNORECASE),
+    )
+    for matcher in matchers:
+        for match in matcher.finditer(str(text or "")):
+            try:
+                index = int(match.group(1)) - 1
+            except (TypeError, ValueError):
+                continue
+            if index >= 0 and index not in indices:
+                indices.append(index)
+    return indices
+
+
 def _refresh_quality_report_review_segments(quality_report: dict) -> None:
-    """Summarize issue-bearing segments so clients can show review targets directly."""
+    """Summarize review targets so clients can jump to affected transcript segments."""
     if not isinstance(quality_report, dict):
         return
-    review_segments: list[dict] = []
+    review_segments_by_index: dict[int, dict] = {}
+
+    def segment_metadata(index: int) -> dict:
+        for position, segment in enumerate(quality_report.get("segments") or []):
+            if not isinstance(segment, dict):
+                continue
+            try:
+                segment_index = int(segment.get("index", position))
+            except (TypeError, ValueError):
+                continue
+            if segment_index == index:
+                return segment
+        return {}
+
+    def add_review_segment(index: int, issues: list[str], source_segment: Optional[dict] = None) -> None:
+        if index < 0:
+            return
+        item = review_segments_by_index.setdefault(
+            index,
+            {
+                "index": index,
+                "label": f"第 {index + 1} 段",
+                "issues": [],
+            },
+        )
+        if isinstance(source_segment, dict):
+            label = str(source_segment.get("label") or "").strip()
+            if label:
+                item["label"] = label
+        clean_issues = [str(issue).strip() for issue in issues if str(issue).strip()]
+        if clean_issues:
+            item["issues"] = list(dict.fromkeys([*(item.get("issues") or []), *clean_issues]))
+        segment = source_segment if isinstance(source_segment, dict) else segment_metadata(index)
+        for key in ("start_seconds", "end_seconds"):
+            if key in item:
+                continue
+            try:
+                item[key] = int(segment[key])
+            except (KeyError, TypeError, ValueError):
+                pass
+        status = str(segment.get("status") or "").strip() if isinstance(segment, dict) else ""
+        if status and not item.get("status"):
+            item["status"] = status
+
+    for review_segment in quality_report.get("review_segments") or []:
+        if not isinstance(review_segment, dict):
+            continue
+        try:
+            index = int(review_segment.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        add_review_segment(
+            index,
+            [str(issue) for issue in review_segment.get("issues") or []],
+            review_segment,
+        )
+
     for position, segment in enumerate(quality_report.get("segments") or []):
         if not isinstance(segment, dict):
             continue
@@ -1736,22 +1809,24 @@ def _refresh_quality_report_review_segments(quality_report: dict) -> None:
         try:
             index = int(segment.get("index", position))
         except (TypeError, ValueError):
-            index = position
-        item: dict[str, Any] = {
-            "index": index,
-            "label": f"第 {index + 1} 段",
-            "issues": list(dict.fromkeys(issues)),
-        }
-        for key in ("start_seconds", "end_seconds"):
-            try:
-                item[key] = int(segment[key])
-            except (KeyError, TypeError, ValueError):
-                pass
-        status = str(segment.get("status") or "").strip()
-        if status:
-            item["status"] = status
-        review_segments.append(item)
-    quality_report["review_segments"] = review_segments
+            continue
+        add_review_segment(index, issues, segment)
+
+    warnings = quality_report.get("warnings") or []
+    if isinstance(warnings, str):
+        warnings = [warnings]
+    for warning in warnings:
+        for index in _detail_review_segment_indices_from_text(str(warning)):
+            existing = review_segments_by_index.get(index)
+            if existing and existing.get("issues"):
+                add_review_segment(index, [])
+            else:
+                add_review_segment(index, ["品質警示提及此分段"])
+
+    quality_report["review_segments"] = [
+        review_segments_by_index[index]
+        for index in sorted(review_segments_by_index)
+    ]
 
 
 def _detail_section(text: str, heading_terms: tuple[str, ...], next_terms: tuple[str, ...]) -> str:
