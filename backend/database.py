@@ -88,11 +88,19 @@ def _repeated_transcript_turn_review_segments(
         r"\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\d)\]\s*"
         r"(?:\*\*\[[^\]]+\]\*\*|\[[^\]]+\])?\s*[：:]?\s*(?P<text>.+)"
     )
-    max_run = 0
-    max_timestamps: list[int] = []
+    runs: list[dict[str, Any]] = []
     current_text = ""
     current_run = 0
     current_timestamps: list[int] = []
+
+    def flush_current() -> None:
+        if current_run <= limit or not current_timestamps:
+            return
+        runs.append({
+            "run": current_run,
+            "timestamps": list(current_timestamps),
+        })
+
     for line in (transcript or "").splitlines():
         match = pattern.search(line)
         if not match:
@@ -100,6 +108,7 @@ def _repeated_transcript_turn_review_segments(
         normalized = _normalize_turn_text(match.group("text"))
         timestamp = int(match.group("minutes")) * 60 + int(match.group("seconds"))
         if len(normalized) < 8:
+            flush_current()
             current_text = ""
             current_run = 0
             current_timestamps = []
@@ -108,33 +117,45 @@ def _repeated_transcript_turn_review_segments(
             current_run += 1
             current_timestamps.append(timestamp)
         else:
+            flush_current()
             current_text = normalized
             current_run = 1
             current_timestamps = [timestamp]
-        if current_run > max_run:
-            max_run = current_run
-            max_timestamps = list(current_timestamps)
+    flush_current()
 
-    if max_run <= limit or not max_timestamps:
+    if not runs:
         return []
 
-    start_time = min(max_timestamps)
-    end_time = max(max_timestamps)
-    issue = (
-        f"疑似連續重複轉錄：同一句連續重複 {max_run} 次"
-        f"（{_format_clock(start_time)}-{_format_clock(end_time)}）"
-    )
-    first_index = max(0, start_time // segment_seconds)
-    last_index = max(first_index, end_time // segment_seconds)
+    details_by_index: dict[int, dict[str, Any]] = {}
+    for run in runs:
+        timestamps = run.get("timestamps") or []
+        if not timestamps:
+            continue
+        start_time = min(timestamps)
+        end_time = max(timestamps)
+        run_length = int(run.get("run") or 0)
+        issue = (
+            f"疑似連續重複轉錄：同一句連續重複 {run_length} 次"
+            f"（{_format_clock(start_time)}-{_format_clock(end_time)}）"
+        )
+        first_index = max(0, start_time // segment_seconds)
+        last_index = max(first_index, end_time // segment_seconds)
+        for index in range(first_index, last_index + 1):
+            detail = details_by_index.setdefault(
+                index,
+                {
+                    "index": index,
+                    "label": review_segment_label(index),
+                    "start_seconds": index * segment_seconds,
+                    "end_seconds": (index + 1) * segment_seconds,
+                    "issues": [],
+                },
+            )
+            if issue not in detail["issues"]:
+                detail["issues"].append(issue)
     return [
-        {
-            "index": index,
-            "label": review_segment_label(index),
-            "start_seconds": index * segment_seconds,
-            "end_seconds": (index + 1) * segment_seconds,
-            "issues": [issue],
-        }
-        for index in range(first_index, last_index + 1)
+        details_by_index[index]
+        for index in sorted(details_by_index)
     ]
 
 

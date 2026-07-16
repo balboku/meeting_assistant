@@ -1629,22 +1629,25 @@ def _detail_repetition_location(
     return f"疑似分段：{segment_text}；{time_range}"
 
 
-def _detail_transcript_repeated_turn_diagnostic(
-    transcript: str,
-    *,
-    limit: int = 3,
-    segments: Optional[list[dict]] = None,
-) -> Optional[dict]:
+def _detail_repeated_turn_runs(transcript: str, *, limit: int = 3) -> list[dict]:
     pattern = re.compile(
         r"\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\d)\]\s*"
         r"(?:\*\*\[[^\]]+\]\*\*|\[[^\]]+\])?\s*[：:]?\s*(?P<text>.+)"
     )
-    max_run = 0
-    max_text = ""
-    max_timestamps: list[int] = []
+    runs: list[dict] = []
     current_text = ""
     current_run = 0
     current_timestamps: list[int] = []
+
+    def flush_current() -> None:
+        if current_run <= limit or not current_timestamps:
+            return
+        runs.append({
+            "text": current_text,
+            "run": current_run,
+            "timestamps": list(current_timestamps),
+        })
+
     for line in (transcript or "").splitlines():
         match = pattern.search(line)
         if not match:
@@ -1652,6 +1655,7 @@ def _detail_transcript_repeated_turn_diagnostic(
         normalized = _normalize_detail_turn_text(match.group("text"))
         timestamp = int(match.group("minutes")) * 60 + int(match.group("seconds"))
         if len(normalized) < 8:
+            flush_current()
             current_text = ""
             current_run = 0
             current_timestamps = []
@@ -1660,38 +1664,72 @@ def _detail_transcript_repeated_turn_diagnostic(
             current_run += 1
             current_timestamps.append(timestamp)
         else:
+            flush_current()
             current_text = normalized
             current_run = 1
             current_timestamps = [timestamp]
-        if current_run > max_run:
-            max_run = current_run
-            max_text = normalized
-            max_timestamps = list(current_timestamps)
+    flush_current()
+    return runs
 
-    if max_run > limit:
-        preview = max_text[:24]
-        segment_matches = _detail_repetition_segment_matches(max_timestamps, segments)
-        location = _detail_repetition_location(max_timestamps, segments, segment_matches)
+
+def _detail_transcript_repeated_turn_diagnostic(
+    transcript: str,
+    *,
+    limit: int = 3,
+    segments: Optional[list[dict]] = None,
+) -> Optional[dict]:
+    runs = _detail_repeated_turn_runs(transcript, limit=limit)
+    if not runs:
+        return None
+
+    descriptions: list[str] = []
+    all_segment_matches: list[dict] = []
+    seen_match_keys: set[tuple[int, str]] = set()
+    for run in runs:
+        timestamps = run.get("timestamps") or []
+        if not timestamps:
+            continue
+        run_length = int(run.get("run") or 0)
+        preview = str(run.get("text") or "")[:24]
+        segment_matches = _detail_repetition_segment_matches(timestamps, segments)
+        location = _detail_repetition_location(timestamps, segments, segment_matches)
         location_text = f"；{location}" if location else ""
-        warning = (
-            "逐字稿品質警示：疑似連續重複轉錄"
-            f"（同一句連續重複 {max_run} 次：{preview}{location_text}），"
-            "建議重跑上述分段或複核相關內容。"
-        )
+        descriptions.append(f"同一句連續重複 {run_length} 次：{preview}{location_text}")
         issue = (
-            f"疑似連續重複轉錄：同一句連續重複 {max_run} 次"
-            f"（{_detail_format_clock(min(max_timestamps))}-{_detail_format_clock(max(max_timestamps))}）"
+            f"疑似連續重複轉錄：同一句連續重複 {run_length} 次"
+            f"（{_detail_format_clock(min(timestamps))}-{_detail_format_clock(max(timestamps))}）"
         )
-        return {
-            "warning": warning,
-            "issue": issue,
-            "segment_matches": segment_matches,
-            "segment_indices": [
-                match["index"]
-                for match in segment_matches
-            ],
-        }
-    return None
+        for match in segment_matches:
+            key = (int(match["index"]), issue)
+            if key in seen_match_keys:
+                continue
+            seen_match_keys.add(key)
+            all_segment_matches.append({**match, "issue": issue})
+
+    if not descriptions:
+        return None
+    warning_descriptions = descriptions[:5]
+    if len(descriptions) > 5:
+        warning_descriptions.append(f"另有 {len(descriptions) - 5} 處")
+    warning = (
+        "逐字稿品質警示：疑似連續重複轉錄"
+        f"（{'；'.join(warning_descriptions)}），"
+        "建議重跑上述分段或複核相關內容。"
+    )
+    issue = (
+        str(all_segment_matches[0].get("issue"))
+        if all_segment_matches
+        else "疑似連續重複轉錄"
+    )
+    return {
+        "warning": warning,
+        "issue": issue,
+        "segment_matches": all_segment_matches,
+        "segment_indices": [
+            int(match["index"])
+            for match in all_segment_matches
+        ],
+    }
 
 
 def _detail_transcript_repeated_turn_warning(
@@ -1731,6 +1769,49 @@ def _add_detail_segment_issue(
         issues = [str(value) for value in segment.get("issues") or [] if str(value).strip()]
         if issue not in issues:
             issues.append(issue)
+        segment["issues"] = issues
+
+
+def _add_detail_segment_issues_from_matches(
+    quality_report: dict,
+    segment_matches: list[dict],
+    fallback_issue: str,
+) -> None:
+    if not segment_matches:
+        return
+    segments = quality_report.get("segments")
+    if not isinstance(segments, list):
+        return
+    issues_by_index: dict[int, list[str]] = {}
+    for match in segment_matches:
+        if not isinstance(match, dict):
+            continue
+        try:
+            index = int(match.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        issue = str(match.get("issue") or fallback_issue or "").strip()
+        if index < 0 or not issue:
+            continue
+        issues_by_index.setdefault(index, [])
+        if issue not in issues_by_index[index]:
+            issues_by_index[index].append(issue)
+    if not issues_by_index:
+        return
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        try:
+            index = int(segment.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        new_issues = issues_by_index.get(index)
+        if not new_issues:
+            continue
+        issues = [str(value) for value in segment.get("issues") or [] if str(value).strip()]
+        for issue in new_issues:
+            if issue not in issues:
+                issues.append(issue)
         segment["issues"] = issues
 
 
@@ -1786,8 +1867,9 @@ def _add_detail_review_segment_issue(
             for value in review_segment.get("issues") or []
             if str(value).strip()
         ]
-        if issue not in issues:
-            issues.append(issue)
+        match_issue = str(match.get("issue") or issue or "").strip()
+        if match_issue and match_issue not in issues:
+            issues.append(match_issue)
         review_segment["issues"] = issues
 
 
@@ -2042,9 +2124,9 @@ async def get_meeting_detail(meeting_id: int):
         )
         if repeated_turn_warning:
             transcript_warnings.append(repeated_turn_warning)
-            _add_detail_segment_issue(
+            _add_detail_segment_issues_from_matches(
                 quality_report,
-                repeated_turn_diagnostic.get("segment_indices") or [],
+                repeated_turn_diagnostic.get("segment_matches") or [],
                 repeated_turn_diagnostic.get("issue") or "",
             )
             _add_detail_review_segment_issue(
