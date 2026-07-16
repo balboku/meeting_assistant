@@ -1236,7 +1236,7 @@ class TaskRegressionTests(unittest.TestCase):
                  ) as transcribe_mock, \
                  mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
                  mock.patch.object(tasks, "update_job_status"), \
-                 mock.patch.object(tasks, "save_meeting"):
+                 mock.patch.object(tasks, "save_meeting") as save_meeting_mock:
                 output_path = tasks.process_audio_task(
                     job_id="recover-job",
                     audio_path=audio_path,
@@ -1258,6 +1258,15 @@ class TaskRegressionTests(unittest.TestCase):
             self.assertIn("[05:00] **[發言者 B]**：補救後半段。", cached)
             self.assertFalse(sub1.exists())
             self.assertFalse(sub2.exists())
+            quality_report = save_meeting_mock.call_args.kwargs["quality_report"]
+            self.assertEqual(quality_report["segments"][0]["status"], "recovered")
+            self.assertTrue(any("曾觸發轉錄補救" in issue for issue in quality_report["segments"][0]["issues"]))
+            self.assertEqual(quality_report["review_segments"][0]["index"], 0)
+            self.assertEqual(quality_report["review_segments"][0]["start_seconds"], 0)
+            self.assertEqual(quality_report["review_segments"][0]["end_seconds"], 600)
+            warnings = "\n".join(quality_report["warnings"])
+            self.assertIn("逐字稿品質警示", warnings)
+            self.assertIn("第 1 段｜00:00-10:00", warnings)
 
     def test_single_segment_audio_task_uses_dual_model_pipeline(self):
         import backend.tasks as tasks
@@ -5276,6 +5285,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("segment-status${issues.length ? ' has-issue' : ''}", html)
         self.assertIn("(segment.issues || [])", html)
         self.assertIn("const issueBadges = issues", html)
+        self.assertIn("segment.status === 'recovered'", html)
+        self.assertIn("已補救轉錄", html)
         self.assertIn("report.warnings", html)
         self.assertIn("function renderQualityActions", html)
         self.assertIn("function normalizeSegmentIndices", html)

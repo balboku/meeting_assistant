@@ -3067,6 +3067,8 @@ function renderQualityReport(meeting) {
       ? '沿用快取'
       : segment.status === 'rerun'
       ? '已重跑'
+      : segment.status === 'recovered'
+      ? '已補救轉錄'
       : segment.status === 'existing_record'
       ? '既有逐字稿'
       : '已轉錄';

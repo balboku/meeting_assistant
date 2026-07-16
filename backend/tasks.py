@@ -440,6 +440,90 @@ def _format_mmss(total_seconds: int) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
+def _segment_time_range_text(segment: dict[str, Any]) -> str:
+    try:
+        start_seconds = int(segment.get("start_seconds", 0))
+    except (TypeError, ValueError):
+        start_seconds = 0
+    try:
+        end_seconds = int(segment.get("end_seconds", start_seconds))
+    except (TypeError, ValueError):
+        end_seconds = start_seconds
+    return f"{_format_mmss(start_seconds)}-{_format_mmss(end_seconds)}"
+
+
+def _quality_report_review_segments(segment_report: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    review_segments: list[dict[str, Any]] = []
+    for position, segment in enumerate(segment_report or []):
+        if not isinstance(segment, dict):
+            continue
+        issues = [
+            str(issue).strip()
+            for issue in segment.get("issues") or []
+            if str(issue).strip()
+        ]
+        if not issues:
+            continue
+        try:
+            index = int(segment.get("index", position))
+        except (TypeError, ValueError):
+            index = position
+        item: dict[str, Any] = {
+            "index": index,
+            "label": f"第 {index + 1} 段",
+            "issues": list(dict.fromkeys(issues)),
+        }
+        for key in ("start_seconds", "end_seconds", "status"):
+            if key in segment:
+                item[key] = segment[key]
+        review_segments.append(item)
+    return review_segments
+
+
+def _quality_report_segment_warnings(review_segments: list[dict[str, Any]]) -> list[str]:
+    if not review_segments:
+        return []
+    descriptions: list[str] = []
+    for segment in review_segments[:5]:
+        try:
+            index = int(segment.get("index", 0))
+        except (TypeError, ValueError):
+            index = 0
+        issue = str((segment.get("issues") or ["需複核"])[0]).strip() or "需複核"
+        descriptions.append(
+            f"第 {index + 1} 段｜{_segment_time_range_text(segment)}（{issue}）"
+        )
+    if len(review_segments) > 5:
+        descriptions.append(f"另有 {len(review_segments) - 5} 段")
+    return [
+        "逐字稿品質警示：以下分段曾觸發轉錄品質補救或需複核："
+        + "、".join(descriptions)
+        + "。建議點選需複核分段定位原始錄音/錄影後抽查，必要時只重跑指定分段。"
+    ]
+
+
+def _quality_event_issues_for_segment(
+    quality_events: list[dict[str, Any]],
+    segment_index: int,
+) -> list[str]:
+    issues: list[str] = []
+    for event in quality_events:
+        if not isinstance(event, dict):
+            continue
+        try:
+            event_index = int(event.get("segment_index", -1))
+        except (TypeError, ValueError):
+            continue
+        if event_index != segment_index:
+            continue
+        issue = str(event.get("issue") or "").strip()
+        if "：" in issue:
+            issue = issue.split("：", 1)[1].strip()
+        if issue:
+            issues.append(f"曾觸發轉錄補救：{issue}")
+    return list(dict.fromkeys(issues))
+
+
 def _offset_transcript_timestamps(transcript: str, offset_seconds: int) -> str:
     """Convert segment-relative [mm:ss] markers to full-meeting timestamps."""
     if offset_seconds <= 0:
@@ -1558,6 +1642,7 @@ def _transcribe_segment_with_recovery(
     is_last_segment: bool,
     speaker_context: str = "",
     temp_segment_paths: Optional[list[Path]] = None,
+    quality_events: Optional[list[dict[str, Any]]] = None,
 ) -> str:
     transcript = _transcribe_segment(
         client,
@@ -1581,6 +1666,13 @@ def _transcribe_segment_with_recovery(
         )
         return transcript
     except RuntimeError as quality_error:
+        if quality_events is not None:
+            quality_events.append({
+                "segment_index": seg_index,
+                "start_seconds": offset_seconds,
+                "end_seconds": offset_seconds + duration_seconds,
+                "issue": str(quality_error),
+            })
         chunk_seconds = _next_recovery_chunk_seconds(duration_seconds)
         if chunk_seconds is None:
             raise
@@ -1646,6 +1738,7 @@ def _transcribe_segment_with_recovery(
                 is_last_segment=is_last_segment and sub_index == len(subsegments) - 1,
                 speaker_context=child_context,
                 temp_segment_paths=temp_segment_paths,
+                quality_events=quality_events,
             )
             recovered.append(child_transcript)
 
@@ -2427,6 +2520,10 @@ def _build_quality_report(
     if silence_ratio >= 0.8:
         warnings.append("錄音中靜音比例偏高，建議抽查聲音較小的時段。")
 
+    review_segments = _quality_report_review_segments(segment_report)
+    segment_warnings = _quality_report_segment_warnings(review_segments)
+    warnings.extend(segment_warnings)
+
     score = 100
     score -= min(20, len(warnings) * 5)
     if silence_ratio >= 0.9:
@@ -2440,6 +2537,7 @@ def _build_quality_report(
         "warnings": list(dict.fromkeys(warnings)),
         "audio": audio_report,
         "segments": segment_report,
+        "review_segments": review_segments,
         "timestamp_count": _timestamp_count(full_transcript),
         "speaker_labels": speakers,
     }
@@ -2548,6 +2646,7 @@ def process_audio_task(
         # ------------------------------------------------------------------
         all_transcripts: list[str] = []
         existing_segment_transcripts: dict[int, str] = {}
+        segment_quality_events: list[dict[str, Any]] = []
         if transcript_reuse_source_path is not None:
             try:
                 reuse_content = transcript_reuse_source_path.read_text(encoding="utf-8")
@@ -2654,6 +2753,7 @@ def process_audio_task(
                     is_last_segment=i >= total_segs - 1,
                     speaker_context=speaker_context,
                     temp_segment_paths=temporary_segment_paths,
+                    quality_events=segment_quality_events,
                 )
                 _save_segment_transcript_cache(
                     output_dir=output_dir,
@@ -2663,12 +2763,13 @@ def process_audio_task(
                     transcript=transcript,
                 )
                 all_transcripts.append(f"\n\n### 【第 {i + 1} 段｜{segment_start} – {segment_end}】\n\n{transcript}")
+                segment_issues = _quality_event_issues_for_segment(segment_quality_events, i)
                 segment_report.append({
                     "index": i,
                     "start_seconds": audio_slice.start_seconds,
                     "end_seconds": audio_slice.end_seconds,
-                    "status": "rerun" if i in forced_segments else "transcribed",
-                    "issues": [],
+                    "status": "recovered" if segment_issues else ("rerun" if i in forced_segments else "transcribed"),
+                    "issues": segment_issues,
                 })
                 update_job_status(
                     job_id, "processing",
