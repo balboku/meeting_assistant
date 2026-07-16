@@ -389,10 +389,29 @@
     }
     .card-meta span {
       min-width: 0;
-      overflow-wrap: break-word;
-      word-break: keep-all;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      word-break: normal;
     }
     .card-meta .dot { width: 4px; height: 4px; border-radius: 50%; background: var(--text-dim); }
+    .card-source-media {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .card-source-media-kind {
+      flex: 0 0 auto;
+      color: var(--blue);
+      white-space: nowrap;
+    }
+    .card-source-media-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .card-preview {
       margin-top: 10px; font-size: 13px; color: var(--text-mid);
       line-height: 1.6; display: -webkit-box;
@@ -468,9 +487,9 @@
       min-width: 0;
       font-size: clamp(20px, 2vw, 26px); font-weight: 700; color: var(--text);
       line-height: 1.3; margin-bottom: 0;
-      overflow-wrap: break-word;
+      overflow-wrap: anywhere;
       text-wrap: balance;
-      word-break: keep-all;
+      word-break: normal;
     }
     .detail-topline {
       display: grid;
@@ -486,8 +505,8 @@
       background: var(--bg-card2); padding: 6px 14px; border-radius: 8px;
       font-size: 13px; color: var(--text-mid);
       line-height: 1.35;
-      overflow-wrap: break-word;
-      word-break: keep-all;
+      overflow-wrap: anywhere;
+      word-break: normal;
     }
     .meta-chip .icon { font-size: 14px; flex: 0 0 auto; }
     .detail-actions {
@@ -497,8 +516,12 @@
     }
     .detail-actions .btn-primary,
     .detail-actions .btn-secondary {
+      flex: 0 1 auto;
       min-width: 0;
-      white-space: nowrap;
+      max-width: 100%;
+      white-space: normal;
+      line-height: 1.25;
+      text-align: center;
     }
     .evidence-upload-status {
       flex: 1 1 220px;
@@ -1742,6 +1765,9 @@ const DEFAULT_RECORDING_PROFILE_LABELS = {
 };
 const FALLBACK_UPLOAD_EXTENSIONS = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.webm', '.mp4', '.mov', '.avi', '.mkv', '.mpeg', '.mpg', '.wmv'];
 const FALLBACK_UPLOAD_ACCEPT = FALLBACK_UPLOAD_EXTENSIONS.join(',');
+const VIDEO_FILE_EXTENSIONS = new Set(['.webm', '.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);
+const BROWSER_VIDEO_PREVIEW_EXTENSIONS = new Set(['.webm', '.mp4']);
+const AUDIO_FILE_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.flac', '.wma']);
 const MODAL_FOCUS_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 let modalReturnFocusTarget = null;
 let sourceStorageInventoryState = {
@@ -1917,14 +1943,19 @@ function sourceStorageExtension(file = {}) {
   return dotIndex >= 0 ? source.slice(dotIndex) : '';
 }
 
+function normalizeMediaKind(value = '') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'video' || normalized.startsWith('video/')) return 'video';
+  if (normalized === 'audio' || normalized.startsWith('audio/')) return 'audio';
+  return '';
+}
+
 function sourceStorageMediaType(file = {}) {
-  const sourceType = String(file.source_media_type || '').toLowerCase();
-  if (sourceType === 'video' || sourceType === 'audio') return sourceType;
+  const sourceType = normalizeMediaKind(file.source_media_type || file.media_type || file.content_type);
+  if (sourceType) return sourceType;
   const extension = sourceStorageExtension(file);
-  const videoExtensions = new Set(['.webm', '.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);
-  const audioExtensions = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.flac', '.wma']);
-  if (videoExtensions.has(extension)) return 'video';
-  if (audioExtensions.has(extension)) return 'audio';
+  if (VIDEO_FILE_EXTENSIONS.has(extension)) return 'video';
+  if (AUDIO_FILE_EXTENSIONS.has(extension)) return 'audio';
   return '';
 }
 
@@ -2587,6 +2618,10 @@ function sourceMediaIcon(record) {
   return isVideoSource(record) ? '🎥' : '🔊';
 }
 
+function sourceMediaShortLabel(record) {
+  return isVideoSource(record) ? '錄影' : '音訊';
+}
+
 function handleMeetingCardKeydown(event, id) {
   if (event.target !== event.currentTarget) return;
   if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -2668,7 +2703,10 @@ async function loadMeetings(query = '') {
         <div class="card-meta">
           <span>📅 ${r.date}</span>
           <span class="dot"></span>
-          <span>${sourceMediaIcon(r)} ${escapeHtml(r.source_audio)}</span>
+          <span class="card-source-media" title="${sourceMediaKindLabel(r)}：${escapeHtml(r.source_audio)}">
+            <span class="card-source-media-kind">${sourceMediaIcon(r)} ${sourceMediaShortLabel(r)}</span>
+            <span class="card-source-media-name">${escapeHtml(r.source_audio)}</span>
+          </span>
         </div>
         ${renderCardQuality(r)}
         <div class="card-preview">${escapeHtml(r.summary_preview || '（無摘要）')}</div>
@@ -3047,24 +3085,40 @@ function sourceMediaExtension(meeting) {
   return dotIndex >= 0 ? source.slice(dotIndex) : '';
 }
 
+function sourceMediaExplicitKind(meeting) {
+  const recording = meeting?.quality_report?.recording || {};
+  const candidates = [
+    meeting?.source_media_type,
+    recording.source_media_type,
+    recording.source_media_kind,
+    recording.media_type,
+    recording.mime_type,
+    recording.content_type
+  ];
+  for (const value of candidates) {
+    const kind = normalizeMediaKind(value);
+    if (kind) return kind;
+  }
+  if (recording.has_video === true || Number(recording.video_bps || 0) > 0) return 'video';
+  return '';
+}
+
 function isVideoSource(meeting) {
-  const sourceType = String(meeting?.source_media_type || '').toLowerCase();
+  const sourceType = sourceMediaExplicitKind(meeting);
   if (sourceType === 'video') return true;
   if (sourceType === 'audio') return false;
-  const videoExtensions = new Set(['.webm', '.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);
   const profile = meeting?.recording_profile || meeting?.quality_report?.recording?.profile || '';
   const extension = sourceMediaExtension(meeting);
   if (profile === 'video_balanced') return true;
   if (['audio_standard', 'audio_compact'].includes(profile)) return false;
-  return videoExtensions.has(extension);
+  return VIDEO_FILE_EXTENSIONS.has(extension);
 }
 
 function sourceMediaVideoPreviewCapable(meeting) {
-  const sourceType = String(meeting?.source_media_type || '').toLowerCase();
+  const sourceType = sourceMediaExplicitKind(meeting);
   if (sourceType === 'video') return true;
   if (sourceType === 'audio') return false;
-  const browserPreviewExtensions = new Set(['.webm', '.mp4']);
-  return browserPreviewExtensions.has(sourceMediaExtension(meeting));
+  return BROWSER_VIDEO_PREVIEW_EXTENSIONS.has(sourceMediaExtension(meeting));
 }
 
 function sourceMediaPlayerMode(meeting, requestedMode = null) {
