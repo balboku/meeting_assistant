@@ -2678,6 +2678,41 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(searched["quality_warning_count"], 2)
         self.assertEqual(searched["quality_warning_preview"], "錄音音量偏低")
 
+    def test_list_and_search_include_segment_quality_issues(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "segment-issue.md"
+        output_path.write_text("segment-issue-content", encoding="utf-8")
+        quality_report = {
+            "score": 96,
+            "label": "ok",
+            "warnings": [],
+            "segments": [
+                {"index": 0, "issues": []},
+                {"index": 1, "issues": ["疑似連續重複轉錄：同一句連續重複 31 次"]},
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Segment Issue Badge",
+            date="2026/07/12",
+            source_audio="segment-issue.webm",
+            output_path=str(output_path),
+            summary="segment-issue-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Segment Issue Badge")[0]
+        needs_review = database.list_meetings(needs_review=True)
+
+        self.assertEqual(listed["quality_warning_count"], 1)
+        self.assertEqual(
+            listed["quality_warning_preview"],
+            "第 2 段：疑似連續重複轉錄：同一句連續重複 31 次",
+        )
+        self.assertEqual(searched["quality_warning_count"], listed["quality_warning_count"])
+        self.assertEqual(searched["quality_warning_preview"], listed["quality_warning_preview"])
+        self.assertIn(meeting_id, [row["id"] for row in needs_review])
+
     def test_list_and_search_include_source_media_type(self):
         database, tmp_path = self._isolated_database()
         video_output = tmp_path / "video.md"

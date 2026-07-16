@@ -1231,6 +1231,22 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             warning_count = len(warnings)
             if warnings:
                 warning_preview = str(warnings[0]).strip() or None
+        segment_issue_previews: list[str] = []
+        for segment in quality_report.get("segments") or []:
+            if not isinstance(segment, dict):
+                continue
+            try:
+                segment_label = f"第 {int(segment.get('index', 0)) + 1} 段"
+            except (TypeError, ValueError):
+                segment_label = "分段"
+            for issue in segment.get("issues") or []:
+                issue_text = str(issue).strip()
+                if issue_text:
+                    segment_issue_previews.append(f"{segment_label}：{issue_text}")
+        if segment_issue_previews:
+            warning_count += len(segment_issue_previews)
+            if not warning_preview:
+                warning_preview = segment_issue_previews[0]
     if not warning_count and record.get("quality_score") is None and not record.get("quality_label"):
         warning_count = _legacy_markdown_quality_warning_count(str(record.get("output_path") or ""))
         if warning_count:
