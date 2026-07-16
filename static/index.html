@@ -1994,9 +1994,36 @@ function sourceMediaModeFacts(mode = '') {
   return pill ? `<div class="source-media-facts">${pill}</div>` : '';
 }
 
+function mediaPlayerCurrentSeconds(player) {
+  const seconds = Number(player?.currentTime || 0);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+}
+
+function restoreMediaPlayerSeconds(player, seconds = 0) {
+  const target = Math.max(0, Number(seconds) || 0);
+  if (!player || target <= 0) return;
+  const applySeek = () => {
+    try {
+      const duration = Number(player.duration || 0);
+      player.currentTime = Number.isFinite(duration) && duration > 0
+        ? Math.min(target, Math.max(0, duration - 0.05))
+        : target;
+    } catch (err) {
+      console.warn('Unable to restore source media playback position.', err);
+    }
+  };
+  if (Number(player.readyState || 0) >= 1) {
+    applySeek();
+  } else {
+    player.addEventListener('loadedmetadata', applySeek, { once: true });
+  }
+}
+
 function previewSourceMedia(url = '', mediaType = '', name = '', requestedMode = '') {
   const preview = document.getElementById('source-storage-preview');
   if (!preview || !url) return;
+  const previousPlayer = preview.querySelector('video.source-storage-media-player, audio');
+  const previousSeconds = mediaPlayerCurrentSeconds(previousPlayer);
   const activeElement = document.activeElement;
   if (activeElement instanceof HTMLElement && !preview.contains(activeElement)) {
     sourceMediaPreviewReturnFocus = activeElement;
@@ -2035,6 +2062,7 @@ function previewSourceMedia(url = '', mediaType = '', name = '', requestedMode =
     <div class="source-media-player-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></div>`;
   preview.classList.add('show');
   enhanceSourceStoragePreviewPlayer(preview);
+  restoreMediaPlayerSeconds(preview.querySelector('video.source-storage-media-player, audio'), previousSeconds);
   preview.focus({ preventScroll: true });
   preview.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
@@ -3163,8 +3191,10 @@ function switchSourceMediaPlayer(mode) {
   if (!currentMeetingData) return;
   const evidence = document.getElementById('source-media-evidence');
   if (!evidence) return;
+  const previousSeconds = mediaPlayerCurrentSeconds(document.getElementById('source-media-player'));
   evidence.outerHTML = renderAudioEvidence(currentMeetingData, mode);
   enhanceSourceMediaPlayer();
+  restoreMediaPlayerSeconds(document.getElementById('source-media-player'), previousSeconds);
 }
 
 function sourceMediaKindLabel(meeting) {
