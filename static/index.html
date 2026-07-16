@@ -316,6 +316,17 @@
       min-height: 0;
       overflow: hidden;
     }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
 
     /* ── List Panel ── */
     .list-panel {
@@ -425,6 +436,12 @@
       overflow-y: auto;
       padding: clamp(18px, 3vw, 32px);
       display: flex; flex-direction: column; gap: 0;
+    }
+    .detail-content {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
     }
     .detail-placeholder {
       display: flex; flex-direction: column; align-items: center;
@@ -1397,10 +1414,13 @@
     </div>
 
     <!-- Detail -->
-    <div class="detail-panel" id="detail-panel">
-      <div class="detail-placeholder">
-        <div class="icon">📋</div>
-        <p>從左側選擇一筆會議記錄以查看詳情</p>
+    <div class="detail-panel" id="detail-panel" aria-label="會議詳情" aria-busy="false">
+      <div id="detail-status" class="detail-status sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+      <div class="detail-content" id="detail-content">
+        <div class="detail-placeholder">
+          <div class="icon">📋</div>
+          <p>從左側選擇一筆會議記錄以查看詳情</p>
+        </div>
       </div>
     </div>
 
@@ -2560,7 +2580,9 @@ async function deleteMeeting(event, id) {
     if (currentId === id) {
       currentId = null;
       currentMeetingData = null;
-      document.getElementById('detail-panel').innerHTML = `
+      setDetailBusy(false);
+      setDetailStatus('已清空會議詳情');
+      detailContentElement().innerHTML = `
         <div class="empty-state">
           <div class="icon">🤖</div>
           <p>AI 語音會議助理<br>請在左側點選會議記錄，或點擊「上傳音訊/影片」</p>
@@ -3188,6 +3210,19 @@ function toggleReadingMode() {
   syncReadingModeButton();
 }
 
+function detailContentElement() {
+  return document.getElementById('detail-content') || document.getElementById('detail-panel');
+}
+
+function setDetailStatus(message = '') {
+  const status = document.getElementById('detail-status');
+  if (status) status.textContent = message;
+}
+
+function setDetailBusy(busy) {
+  setElementBusy(document.getElementById('detail-panel'), busy);
+}
+
 async function openDetail(id) {
   currentId = id;
 
@@ -3196,8 +3231,11 @@ async function openDetail(id) {
     c.classList.toggle('active', parseInt(c.dataset.id) === id);
   });
 
-  const detail = document.getElementById('detail-panel');
-  detail.innerHTML = `
+  const detailContent = detailContentElement();
+  if (!detailContent) return;
+  setDetailBusy(true);
+  setDetailStatus('載入會議記錄中...');
+  detailContent.innerHTML = `
     <div class="detail-placeholder">
       <div class="loading-spinner"></div>
       <p style="margin-top:12px">載入會議記錄中...</p>
@@ -3213,7 +3251,7 @@ async function openDetail(id) {
     const md = r.full_content || '（無內容）';
     const html = DOMPurify.sanitize(marked.parse(normalizeMeetingMarkdown(md)));
 
-    detail.innerHTML = `
+    detailContent.innerHTML = `
       <div class="detail-header">
         <div class="detail-topline">
           <div class="detail-title">${escapeHtml(r.title)}</div>
@@ -3246,15 +3284,19 @@ async function openDetail(id) {
         <div class="md-content">${html}</div>
       </div>
     `;
-    enhanceTranscriptTimecodes(detail.querySelector('.md-content'));
+    setDetailStatus(`已載入會議記錄：${r.title}`);
+    enhanceTranscriptTimecodes(detailContent.querySelector('.md-content'));
     enhanceSourceMediaPlayer();
     syncReadingModeButton();
   } catch (err) {
-    detail.innerHTML = `
+    setDetailStatus(`無法載入會議詳情：${err.message}`);
+    detailContent.innerHTML = `
       <div class="detail-placeholder">
         <div class="icon">❌</div>
         <p>無法載入詳情：${err.message}</p>
       </div>`;
+  } finally {
+    setDetailBusy(false);
   }
 }
 
