@@ -2693,6 +2693,15 @@ class SearchRegressionTests(unittest.TestCase):
                 {"index": 3, "label": "第 4 段", "start_seconds": 1860, "end_seconds": 1863},
             ],
         )
+        boundary_text = "逐字稿品質警示：疑似連續重複轉錄（重複時間：09:59-10:02）"
+        self.assertEqual(review_segment_indices_from_text(boundary_text), [0, 1])
+        self.assertEqual(
+            review_segment_details_from_text(boundary_text),
+            [
+                {"index": 0, "label": "第 1 段", "start_seconds": 599, "end_seconds": 600},
+                {"index": 1, "label": "第 2 段", "start_seconds": 600, "end_seconds": 602},
+            ],
+        )
         self.assertEqual(review_segment_label(3), "第 4 段")
         self.assertEqual(
             sorted(["第 10 段", "無法定位", "第 2 段", "Segment #4"], key=review_segment_label_sort_key),
