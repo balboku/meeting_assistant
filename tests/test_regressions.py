@@ -4964,7 +4964,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                     (
                         "逐字稿品質警示：疑似連續重複轉錄"
                         "（疑似分段：Segment #4｜30:00-40:00、第 2 段｜10:00-20:00；"
-                        "重複時間：10:00-10:03），建議重跑上述分段或複核相關內容。"
+                        "補充：Segment #99；重複時間：10:00-10:03），建議重跑上述分段或複核相關內容。"
                     )
                 ],
                 "segments": [
@@ -4996,6 +4996,38 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(report["review_segments"][1]["label"], "第 4 段")
         self.assertEqual(report["review_segments"][1]["start_seconds"], 1800)
         self.assertTrue(all("品質警示提及此分段" in segment["issues"] for segment in report["review_segments"]))
+        self.assertNotIn(98, [segment["index"] for segment in report["review_segments"]])
+
+    def test_meeting_detail_keeps_warning_segments_when_metadata_is_unavailable(self):
+        import backend.main as main
+
+        record = {
+            "id": 16,
+            "title": "無分段 metadata 舊紀錄",
+            "date": "2026/07/08",
+            "source_audio": "warning-only.webm",
+            "output_path": "warning-only.md",
+            "summary": "摘要",
+            "job_id": None,
+            "quality_score": 88,
+            "quality_label": "需複核",
+            "created_at": "2026-07-08 10:00:00",
+            "quality_report": {
+                "warnings": ["逐字稿品質警示：疑似分段：Segment #99，建議複核。"],
+            },
+            "full_content": (
+                "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+                "## 二、最終決議 (Final Decisions)\n決議\n"
+                "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+            ),
+        }
+        with mock.patch.object(main, "get_meeting", return_value=record):
+            response = asgi_request(main.app, "GET", "/meetings/16")
+
+        self.assertEqual(response.status_code, 200)
+        report = response.json()["quality_report"]
+        self.assertEqual([segment["index"] for segment in report["review_segments"]], [98])
+        self.assertEqual(report["review_segments"][0]["label"], "第 99 段")
 
     def test_meeting_detail_flags_unlinked_legacy_summary_in_quality_report(self):
         import backend.main as main

@@ -1724,6 +1724,14 @@ def _refresh_quality_report_review_segments(quality_report: dict) -> None:
     if not isinstance(quality_report, dict):
         return
     review_segments_by_index: dict[int, dict] = {}
+    known_segment_indices: set[int] = set()
+    for position, segment in enumerate(quality_report.get("segments") or []):
+        if not isinstance(segment, dict):
+            continue
+        try:
+            known_segment_indices.add(int(segment.get("index", position)))
+        except (TypeError, ValueError):
+            continue
 
     def segment_metadata(index: int) -> dict:
         for position, segment in enumerate(quality_report.get("segments") or []):
@@ -1739,6 +1747,8 @@ def _refresh_quality_report_review_segments(quality_report: dict) -> None:
 
     def add_review_segment(index: int, issues: list[str], source_segment: Optional[dict] = None) -> None:
         if index < 0:
+            return
+        if known_segment_indices and index not in known_segment_indices:
             return
         item = review_segments_by_index.setdefault(
             index,
