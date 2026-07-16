@@ -2979,10 +2979,14 @@ function focusQualitySegment(segmentIndex) {
     return;
   }
   const segment = button.closest('.segment-status');
+  const startSeconds = Number(segment?.dataset.startSeconds);
+  const hasStartSeconds = Number.isFinite(startSeconds) && startSeconds >= 0;
+  const mediaCued = hasStartSeconds && cueSourceMedia(startSeconds);
+  const mediaHint = mediaCued ? `，原始檔已跳到 ${clockText(startSeconds)}` : '';
   segment?.classList.add('highlight');
   segment?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   button.focus({ preventScroll: true });
-  setDetailStatus(`已定位第 ${index + 1} 段，可按「重跑」重新處理此分段`);
+  setDetailStatus(`已定位第 ${index + 1} 段${mediaHint}，可按「重跑」重新處理此分段`);
   setTimeout(() => segment?.classList.remove('highlight'), 2600);
 }
 
@@ -3052,6 +3056,13 @@ function renderQualityReport(meeting) {
     .join('');
   const segments = segmentItems.map(segment => {
     const index = Number(segment.index) || 0;
+    const startSeconds = Number(segment.start_seconds);
+    const endSeconds = Number(segment.end_seconds);
+    const segmentAttrs = [
+      `data-segment-index="${index}"`,
+      Number.isFinite(startSeconds) ? `data-start-seconds="${startSeconds}"` : '',
+      Number.isFinite(endSeconds) ? `data-end-seconds="${endSeconds}"` : '',
+    ].filter(Boolean).join(' ');
     const state = segment.status === 'reused'
       ? '沿用快取'
       : segment.status === 'rerun'
@@ -3065,7 +3076,7 @@ function renderQualityReport(meeting) {
     const issueBadges = issues
       .map(issue => `<span class="segment-issue">${escapeHtml(issue)}</span>`)
       .join('');
-    return `<div class="segment-status${issues.length ? ' has-issue' : ''}">
+    return `<div class="segment-status${issues.length ? ' has-issue' : ''}" ${segmentAttrs}>
       <span>第 ${index + 1} 段 · ${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)} · ${escapeHtml(state)}</span>
       ${issueBadges}
       <button id="rerun-segment-${index}" aria-describedby="detail-status" aria-busy="false" title="只重跑這一段" onclick="rerunMeeting(${meeting.id}, ${index})">↻ 重跑</button>
@@ -3144,6 +3155,37 @@ function seekSourceAudio(seconds = 0) {
   player.currentTime = targetSeconds;
   syncActiveTimecode(targetSeconds);
   player.play().catch(() => {});
+}
+
+function applyPendingSourceMediaSeek(player) {
+  const pendingSeconds = Number(player?.dataset.pendingSeekSeconds);
+  if (!player || !Number.isFinite(pendingSeconds)) return false;
+  delete player.dataset.pendingSeekSeconds;
+  try {
+    player.currentTime = Math.max(0, pendingSeconds);
+    syncActiveTimecode(player.currentTime);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function cueSourceMedia(seconds = 0) {
+  const player = document.getElementById('source-media-player');
+  if (!player) return false;
+  const targetSeconds = Math.max(0, Number(seconds) || 0);
+  if (Number(player.readyState || 0) < 1) {
+    player.dataset.pendingSeekSeconds = String(targetSeconds);
+    syncActiveTimecode(targetSeconds);
+    return true;
+  }
+  try {
+    player.currentTime = targetSeconds;
+    syncActiveTimecode(targetSeconds);
+    return true;
+  } catch (error) {
+    return false;
+  }
 }
 
 function enhanceTranscriptTimecodes(container) {
@@ -3390,6 +3432,7 @@ function bindSourceMediaPlayerStatus(player, statusEl) {
   ['loadedmetadata', 'canplay', 'error', 'stalled', 'emptied'].forEach(eventName => {
     player.addEventListener(eventName, sync);
   });
+  player.addEventListener('loadedmetadata', () => applyPendingSourceMediaSeek(player));
   player.addEventListener('timeupdate', () => syncActiveTimecode(player.currentTime));
   sync();
 }
