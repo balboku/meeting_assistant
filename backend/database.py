@@ -1227,15 +1227,37 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
     warning_count = 0
     warning_preview = None
     review_segment_labels: list[str] = []
+    review_segment_detail_by_label: dict[str, dict[str, Any]] = {}
 
-    def add_review_segment_label(label: str) -> None:
+    def add_review_segment_label(
+        label: str,
+        *,
+        index: Optional[int] = None,
+        start_seconds: Optional[int] = None,
+        end_seconds: Optional[int] = None,
+    ) -> None:
         cleaned = str(label or "").strip()
-        if cleaned and cleaned not in review_segment_labels:
+        if not cleaned:
+            return
+        if cleaned not in review_segment_labels:
             review_segment_labels.append(cleaned)
+        detail = review_segment_detail_by_label.setdefault(cleaned, {"label": cleaned})
+        if index is not None:
+            detail["index"] = index
+        if start_seconds is not None:
+            detail["start_seconds"] = start_seconds
+        if end_seconds is not None:
+            detail["end_seconds"] = end_seconds
 
     def add_review_segment_labels_from_text(text: str) -> None:
         for index in review_segment_indices_from_text(text):
-            add_review_segment_label(review_segment_label(index))
+            add_review_segment_label(review_segment_label(index), index=index)
+
+    def int_or_none(value: Any) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     try:
         quality_report = json.loads(quality_report_json) if quality_report_json else None
@@ -1255,24 +1277,30 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             if not isinstance(review_segment, dict):
                 continue
             label = str(review_segment.get("label") or "").strip()
+            segment_index = int_or_none(review_segment.get("index"))
             if not label:
-                try:
-                    label = review_segment_label(int(review_segment.get("index", 0)))
-                except (TypeError, ValueError):
-                    label = "分段"
-            add_review_segment_label(label)
+                label = review_segment_label(segment_index) if segment_index is not None else "分段"
+            add_review_segment_label(
+                label,
+                index=segment_index,
+                start_seconds=int_or_none(review_segment.get("start_seconds")),
+                end_seconds=int_or_none(review_segment.get("end_seconds")),
+            )
         for segment in quality_report.get("segments") or []:
             if not isinstance(segment, dict):
                 continue
-            try:
-                segment_label = review_segment_label(int(segment.get("index", 0)))
-            except (TypeError, ValueError):
-                segment_label = "分段"
+            segment_index = int_or_none(segment.get("index"))
+            segment_label = review_segment_label(segment_index) if segment_index is not None else "分段"
             for issue in segment.get("issues") or []:
                 issue_text = str(issue).strip()
                 if issue_text:
                     segment_issue_previews.append(f"{segment_label}：{issue_text}")
-                    add_review_segment_label(segment_label)
+                    add_review_segment_label(
+                        segment_label,
+                        index=segment_index,
+                        start_seconds=int_or_none(segment.get("start_seconds")),
+                        end_seconds=int_or_none(segment.get("end_seconds")),
+                    )
         if segment_issue_previews:
             warning_count += len(segment_issue_previews)
             if not warning_preview:
@@ -1296,6 +1324,11 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
     record["quality_warning_preview"] = warning_preview
     sorted_review_segment_labels = sorted(review_segment_labels, key=review_segment_label_sort_key)
     record["quality_review_segments"] = sorted_review_segment_labels
+    record["quality_review_segment_details"] = [
+        review_segment_detail_by_label[label]
+        for label in sorted_review_segment_labels
+        if label in review_segment_detail_by_label
+    ]
     record["quality_review_segment_count"] = len(sorted_review_segment_labels)
     return record
 

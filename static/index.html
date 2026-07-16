@@ -2536,7 +2536,18 @@ function renderCardQuality(record) {
   const score = record?.quality_score;
   const label = String(record?.quality_label || '').trim();
   const warningPreview = String(record?.quality_warning_preview || '').trim();
-  const reviewSegments = (record?.quality_review_segments || [])
+  const reviewSegmentDetails = (record?.quality_review_segment_details || [])
+    .map(segment => {
+      const label = String(segment?.label || '').trim();
+      if (!label) return '';
+      const hasTimeRange = segment.start_seconds !== undefined || segment.end_seconds !== undefined;
+      const timeText = hasTimeRange
+        ? ` ${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)}`
+        : '';
+      return `${label}${timeText}`;
+    })
+    .filter(Boolean);
+  const reviewSegments = (reviewSegmentDetails.length ? reviewSegmentDetails : (record?.quality_review_segments || []))
     .map(segment => String(segment || '').trim())
     .filter(Boolean);
   const chips = [];
