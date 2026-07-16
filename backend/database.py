@@ -1500,12 +1500,85 @@ def _meeting_record_needs_review(record: dict[str, Any]) -> bool:
     return any(token in label for token in ("需", "警", "低", "不"))
 
 
-def list_meetings(limit: int = 50, offset: int = 0, needs_review: bool = False) -> list[dict]:
+QUALITY_FILTER_TYPES = {"summary", "recording", "transcript", "other"}
+
+
+def _normalize_quality_filter_type(quality_type: Optional[str] = None) -> str:
+    normalized = str(quality_type or "all").strip().lower()
+    return normalized if normalized in QUALITY_FILTER_TYPES else "all"
+
+
+def _is_recording_quality_warning(warning: str) -> bool:
+    return bool(re.search(r"錄音|音檔|媒體|音量|爆音|靜音|聲道|取樣率", str(warning or "")))
+
+
+def _meeting_record_quality_types(record: dict[str, Any]) -> set[str]:
+    warning_preview = str(record.get("quality_warning_preview") or "").strip()
+    warning_count = int(record.get("quality_warning_count") or 0)
+    review_segment_count = int(record.get("quality_review_segment_count") or 0)
+    review_segment_details = record.get("quality_review_segment_details") or []
+    types: set[str] = set()
+
+    if warning_preview.startswith("摘要品質警示"):
+        types.add("summary")
+    if _is_recording_quality_warning(warning_preview):
+        types.add("recording")
+    if (
+        warning_preview.startswith("逐字稿品質警示")
+        or review_segment_count > 0
+        or bool(review_segment_details)
+    ):
+        types.add("transcript")
+
+    score = record.get("quality_score")
+    has_score = score is not None and score != ""
+    is_other_score = False
+    if has_score:
+        try:
+            is_other_score = int(score) < 85
+        except (TypeError, ValueError):
+            is_other_score = False
+    label = str(record.get("quality_label") or "").strip()
+    is_other_label = any(token in label for token in ("需", "警", "低", "不")) and not types
+    is_other_warning = warning_count > 0 and not types
+    if is_other_warning or is_other_score or is_other_label:
+        types.add("other")
+
+    return types
+
+
+def _meeting_record_matches_quality_type(record: dict[str, Any], quality_type: Optional[str] = None) -> bool:
+    normalized = _normalize_quality_filter_type(quality_type)
+    if normalized == "all":
+        return True
+    return normalized in _meeting_record_quality_types(record)
+
+
+def _meeting_record_matches_review_filters(
+    record: dict[str, Any],
+    *,
+    needs_review: bool = False,
+    quality_type: Optional[str] = None,
+) -> bool:
+    normalized = _normalize_quality_filter_type(quality_type)
+    if needs_review or normalized != "all":
+        if not _meeting_record_needs_review(record):
+            return False
+    return _meeting_record_matches_quality_type(record, normalized)
+
+
+def list_meetings(
+    limit: int = 50,
+    offset: int = 0,
+    needs_review: bool = False,
+    quality_type: Optional[str] = None,
+) -> list[dict]:
     """列出所有會議記錄（依建立時間倒序）"""
     limit = min(max(int(limit), 1), 500)
     offset = max(int(offset), 0)
+    normalized_quality_type = _normalize_quality_filter_type(quality_type)
     with get_db() as conn:
-        if needs_review:
+        if needs_review or normalized_quality_type != "all":
             rows = conn.execute(
                 """SELECT id, title, date, source_audio, output_path,
                           substr(summary, 1, 200) as summary_preview,
@@ -1518,7 +1591,11 @@ def list_meetings(limit: int = 50, offset: int = 0, needs_review: bool = False) 
             records = [
                 record
                 for record in (_meeting_row_with_quality_preview(r) for r in rows)
-                if _meeting_record_needs_review(record)
+                if _meeting_record_matches_review_filters(
+                    record,
+                    needs_review=needs_review,
+                    quality_type=normalized_quality_type,
+                )
             ]
             return records[offset:offset + limit]
 
@@ -1536,10 +1613,11 @@ def list_meetings(limit: int = 50, offset: int = 0, needs_review: bool = False) 
         return [_meeting_row_with_quality_preview(r) for r in rows]
 
 
-def count_meetings(needs_review: bool = False) -> int:
+def count_meetings(needs_review: bool = False, quality_type: Optional[str] = None) -> int:
     """統計會議記錄總數"""
+    normalized_quality_type = _normalize_quality_filter_type(quality_type)
     with get_db() as conn:
-        if needs_review:
+        if needs_review or normalized_quality_type != "all":
             rows = conn.execute(
                 """SELECT id, title, date, source_audio, output_path,
                           substr(summary, 1, 200) as summary_preview,
@@ -1551,7 +1629,11 @@ def count_meetings(needs_review: bool = False) -> int:
             return sum(
                 1
                 for record in (_meeting_row_with_quality_preview(r) for r in rows)
-                if _meeting_record_needs_review(record)
+                if _meeting_record_matches_review_filters(
+                    record,
+                    needs_review=needs_review,
+                    quality_type=normalized_quality_type,
+                )
             )
         return conn.execute("SELECT COUNT(*) FROM meetings").fetchone()[0]
 
@@ -1777,7 +1859,12 @@ def list_audit_logs(limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
     return records
 
 
-def search_meetings(query: str, limit: int = 50, needs_review: bool = False) -> list[dict]:
+def search_meetings(
+    query: str,
+    limit: int = 50,
+    needs_review: bool = False,
+    quality_type: Optional[str] = None,
+) -> list[dict]:
     """
     搜尋會議記錄的標題、媒體檔名、摘要、完整 Markdown 內容與品質報告。
 
@@ -1796,7 +1883,8 @@ def search_meetings(query: str, limit: int = 50, needs_review: bool = False) -> 
         return []
 
     limit = min(max(int(limit), 1), 100)
-    query_limit = 500 if needs_review else limit
+    normalized_quality_type = _normalize_quality_filter_type(quality_type)
+    query_limit = 500 if needs_review or normalized_quality_type != "all" else limit
     fts_query = _build_fts_query(query)
     pattern = _build_like_pattern(query)
     records_by_id: dict[int, dict] = {}
@@ -1883,8 +1971,16 @@ def search_meetings(query: str, limit: int = 50, needs_review: bool = False) -> 
             add_rows(rows)
 
     records = list(records_by_id.values())
-    if needs_review:
-        records = [record for record in records if _meeting_record_needs_review(record)]
+    if needs_review or normalized_quality_type != "all":
+        records = [
+            record
+            for record in records
+            if _meeting_record_matches_review_filters(
+                record,
+                needs_review=needs_review,
+                quality_type=normalized_quality_type,
+            )
+        ]
     return records[:limit]
 
 

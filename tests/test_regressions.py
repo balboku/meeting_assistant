@@ -3426,6 +3426,78 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in search_response.json()], [review_id])
         self.assertEqual(search_response.json()[0]["quality_warning_preview"], "品質分數 80 低於 85，建議複核")
 
+    def test_list_search_and_api_can_filter_quality_warning_type(self):
+        database, tmp_path = self._isolated_database()
+        shared = "quality-type-shared-keyword"
+        output_path = tmp_path / "quality-type.md"
+        output_path.write_text(shared, encoding="utf-8")
+        summary_id = database.save_meeting(
+            title="Quality Type Summary",
+            date="2026/07/12",
+            source_audio="summary.webm",
+            output_path=str(output_path),
+            summary=shared,
+            quality_report={
+                "warnings": ["摘要品質警示：討論摘要未使用 D 編號"],
+            },
+        )
+        recording_id = database.save_meeting(
+            title="Quality Type Recording",
+            date="2026/07/12",
+            source_audio="recording.webm",
+            output_path=str(output_path),
+            summary=shared,
+            quality_report={
+                "warnings": ["偵測到可能的爆音；原始媒體檔已保留，重要內容請抽查。"],
+            },
+        )
+        transcript_id = database.save_meeting(
+            title="Quality Type Transcript",
+            date="2026/07/12",
+            source_audio="transcript.webm",
+            output_path=str(output_path),
+            summary=shared,
+            quality_report={
+                "warnings": [],
+                "review_segments": [
+                    {"index": 0, "label": "第 1 段", "start_seconds": 0, "end_seconds": 600, "issues": ["需複核"]},
+                ],
+            },
+        )
+        other_id = database.save_meeting(
+            title="Quality Type Other",
+            date="2026/07/12",
+            source_audio="other.webm",
+            output_path=str(output_path),
+            summary=shared,
+            quality_report={"score": 80, "label": "需注意", "warnings": []},
+        )
+
+        self.assertEqual([row["id"] for row in database.list_meetings(quality_type="summary")], [summary_id])
+        self.assertEqual([row["id"] for row in database.list_meetings(quality_type="recording")], [recording_id])
+        self.assertEqual([row["id"] for row in database.list_meetings(quality_type="transcript")], [transcript_id])
+        self.assertEqual([row["id"] for row in database.list_meetings(quality_type="other")], [other_id])
+        self.assertEqual(database.count_meetings(quality_type="summary"), 1)
+        self.assertEqual(
+            [row["id"] for row in database.search_meetings(shared, quality_type="recording")],
+            [recording_id],
+        )
+
+        import backend.main as main
+
+        list_response = asgi_request(main.app, "GET", "/meetings?quality_type=summary&limit=10")
+        search_response = asgi_request(
+            main.app,
+            "GET",
+            f"/meetings/search?q={shared}&quality_type=transcript&limit=10",
+        )
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(list_response.json()["total"], 1)
+        self.assertEqual([row["id"] for row in list_response.json()["records"]], [summary_id])
+        self.assertEqual(search_response.status_code, 200)
+        self.assertEqual([row["id"] for row in search_response.json()], [transcript_id])
+
 
 class MeetingEvidenceRegressionTests(unittest.TestCase):
     def _isolated_database(self):
@@ -5876,7 +5948,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function qualityTypeMatchesRecord", html)
         self.assertIn("const qualityType = selectedQualityFilterType();", html)
         self.assertIn("const reviewOnly = Boolean(document.getElementById('needs-review-filter')?.checked) || qualityType !== 'all';", html)
-        self.assertIn("const records = fetchedRecords.filter(record => qualityTypeMatchesRecord(record, qualityType));", html)
+        self.assertIn("const qualityTypeParam = qualityType !== 'all' ? `&quality_type=${encodeURIComponent(qualityType)}` : '';", html)
+        self.assertIn("${API}/meetings/search?q=${encodeURIComponent(query)}&limit=100${reviewParam}${qualityTypeParam}", html)
+        self.assertIn("${API}/meetings?limit=50${reviewParam}${qualityTypeParam}", html)
+        self.assertIn("const records = fetchedRecords;", html)
         self.assertIn("if (selectedQualityFilterType() !== 'all' && filter) filter.checked = true;", html)
         self.assertIn("quality_warning_count", html)
         self.assertIn("quality_warning_preview", html)

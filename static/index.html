@@ -2904,9 +2904,10 @@ async function loadMeetings(query = '') {
 
   try {
     const reviewParam = reviewOnly ? '&needs_review=true' : '';
+    const qualityTypeParam = qualityType !== 'all' ? `&quality_type=${encodeURIComponent(qualityType)}` : '';
     let url = query
-      ? `${API}/meetings/search?q=${encodeURIComponent(query)}&limit=100${reviewParam}`
-      : `${API}/meetings?limit=50${reviewParam}`;
+      ? `${API}/meetings/search?q=${encodeURIComponent(query)}&limit=100${reviewParam}${qualityTypeParam}`
+      : `${API}/meetings?limit=50${reviewParam}${qualityTypeParam}`;
     const res = await fetch(url, { signal: requestController.signal });
     if (!res.ok) throw new Error(await apiErrorMessage(res));
     const data = await res.json();
@@ -2914,7 +2915,7 @@ async function loadMeetings(query = '') {
     if (requestController.signal.aborted) return;
 
     const fetchedRecords = data.records ?? data;  // search 回傳陣列；list 回傳物件
-    const records = fetchedRecords.filter(record => qualityTypeMatchesRecord(record, qualityType));
+    const records = fetchedRecords;
     const total = data.total ?? fetchedRecords.length;
     const filterSuffix = qualityTypeLabelText ? `，${qualityTypeLabelText}` : '';
     const statusPrefix = query
