@@ -2873,8 +2873,8 @@ function renderAudioEvidence(meeting, requestedMode = null) {
   const canVideoPreview = sourceMediaVideoPreviewCapable(meeting);
   const previewToggle = canVideoPreview
     ? playerMode === 'video'
-      ? `<button type="button" class="source-media-action" onclick="switchSourceMediaPlayer('audio')" aria-label="切換為音訊預覽">🔊 音訊預覽</button>`
-      : `<button type="button" class="source-media-action" onclick="switchSourceMediaPlayer('video')" aria-label="切換為影片預覽">🎥 影片預覽</button>`
+      ? `<button type="button" class="source-media-action" data-source-mode="audio" onclick="switchSourceMediaPlayer('audio')" aria-label="切換為音訊預覽">🔊 音訊預覽</button>`
+      : `<button type="button" class="source-media-action" data-source-mode="video" onclick="switchSourceMediaPlayer('video')" aria-label="切換為影片預覽">🎥 影片預覽</button>`
     : '';
   const actions = `<div class="source-media-actions">
     ${previewToggle}
@@ -2939,7 +2939,7 @@ function setSourceMediaPlayerStatus(statusEl, message = '', level = 'warning', b
 
 function sourceMediaHasAudioFallbackAction(statusEl) {
   const container = statusEl?.closest('#source-media-evidence, .source-storage-preview');
-  return Boolean(container?.querySelector('button[aria-label="切換為音訊預覽"], button[data-source-mode="audio"]'));
+  return Boolean(container?.querySelector('button[data-source-mode="audio"]'));
 }
 
 function updateSourceMediaPlayerStatus(player, statusEl) {
