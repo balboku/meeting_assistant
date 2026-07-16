@@ -702,6 +702,19 @@
       flex-wrap: wrap;
       gap: 6px;
     }
+    .source-media-mode-pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 8px;
+      border: 1px solid rgba(125,207,255,0.32);
+      border-radius: 6px;
+      background: rgba(125,207,255,0.08);
+      color: var(--cyan);
+      font-size: 11px;
+      line-height: 1.3;
+      white-space: nowrap;
+    }
     .source-media-fact {
       display: inline-flex;
       align-items: center;
@@ -1963,6 +1976,17 @@ function sourceStorageAudioFallbackCapable(file = {}) {
   return sourceStorageMediaType(file) === 'video' && sourceStorageExtension(file) === '.webm';
 }
 
+function sourceMediaModePill(mode = '') {
+  if (mode !== 'video' && mode !== 'audio') return '';
+  const label = mode === 'video' ? '影片預覽中' : '音訊預覽中';
+  return `<span class="source-media-mode-pill">${label}</span>`;
+}
+
+function sourceMediaModeFacts(mode = '') {
+  const pill = sourceMediaModePill(mode);
+  return pill ? `<div class="source-media-facts">${pill}</div>` : '';
+}
+
 function previewSourceMedia(url = '', mediaType = '', name = '', requestedMode = '') {
   const preview = document.getElementById('source-storage-preview');
   if (!preview || !url) return;
@@ -1999,6 +2023,7 @@ function previewSourceMedia(url = '', mediaType = '', name = '', requestedMode =
         <button type="button" class="source-media-action" aria-label="關閉原始檔預覽" onclick="closeSourceMediaPreview()">關閉</button>
       </div>
     </div>
+    ${sourceMediaModeFacts(playerMode)}
     ${player}
     <div class="source-media-player-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></div>`;
   preview.classList.add('show');
@@ -3189,6 +3214,7 @@ function renderAudioEvidence(meeting, requestedMode = null) {
         ${actions}
       </div>
       ${renderSourceMediaFacts(meeting)}
+      ${sourceMediaModeFacts(playerMode)}
       <video id="source-media-player" controls preload="metadata" playsinline src="${sourceUrl}"></video>
       <div id="source-media-player-status" class="source-media-player-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></div>
     </div>`;
@@ -3199,6 +3225,7 @@ function renderAudioEvidence(meeting, requestedMode = null) {
       ${actions}
     </div>
     ${renderSourceMediaFacts(meeting)}
+    ${sourceMediaModeFacts(playerMode)}
     <audio id="source-media-player" controls preload="metadata" src="${sourceUrl}"></audio>
     <div id="source-media-player-status" class="source-media-player-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></div>
   </div>`;
