@@ -2739,14 +2739,20 @@ function qualityWarningSegmentIndices(warning = '', segments = []) {
     .map(segment => Number(segment.index))
     .filter(index => Number.isInteger(index) && index >= 0));
   const indices = [];
-  const matcher = /第\s*(\d+)\s*段/g;
-  let match;
-  while ((match = matcher.exec(String(warning || ''))) !== null) {
-    const index = Number(match[1]) - 1;
-    if (index < 0) continue;
-    if (knownIndices.size && !knownIndices.has(index)) continue;
+  const text = String(warning || '');
+  const addIndex = rawIndex => {
+    const index = Number(rawIndex) - 1;
+    if (index < 0) return;
+    if (knownIndices.size && !knownIndices.has(index)) return;
     if (!indices.includes(index)) indices.push(index);
-  }
+  };
+  const matchers = [/第\s*(\d+)\s*段/g, /\bSegment\s*#?\s*(\d+)\b/gi];
+  matchers.forEach(matcher => {
+    let match;
+    while ((match = matcher.exec(text)) !== null) {
+      addIndex(match[1]);
+    }
+  });
   return indices;
 }
 
