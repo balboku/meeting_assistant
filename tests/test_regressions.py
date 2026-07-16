@@ -2690,7 +2690,13 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(
             review_segment_details_from_text(time_only_text),
             [
-                {"index": 3, "label": "第 4 段", "start_seconds": 1860, "end_seconds": 1863},
+                {
+                    "index": 3,
+                    "label": "第 4 段",
+                    "issues": ["疑似連續重複轉錄；重複時間：31:00-31:03"],
+                    "start_seconds": 1860,
+                    "end_seconds": 1863,
+                },
             ],
         )
         boundary_text = "逐字稿品質警示：疑似連續重複轉錄（重複時間：09:59-10:02）"
@@ -2698,8 +2704,20 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(
             review_segment_details_from_text(boundary_text),
             [
-                {"index": 0, "label": "第 1 段", "start_seconds": 599, "end_seconds": 600},
-                {"index": 1, "label": "第 2 段", "start_seconds": 600, "end_seconds": 602},
+                {
+                    "index": 0,
+                    "label": "第 1 段",
+                    "issues": ["疑似連續重複轉錄；重複時間：09:59-10:02"],
+                    "start_seconds": 599,
+                    "end_seconds": 600,
+                },
+                {
+                    "index": 1,
+                    "label": "第 2 段",
+                    "issues": ["疑似連續重複轉錄；重複時間：09:59-10:02"],
+                    "start_seconds": 600,
+                    "end_seconds": 602,
+                },
             ],
         )
         self.assertEqual(review_segment_label(3), "第 4 段")
@@ -2990,14 +3008,14 @@ class SearchRegressionTests(unittest.TestCase):
                     "index": 1,
                     "start_seconds": 600,
                     "end_seconds": 1200,
-                    "issues": ["品質警示提及此分段"],
+                    "issues": ["疑似連續重複轉錄；同一句連續重複 31 次；重複時間：10:00-10:03"],
                 },
                 {
                     "label": "第 4 段",
                     "index": 3,
                     "start_seconds": 1800,
                     "end_seconds": 2400,
-                    "issues": ["品質警示提及此分段"],
+                    "issues": ["疑似連續重複轉錄；同一句連續重複 31 次；重複時間：10:00-10:03"],
                 },
             ],
         )
@@ -3041,7 +3059,7 @@ class SearchRegressionTests(unittest.TestCase):
                     "index": 1,
                     "start_seconds": 600,
                     "end_seconds": 1200,
-                    "issues": ["品質警示提及此分段"],
+                    "issues": ["分段疑似重複轉錄幻覺"],
                 },
             ],
         )
@@ -3082,7 +3100,7 @@ class SearchRegressionTests(unittest.TestCase):
                     "index": 3,
                     "start_seconds": 1860,
                     "end_seconds": 1863,
-                    "issues": ["品質警示提及此分段"],
+                    "issues": ["疑似連續重複轉錄；同一句連續重複 31 次；重複時間：31:00-31:03"],
                 },
             ],
         )
@@ -5476,7 +5494,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(report["review_segments"][0]["start_seconds"], 600)
         self.assertEqual(report["review_segments"][1]["label"], "第 4 段")
         self.assertEqual(report["review_segments"][1]["start_seconds"], 1800)
-        self.assertTrue(all("品質警示提及此分段" in segment["issues"] for segment in report["review_segments"]))
+        self.assertTrue(all(
+            "疑似連續重複轉錄；重複時間：10:00-10:03" in segment["issues"]
+            for segment in report["review_segments"]
+        ))
         self.assertNotIn(98, [segment["index"] for segment in report["review_segments"]])
 
     def test_meeting_detail_keeps_warning_segments_when_metadata_is_unavailable(self):

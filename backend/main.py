@@ -1978,11 +1978,16 @@ def _refresh_quality_report_review_segments(quality_report: dict) -> None:
                 for key in ("label", "start_seconds", "end_seconds")
                 if key in detail
             }
+            detail_issues = [
+                str(issue).strip()
+                for issue in detail.get("issues") or []
+                if str(issue).strip()
+            ]
             existing = review_segments_by_index.get(index)
             if existing and existing.get("issues"):
-                add_review_segment(index, [], source_segment)
+                add_review_segment(index, detail_issues, source_segment)
             else:
-                add_review_segment(index, ["品質警示提及此分段"], source_segment)
+                add_review_segment(index, detail_issues or ["品質警示提及此分段"], source_segment)
 
     quality_report["review_segments"] = [
         review_segments_by_index[index]
