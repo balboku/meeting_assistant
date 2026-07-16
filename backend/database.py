@@ -70,28 +70,84 @@ def _normalize_turn_text(text: str) -> str:
 
 
 def _has_repeated_transcript_turn_loop(transcript: str, limit: int = 3) -> bool:
+    return _repeated_transcript_turn_review_segments(transcript, limit=limit) != []
+
+
+def _format_clock(total_seconds: int) -> str:
+    minutes, seconds = divmod(max(0, int(total_seconds or 0)), 60)
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _repeated_transcript_turn_review_segments(
+    transcript: str,
+    *,
+    limit: int = 3,
+    segment_seconds: int = 600,
+) -> list[dict[str, Any]]:
     pattern = re.compile(
-        r"\[\d{1,3}:[0-5]\d\]\s*(?:\*\*\[[^\]]+\]\*\*|\[[^\]]+\])?\s*[：:]?\s*(?P<text>.+)"
+        r"\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\d)\]\s*"
+        r"(?:\*\*\[[^\]]+\]\*\*|\[[^\]]+\])?\s*[：:]?\s*(?P<text>.+)"
     )
+    max_run = 0
+    max_timestamps: list[int] = []
     current_text = ""
     current_run = 0
+    current_timestamps: list[int] = []
     for line in (transcript or "").splitlines():
         match = pattern.search(line)
         if not match:
             continue
         normalized = _normalize_turn_text(match.group("text"))
+        timestamp = int(match.group("minutes")) * 60 + int(match.group("seconds"))
         if len(normalized) < 8:
             current_text = ""
             current_run = 0
+            current_timestamps = []
             continue
         if normalized == current_text:
             current_run += 1
+            current_timestamps.append(timestamp)
         else:
             current_text = normalized
             current_run = 1
-        if current_run > limit:
-            return True
-    return False
+            current_timestamps = [timestamp]
+        if current_run > max_run:
+            max_run = current_run
+            max_timestamps = list(current_timestamps)
+
+    if max_run <= limit or not max_timestamps:
+        return []
+
+    start_time = min(max_timestamps)
+    end_time = max(max_timestamps)
+    issue = (
+        f"疑似連續重複轉錄：同一句連續重複 {max_run} 次"
+        f"（{_format_clock(start_time)}-{_format_clock(end_time)}）"
+    )
+    first_index = max(0, start_time // segment_seconds)
+    last_index = max(first_index, end_time // segment_seconds)
+    return [
+        {
+            "index": index,
+            "label": review_segment_label(index),
+            "start_seconds": index * segment_seconds,
+            "end_seconds": (index + 1) * segment_seconds,
+            "issues": [issue],
+        }
+        for index in range(first_index, last_index + 1)
+    ]
+
+
+def _legacy_markdown_repeated_turn_review_segments(output_path: str) -> list[dict[str, Any]]:
+    path = Path(output_path or "")
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    transcript = _markdown_section(text, ("完整逐字稿", "Verbatim Transcript"), ())
+    return _repeated_transcript_turn_review_segments(transcript)
 
 
 LEGACY_TRANSCRIPT_OMISSION_PATTERNS = (
@@ -1226,6 +1282,7 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
     quality_report_json = record.pop("quality_report_json", None)
     warning_count = 0
     warning_preview = None
+    quality_warning_text = ""
     review_segment_labels: list[str] = []
     review_segment_detail_by_label: dict[str, dict[str, Any]] = {}
 
@@ -1287,6 +1344,7 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         warnings = quality_report.get("warnings") or []
         if isinstance(warnings, list):
             warning_count = len(warnings)
+            quality_warning_text = "\n".join(str(warning) for warning in warnings)
             if warnings:
                 warning_preview = str(warnings[0]).strip() or None
             for warning in warnings:
@@ -1335,6 +1393,34 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         warning_count = _legacy_markdown_quality_warning_count(str(record.get("output_path") or ""))
         if warning_count:
             warning_preview = f"舊紀錄需複核：已偵測到 {warning_count} 個品質警示"
+    should_infer_legacy_review_segments = (
+        not review_segment_labels
+        and (
+            (quality_report is None and warning_count > 0)
+            or (
+                isinstance(quality_report, dict)
+                and "逐字稿品質警示" in quality_warning_text
+            )
+        )
+    )
+    if should_infer_legacy_review_segments:
+        for detail in _legacy_markdown_repeated_turn_review_segments(str(record.get("output_path") or "")):
+            segment_issues = [
+                str(issue).strip()
+                for issue in detail.get("issues") or []
+                if str(issue).strip()
+            ]
+            add_review_segment_label(
+                detail.get("label") or review_segment_label(int(detail["index"])),
+                index=int_or_none(detail.get("index")),
+                start_seconds=int_or_none(detail.get("start_seconds")),
+                end_seconds=int_or_none(detail.get("end_seconds")),
+                issues=segment_issues,
+            )
+            if not warning_count:
+                warning_count = 1
+            if not warning_preview and segment_issues:
+                warning_preview = f"{detail.get('label') or review_segment_label(int(detail['index']))}：{segment_issues[0]}"
     if not warning_preview:
         try:
             quality_score = int(record["quality_score"]) if record.get("quality_score") is not None else None
