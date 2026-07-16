@@ -556,6 +556,14 @@
       max-width: min(100%, 460px);
     }
     .quality-review-segment:hover { border-color: var(--yellow); background: rgba(242, 213, 207, 0.16); }
+    .quality-review-segment.unavailable {
+      cursor: default;
+      opacity: 0.78;
+    }
+    .quality-review-segment.unavailable:hover {
+      border-color: rgba(242, 213, 207, 0.36);
+      background: rgba(242, 213, 207, 0.08);
+    }
     .quality-review-segment-label { color: var(--yellow); font-weight: 700; white-space: nowrap; }
     .quality-review-segment-issue {
       color: var(--text-mid);
@@ -2860,12 +2868,18 @@ function renderQualityWarning(warning = '', segments = []) {
   return `<div class="quality-warning">${escapeHtml(warning)}${actions}</div>`;
 }
 
-function renderQualityReviewSegments(meetingId, reviewSegments = []) {
-  const segmentIndices = normalizeSegmentIndices((reviewSegments || []).map(segment => segment?.index));
+function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegments = []) {
+  const knownSegmentIndices = new Set((knownSegments || [])
+    .map(segment => Number(segment?.index))
+    .filter(index => Number.isInteger(index) && index >= 0));
+  const reviewSegmentIndices = normalizeSegmentIndices((reviewSegments || []).map(segment => segment?.index));
+  const rerunnableSegmentIndices = reviewSegmentIndices
+    .filter(index => knownSegmentIndices.has(index));
   const items = (reviewSegments || [])
     .map(segment => {
       const index = Number(segment?.index);
       if (!Number.isInteger(index) || index < 0) return '';
+      const canFocusSegment = knownSegmentIndices.has(index);
       const issues = (segment.issues || [])
         .map(issue => String(issue || '').trim())
         .filter(Boolean);
@@ -2874,6 +2888,12 @@ function renderQualityReviewSegments(meetingId, reviewSegments = []) {
       const timeText = hasTimeRange
         ? `${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)} · `
         : '';
+      if (!canFocusSegment) {
+        return `<span class="quality-review-segment unavailable" aria-disabled="true" title="此舊紀錄沒有可定位的分段控制">
+          <span class="quality-review-segment-label">第 ${index + 1} 段</span>
+          <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
+        </span>`;
+      }
       return `<button type="button" class="quality-review-segment" aria-describedby="detail-status" onclick="focusQualitySegment(${index})">
         <span class="quality-review-segment-label">第 ${index + 1} 段</span>
         <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
@@ -2882,8 +2902,8 @@ function renderQualityReviewSegments(meetingId, reviewSegments = []) {
     .filter(Boolean)
     .join('');
   if (!items) return '';
-  const rerunButton = segmentIndices.length
-    ? `<button id="quality-rerun-review-segments-button" type="button" class="quality-rerun-review-segments" aria-describedby="detail-status" aria-busy="false" title="只重跑已標記需複核的分段" onclick="rerunMeeting(${Number(meetingId) || 0}, [${segmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')">↻ 重跑需複核分段</button>`
+  const rerunButton = rerunnableSegmentIndices.length
+    ? `<button id="quality-rerun-review-segments-button" type="button" class="quality-rerun-review-segments" aria-describedby="detail-status" aria-busy="false" title="只重跑已標記需複核且可定位的分段" onclick="rerunMeeting(${Number(meetingId) || 0}, [${rerunnableSegmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')">↻ 重跑需複核分段</button>`
     : '';
   return `<div class="quality-review-segments" aria-label="需複核分段">
     <span class="quality-review-title">需複核分段</span>
@@ -2898,7 +2918,7 @@ function renderQualityReport(meeting) {
   const warningItems = report.warnings || [];
   const qualityActions = renderQualityActions(meeting, warningItems);
   const segmentItems = report.segments || [];
-  const reviewSegments = renderQualityReviewSegments(meeting.id, report.review_segments || []);
+  const reviewSegments = renderQualityReviewSegments(meeting.id, report.review_segments || [], segmentItems);
   const warnings = warningItems
     .map(warning => renderQualityWarning(warning, segmentItems))
     .join('');
