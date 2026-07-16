@@ -1227,6 +1227,21 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         if cleaned and cleaned not in review_segment_labels:
             review_segment_labels.append(cleaned)
 
+    def review_segment_label_sort_key(label: str) -> tuple[int, int, str]:
+        cleaned = str(label or "").strip()
+        match = re.search(
+            r"第\s*(\d+)\s*段|\bSegment\s*#?\s*(\d+)\b",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            number = match.group(1) or match.group(2)
+            try:
+                return (0, int(number), cleaned)
+            except (TypeError, ValueError):
+                pass
+        return (1, 0, cleaned)
+
     def add_review_segment_labels_from_text(text: str) -> None:
         content = str(text or "")
         matchers = (
@@ -1299,8 +1314,9 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             warning_preview = f"品質標籤：{label}"
     record["quality_warning_count"] = warning_count
     record["quality_warning_preview"] = warning_preview
-    record["quality_review_segments"] = review_segment_labels
-    record["quality_review_segment_count"] = len(review_segment_labels)
+    sorted_review_segment_labels = sorted(review_segment_labels, key=review_segment_label_sort_key)
+    record["quality_review_segments"] = sorted_review_segment_labels
+    record["quality_review_segment_count"] = len(sorted_review_segment_labels)
     return record
 
 

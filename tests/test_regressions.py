@@ -2730,12 +2730,12 @@ class SearchRegressionTests(unittest.TestCase):
             "label": "可用",
             "warnings": ["逐字稿品質警示：需抽查"],
             "review_segments": [
-                {"index": 1, "label": "第 2 段", "issues": ["疑似連續重複轉錄"]},
                 {"index": 3, "issues": ["時間戳不連續"]},
+                {"index": 1, "label": "第 2 段", "issues": ["疑似連續重複轉錄"]},
             ],
             "segments": [
-                {"index": 1, "issues": ["疑似連續重複轉錄"]},
                 {"index": 3, "issues": []},
+                {"index": 1, "issues": ["疑似連續重複轉錄"]},
             ],
         }
         meeting_id = database.save_meeting(
@@ -2766,7 +2766,7 @@ class SearchRegressionTests(unittest.TestCase):
                 (
                     "逐字稿品質警示：疑似連續重複轉錄"
                     "（同一句連續重複 31 次：因為我是結所以我領車；"
-                    "疑似分段：第 2 段｜10:00-20:00、Segment #4｜30:00-40:00；"
+                    "疑似分段：Segment #4｜30:00-40:00、第 2 段｜10:00-20:00；"
                     "重複時間：10:00-10:03），建議重跑上述分段或複核相關內容。"
                 )
             ],
