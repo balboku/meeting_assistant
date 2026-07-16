@@ -322,6 +322,41 @@ def _timestamp_count(transcript: str) -> int:
     return len(TIMESTAMP_PATTERN.findall(transcript or ""))
 
 
+def _format_segment_clock(total_seconds: int) -> str:
+    minutes, seconds = divmod(max(0, int(total_seconds or 0)), 60)
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _full_transcript_repetition_quality_issues(transcript: str) -> list[str]:
+    metadata_by_index = {
+        int(segment["index"]): segment
+        for segment in _transcript_segment_metadata(transcript)
+        if isinstance(segment, dict) and "index" in segment
+    }
+    segment_bodies = _transcript_segments_by_index(transcript)
+    if not metadata_by_index or not segment_bodies:
+        issue = _segment_repetition_quality_issue(transcript)
+        return [issue] if issue else []
+
+    issues: list[str] = []
+    for index, body in sorted(segment_bodies.items()):
+        issue = _segment_repetition_quality_issue(body)
+        if not issue:
+            continue
+        segment = metadata_by_index.get(index) or {}
+        try:
+            start_seconds = int(segment["start_seconds"])
+            end_seconds = int(segment["end_seconds"])
+            location = (
+                f"第 {index + 1} 段｜"
+                f"{_format_segment_clock(start_seconds)}-{_format_segment_clock(end_seconds)}"
+            )
+        except (KeyError, TypeError, ValueError):
+            location = f"第 {index + 1} 段"
+        issues.append(f"{location}：{issue}")
+    return issues
+
+
 def _transcript_integrity_issues(meeting_content: str, full_transcript: str) -> list[str]:
     """Final guardrail: the saved transcript must match the verified transcript."""
     issues: list[str] = []
@@ -364,8 +399,7 @@ def _transcript_integrity_issues(meeting_content: str, full_transcript: str) -> 
             f"（{actual_segments}/{expected_segments}）"
         )
 
-    repetition_issue = _segment_repetition_quality_issue(actual)
-    if repetition_issue:
+    for repetition_issue in _full_transcript_repetition_quality_issues(actual):
         issues.append(f"完整逐字稿區塊{repetition_issue}")
 
     return list(dict.fromkeys(issues))

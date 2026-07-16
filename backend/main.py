@@ -1553,6 +1553,19 @@ def _detail_format_clock(total_seconds: int) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
+def _detail_time_based_segment_matches(start_time: int, end_time: int) -> list[dict]:
+    first_index = max(0, start_time // SEGMENT_TARGET_SECONDS)
+    last_index = max(first_index, end_time // SEGMENT_TARGET_SECONDS)
+    return [
+        {
+            "index": index,
+            "start_seconds": index * SEGMENT_TARGET_SECONDS,
+            "end_seconds": (index + 1) * SEGMENT_TARGET_SECONDS,
+        }
+        for index in range(first_index, last_index + 1)
+    ]
+
+
 def _detail_repetition_segment_matches(
     timestamps: list[int],
     segments: Optional[list[dict]] = None,
@@ -1565,16 +1578,7 @@ def _detail_repetition_segment_matches(
     matched: list[dict] = []
     seen_indices: set[int] = set()
     if not segments:
-        first_index = max(0, start_time // SEGMENT_TARGET_SECONDS)
-        last_index = max(first_index, end_time // SEGMENT_TARGET_SECONDS)
-        return [
-            {
-                "index": index,
-                "start_seconds": index * SEGMENT_TARGET_SECONDS,
-                "end_seconds": (index + 1) * SEGMENT_TARGET_SECONDS,
-            }
-            for index in range(first_index, last_index + 1)
-        ]
+        return _detail_time_based_segment_matches(start_time, end_time)
 
     for position, segment in enumerate(segments):
         try:
@@ -1597,7 +1601,7 @@ def _detail_repetition_segment_matches(
                 "end_seconds": end_seconds,
             })
             seen_indices.add(index)
-    return matched
+    return matched or _detail_time_based_segment_matches(start_time, end_time)
 
 
 def _detail_repetition_location(

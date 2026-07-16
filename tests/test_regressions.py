@@ -828,6 +828,48 @@ class TaskRegressionTests(unittest.TestCase):
 
         self.assertTrue(any("短句重複轉錄幻覺" in issue for issue in issues))
 
+    def test_transcript_integrity_rejects_segment_repetition_with_location(self):
+        from backend.tasks import _replace_transcript_section, _transcript_integrity_issues
+
+        repeated_segment = "\n".join(
+            f"[10:{index:02d}] **[發言者 A]**：因為我是結所以我領車流程確認。"
+            for index in range(31)
+        )
+        full_transcript = (
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：第一段正常。\n"
+            "[09:55] **[發言者 B]**：第一段結尾。\n\n"
+            "### 【第 2 段｜10:00 – 20:00】\n"
+            f"{repeated_segment}\n"
+        )
+        content = _replace_transcript_section(
+            "## 📋 一、討論摘要 (Discussion Summary)\n摘要",
+            full_transcript,
+        )
+
+        issues = _transcript_integrity_issues(content, full_transcript)
+
+        self.assertTrue(any("第 2 段｜10:00-20:00" in issue for issue in issues))
+        self.assertTrue(any("重複轉錄幻覺" in issue for issue in issues))
+
+    def test_detail_repeated_turn_warning_estimates_segment_when_metadata_has_no_range(self):
+        from backend.main import _detail_transcript_repeated_turn_diagnostic
+
+        transcript = "\n".join(
+            f"[31:{index:02d}] **[發言者 A]**：因為我是結所以我領車。"
+            for index in range(31)
+        )
+
+        diagnostic = _detail_transcript_repeated_turn_diagnostic(
+            transcript,
+            segments=[{"index": 0}, {"index": 1}],
+        )
+
+        self.assertIsNotNone(diagnostic)
+        self.assertIn("同一句連續重複 31 次：因為我是結所以我領車", diagnostic["warning"])
+        self.assertIn("第 4 段｜30:00-40:00", diagnostic["warning"])
+        self.assertEqual(diagnostic["segment_indices"], [3])
+
     def test_finalize_meeting_content_restores_transcript_and_validates(self):
         from backend.tasks import _finalize_meeting_content, _meeting_content_quality_issues
 
