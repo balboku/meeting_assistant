@@ -654,6 +654,11 @@
       background: rgba(247,118,142,0.08);
       color: var(--red);
     }
+    .source-media-player-status.loading {
+      border-color: rgba(122,162,247,0.38);
+      background: rgba(122,162,247,0.08);
+      color: var(--blue);
+    }
     .source-storage-summary {
       display: flex;
       flex-wrap: wrap;
@@ -1821,7 +1826,7 @@ function previewSourceMedia(url = '', mediaType = '', name = '', requestedMode =
       </div>
     </div>
     ${player}
-    <div class="source-media-player-status" role="status" aria-live="polite"></div>`;
+    <div class="source-media-player-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></div>`;
   preview.classList.add('show');
   enhanceSourceStoragePreviewPlayer(preview);
   preview.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -2832,7 +2837,7 @@ function renderAudioEvidence(meeting, requestedMode = null) {
       </div>
       ${renderSourceMediaFacts(meeting)}
       <video id="source-media-player" controls preload="metadata" playsinline src="${sourceUrl}"></video>
-      <div id="source-media-player-status" class="source-media-player-status" role="status" aria-live="polite"></div>
+      <div id="source-media-player-status" class="source-media-player-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></div>
     </div>`;
   }
   return `<div id="source-media-evidence" class="audio-evidence media-audio">
@@ -2842,7 +2847,7 @@ function renderAudioEvidence(meeting, requestedMode = null) {
     </div>
     ${renderSourceMediaFacts(meeting)}
     <audio id="source-media-player" controls preload="metadata" src="${sourceUrl}"></audio>
-    <div id="source-media-player-status" class="source-media-player-status" role="status" aria-live="polite"></div>
+    <div id="source-media-player-status" class="source-media-player-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></div>
   </div>`;
 }
 
@@ -2871,11 +2876,13 @@ function primeSourceVideoPreview(video) {
   }
 }
 
-function setSourceMediaPlayerStatus(statusEl, message = '', level = 'warning') {
+function setSourceMediaPlayerStatus(statusEl, message = '', level = 'warning', busy = false) {
   if (!statusEl) return;
   statusEl.textContent = message;
   statusEl.classList.toggle('show', Boolean(message));
   statusEl.classList.toggle('error', level === 'error' && Boolean(message));
+  statusEl.classList.toggle('loading', level === 'loading' && Boolean(message));
+  statusEl.setAttribute('aria-busy', String(Boolean(busy)));
 }
 
 function sourceMediaHasAudioFallbackAction(statusEl) {
@@ -2893,6 +2900,10 @@ function updateSourceMediaPlayerStatus(player, statusEl) {
       `${label}無法在瀏覽器中預覽，請使用「新分頁」或「下載」確認原始檔。`,
       'error'
     );
+    return;
+  }
+  if (Number(player.readyState || 0) < 1) {
+    setSourceMediaPlayerStatus(statusEl, `正在載入${label}預覽...`, 'loading', true);
     return;
   }
   if (isVideo && player.readyState >= 1 && (!player.videoWidth || !player.videoHeight)) {
