@@ -26,7 +26,7 @@ import ipaddress
 from pathlib import Path
 from datetime import datetime
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Any, Optional
 
 import aiofiles
 from dotenv import load_dotenv
@@ -1718,6 +1718,42 @@ def _add_detail_segment_issue(
         segment["issues"] = issues
 
 
+def _refresh_quality_report_review_segments(quality_report: dict) -> None:
+    """Summarize issue-bearing segments so clients can show review targets directly."""
+    if not isinstance(quality_report, dict):
+        return
+    review_segments: list[dict] = []
+    for position, segment in enumerate(quality_report.get("segments") or []):
+        if not isinstance(segment, dict):
+            continue
+        issues = [
+            str(issue).strip()
+            for issue in segment.get("issues") or []
+            if str(issue).strip()
+        ]
+        if not issues:
+            continue
+        try:
+            index = int(segment.get("index", position))
+        except (TypeError, ValueError):
+            index = position
+        item: dict[str, Any] = {
+            "index": index,
+            "label": f"第 {index + 1} 段",
+            "issues": list(dict.fromkeys(issues)),
+        }
+        for key in ("start_seconds", "end_seconds"):
+            try:
+                item[key] = int(segment[key])
+            except (KeyError, TypeError, ValueError):
+                pass
+        status = str(segment.get("status") or "").strip()
+        if status:
+            item["status"] = status
+        review_segments.append(item)
+    quality_report["review_segments"] = review_segments
+
+
 def _detail_section(text: str, heading_terms: tuple[str, ...], next_terms: tuple[str, ...]) -> str:
     heading_pattern = "|".join(re.escape(term) for term in heading_terms)
     next_pattern = "|".join(re.escape(term) for term in next_terms)
@@ -1898,6 +1934,9 @@ async def get_meeting_detail(meeting_id: int):
             "timestamp_count": quality_report.get("timestamp_count") or len(re.findall(r"\[\d{1,3}:[0-5]\d\]", transcript)),
             "speaker_labels": quality_report.get("speaker_labels") or [],
         })
+
+    if quality_report:
+        _refresh_quality_report_review_segments(quality_report)
 
     detail_quality_report = quality_report or record.get("quality_report")
     source_path = _optional_source_media_path(record)

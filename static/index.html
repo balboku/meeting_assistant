@@ -527,6 +527,36 @@
       cursor: pointer;
     }
     .quality-warning-jump:hover { border-color: var(--yellow); background: rgba(242, 213, 207, 0.16); }
+    .quality-review-segments {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .quality-review-title {
+      color: var(--yellow);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .quality-review-segment {
+      display: inline-flex; align-items: center; gap: 6px;
+      min-height: 30px;
+      padding: 5px 9px;
+      border: 1px solid rgba(242, 213, 207, 0.36);
+      border-radius: 6px;
+      background: rgba(242, 213, 207, 0.08);
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+      max-width: min(100%, 460px);
+    }
+    .quality-review-segment:hover { border-color: var(--yellow); background: rgba(242, 213, 207, 0.16); }
+    .quality-review-segment-label { color: var(--yellow); font-weight: 700; white-space: nowrap; }
+    .quality-review-segment-issue {
+      color: var(--text-mid);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .quality-actions {
       display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
       margin-top: 10px;
@@ -2781,12 +2811,40 @@ function renderQualityWarning(warning = '', segments = []) {
   return `<div class="quality-warning">${escapeHtml(warning)}${actions}</div>`;
 }
 
+function renderQualityReviewSegments(reviewSegments = []) {
+  const items = (reviewSegments || [])
+    .map(segment => {
+      const index = Number(segment?.index);
+      if (!Number.isInteger(index) || index < 0) return '';
+      const issues = (segment.issues || [])
+        .map(issue => String(issue || '').trim())
+        .filter(Boolean);
+      const issueText = issues[0] || '需複核';
+      const hasTimeRange = segment.start_seconds !== undefined || segment.end_seconds !== undefined;
+      const timeText = hasTimeRange
+        ? `${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)} · `
+        : '';
+      return `<button type="button" class="quality-review-segment" aria-describedby="detail-status" onclick="focusQualitySegment(${index})">
+        <span class="quality-review-segment-label">第 ${index + 1} 段</span>
+        <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
+      </button>`;
+    })
+    .filter(Boolean)
+    .join('');
+  if (!items) return '';
+  return `<div class="quality-review-segments" aria-label="需複核分段">
+    <span class="quality-review-title">需複核分段</span>
+    ${items}
+  </div>`;
+}
+
 function renderQualityReport(meeting) {
   const report = meeting.quality_report;
   if (!report) return '';
   const warningItems = report.warnings || [];
   const qualityActions = renderQualityActions(meeting, warningItems);
   const segmentItems = report.segments || [];
+  const reviewSegments = renderQualityReviewSegments(report.review_segments || []);
   const warnings = warningItems
     .map(warning => renderQualityWarning(warning, segmentItems))
     .join('');
@@ -2821,6 +2879,7 @@ function renderQualityReport(meeting) {
       <span class="meta-chip">${escapeHtml((report.speaker_labels || []).length)} 個發言者標籤</span>
       <span class="meta-chip">${escapeHtml(report.timestamp_count || 0)} 個時間戳</span>
     </div>
+    ${reviewSegments}
     ${warnings}
     ${qualityActions}
     <div class="segment-status-list">${segments}</div>
