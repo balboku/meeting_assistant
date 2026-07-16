@@ -5253,6 +5253,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function focusQualitySegment", html)
         self.assertIn("function renderQualityWarning", html)
         self.assertIn("function renderQualityReviewSegments", html)
+        self.assertIn("if (!knownIndices.size) return [];", html)
         self.assertIn("const matchers = [/第\\s*(\\d+)\\s*段/g, /\\bSegment\\s*#?\\s*(\\d+)\\b/gi];", html)
         self.assertIn("matchers.forEach(matcher => {", html)
         self.assertIn("addIndex(match[1]);", html)

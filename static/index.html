@@ -2825,6 +2825,7 @@ function qualityWarningSegmentIndices(warning = '', segments = []) {
   const knownIndices = new Set((segments || [])
     .map(segment => Number(segment.index))
     .filter(index => Number.isInteger(index) && index >= 0));
+  if (!knownIndices.size) return [];
   const indices = [];
   const text = String(warning || '');
   const addIndex = rawIndex => {
