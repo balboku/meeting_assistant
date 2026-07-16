@@ -202,43 +202,53 @@ def _source_media_type_from_metadata(record: dict[str, Any], quality_report: Any
     return None
 
 
-def _legacy_markdown_quality_warning_count(output_path: str) -> int:
+def _legacy_markdown_quality_warnings(output_path: str) -> list[str]:
     path = Path(output_path or "")
     if not path.is_file():
-        return 0
+        return []
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
-        return 0
+        return []
 
     summary = _markdown_section(text, ("討論摘要", "Discussion Summary"), ("最終決議", "Final Decisions"))
     decisions = _markdown_section(text, ("最終決議", "Final Decisions"), ("待辦事項", "Action Items"))
     actions = _markdown_section(text, ("待辦事項", "Action Items"), ("完整逐字稿", "Verbatim Transcript"))
     transcript = _markdown_section(text, ("完整逐字稿", "Verbatim Transcript"), ())
 
-    count = 0
+    warnings: list[str] = []
     summary_ids = _markdown_ids(summary, "D")
     decision_ids = _markdown_ids(decisions, "R")
     action_ids = _markdown_ids(actions, "A")
-    discussion_refs = _markdown_ids(decisions + "\n" + actions, "D")
-    decision_refs = _markdown_ids(actions, "R")
+    decision_discussion_refs = _markdown_ids(decisions, "D")
+    action_discussion_refs = _markdown_ids(actions, "D")
+    action_decision_refs = _markdown_ids(actions, "R")
 
     if summary.strip() and not summary_ids:
-        count += 1
+        warnings.append("摘要品質警示：討論摘要未使用 D 編號，較難與決議及待辦事項串聯")
     if decisions.strip() and not decision_ids:
-        count += 1
+        warnings.append("摘要品質警示：最終決議未使用 R 編號，較難被待辦事項引用")
     if actions.strip() and not action_ids:
-        count += 1
-    if discussion_refs - summary_ids:
-        count += 1
-    if decision_refs - decision_ids:
-        count += 1
-    if transcript and any(re.search(pattern, transcript, flags=re.IGNORECASE) for pattern in LEGACY_TRANSCRIPT_OMISSION_PATTERNS):
-        count += 1
-    if _has_repeated_transcript_turn_loop(transcript):
-        count += 1
+        warnings.append("摘要品質警示：待辦事項未使用 A 編號，後續追蹤較不清楚")
 
-    return count
+    missing_d_refs = sorted((decision_discussion_refs | action_discussion_refs) - summary_ids)
+    if missing_d_refs:
+        warnings.append(f"摘要品質警示：決議或待辦引用不存在的討論編號：{', '.join(missing_d_refs)}")
+
+    missing_r_refs = sorted(action_decision_refs - decision_ids)
+    if missing_r_refs:
+        warnings.append(f"摘要品質警示：待辦事項引用不存在的決議編號：{', '.join(missing_r_refs)}")
+
+    if transcript and any(re.search(pattern, transcript, flags=re.IGNORECASE) for pattern in LEGACY_TRANSCRIPT_OMISSION_PATTERNS):
+        warnings.append("逐字稿品質警示：舊紀錄逐字稿疑似省略或自動過濾內容")
+    if _has_repeated_transcript_turn_loop(transcript):
+        warnings.append("逐字稿品質警示：疑似連續重複轉錄")
+
+    return list(dict.fromkeys(warnings))
+
+
+def _legacy_markdown_quality_warning_count(output_path: str) -> int:
+    return len(_legacy_markdown_quality_warnings(output_path))
 
 
 def _transient_retry_delay_seconds() -> int:
@@ -1416,9 +1426,13 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             if not warning_preview:
                 warning_preview = segment_issue_previews[0]
     if not warning_count and record.get("quality_score") is None and not record.get("quality_label"):
-        warning_count = _legacy_markdown_quality_warning_count(str(record.get("output_path") or ""))
-        if warning_count:
-            warning_preview = f"舊紀錄需複核：已偵測到 {warning_count} 個品質警示"
+        legacy_warnings = _legacy_markdown_quality_warnings(str(record.get("output_path") or ""))
+        warning_count = len(legacy_warnings)
+        quality_warning_text = "\n".join(legacy_warnings)
+        if legacy_warnings:
+            warning_preview = legacy_warnings[0]
+            for warning in legacy_warnings:
+                add_review_segment_labels_from_text(warning)
     should_infer_legacy_review_segments = (
         not review_segment_labels
         and warning_count > 0

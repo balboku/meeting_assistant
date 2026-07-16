@@ -3215,7 +3215,10 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertIsNone(listed["quality_score"])
         self.assertIsNone(listed["quality_label"])
         self.assertGreaterEqual(listed["quality_warning_count"], 5)
-        self.assertIn("舊紀錄需複核", listed["quality_warning_preview"])
+        self.assertEqual(
+            listed["quality_warning_preview"],
+            "摘要品質警示：討論摘要未使用 D 編號，較難與決議及待辦事項串聯",
+        )
         self.assertEqual(listed["quality_review_segments"], ["第 1 段"])
         self.assertEqual(listed["quality_review_segment_count"], 1)
         self.assertEqual(listed["quality_review_segment_details"][0]["start_seconds"], 0)
@@ -5821,9 +5824,12 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('id="quality-rerun-summary-high-quality-button" class="quality-action" aria-describedby="detail-status" aria-busy="false"', html)
         self.assertIn('id="quality-rerun-full-button" class="quality-action" aria-describedby="detail-status" aria-busy="false"', html)
         self.assertIn("function renderCardQuality", html)
+        self.assertIn("function cardWarningTypeLabel", html)
         self.assertIn("function openDetailAndFocusSegment", html)
+        self.assertIn("function rerunSummaryFromCard", html)
         self.assertIn("event?.stopPropagation()", html)
         self.assertIn("await openDetail(id);", html)
+        self.assertIn("await rerunMeeting(id, null, true, false);", html)
         self.assertIn("window.requestAnimationFrame(focus)", html)
         self.assertIn("function isNeedsReviewRecord", html)
         self.assertIn("const reviewSegmentCount = Number(record?.quality_review_segment_count || 0);", html)
@@ -5855,6 +5861,13 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality_warning_preview", html)
         self.assertIn("quality_review_segments", html)
         self.assertIn("quality_review_segment_details", html)
+        self.assertIn("return '摘要警示';", html)
+        self.assertIn("return '逐字稿警示';", html)
+        self.assertIn("return '錄音警示';", html)
+        self.assertIn("const warningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0);", html)
+        self.assertIn("${escapeHtml(warningType)} ${warningCount}", html)
+        self.assertIn("onclick=\"rerunSummaryFromCard(event, ${recordId})\"", html)
+        self.assertIn("重整摘要：${escapeHtml(record?.title || `#${recordId}`)}", html)
         self.assertIn("const reviewSegmentDetails = (record?.quality_review_segment_details || [])", html)
         self.assertIn("const issues = (segment?.issues || [])", html)
         self.assertIn("const issueText = issues[0] ? `：${issues[0]}` : '';", html)
@@ -5880,7 +5893,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("card-quality-chip", html)
         self.assertIn("card-review-reason", html)
         self.assertIn("原因：${escapeHtml(visibleReason)}${escapeHtml(extraReasonText)}", html)
-        self.assertIn("需複核 ${warningCount}", html)
+        self.assertNotIn("需複核 ${warningCount}", html)
         self.assertIn("const reviewParam = reviewOnly ? '&needs_review=true' : ''", html)
         self.assertIn("/meetings/search?q=${encodeURIComponent(query)}&limit=100${reviewParam}", html)
         self.assertIn("/meetings?limit=50${reviewParam}", html)
@@ -6045,7 +6058,7 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('renderCardQuality')].join('\\n');
+const code = [grab('escapeHtml'), grab('clockText'), grab('cardWarningTypeLabel'), grab('renderCardQuality')].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 const label1 = '第 1 段';
@@ -6078,7 +6091,121 @@ if (!sandbox.result.includes('開啟會議並定位第 1 段 09:59-10:00')) {{
   console.error(sandbox.result);
   process.exit(7);
 }}
+if (!sandbox.result.includes('逐字稿警示 1')) {{
+  console.error(sandbox.result);
+  process.exit(8);
+}}
 console.log('grouped_card_reason_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_render_card_quality_labels_summary_warning_and_offers_summary_rerun(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function renderCardQuality'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [grab('escapeHtml'), grab('clockText'), grab('cardWarningTypeLabel'), grab('renderCardQuality')].join('\\n');
+const sandbox = {{}};
+vm.runInNewContext(code + `
+result = renderCardQuality({{
+  id: 22,
+  title: '摘要格式測試',
+  quality_warning_count: 3,
+  quality_warning_preview: '摘要品質警示：討論摘要未使用 D 編號'
+}});
+`, sandbox);
+if (!sandbox.result.includes('摘要警示 3')) {{
+  console.error(sandbox.result);
+  process.exit(4);
+}}
+if (!sandbox.result.includes('rerunSummaryFromCard(event, 22)')) {{
+  console.error(sandbox.result);
+  process.exit(5);
+}}
+if (sandbox.result.includes('分段：')) {{
+  console.error(sandbox.result);
+  process.exit(6);
+}}
+console.log('summary_card_quality_action_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_render_card_quality_keeps_audio_warning_label_when_segments_need_review(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function renderCardQuality'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [grab('escapeHtml'), grab('clockText'), grab('cardWarningTypeLabel'), grab('renderCardQuality')].join('\\n');
+const sandbox = {{}};
+vm.runInNewContext(code + `
+result = renderCardQuality({{
+  id: 43,
+  quality_warning_count: 1,
+  quality_warning_preview: '偵測到可能的爆音；原始媒體檔已保留，重要內容請抽查。',
+  quality_review_segment_details: [
+    {{ index: 7, label: '第 8 段', start_seconds: 4200, end_seconds: 4800, issues: ['疑似連續重複轉錄'] }}
+  ]
+}});
+`, sandbox);
+if (!sandbox.result.includes('錄音警示 1')) {{
+  console.error(sandbox.result);
+  process.exit(4);
+}}
+if (!sandbox.result.includes('分段：第 8 段 70:00-80:00')) {{
+  console.error(sandbox.result);
+  process.exit(5);
+}}
+if (sandbox.result.includes('逐字稿警示 1')) {{
+  console.error(sandbox.result);
+  process.exit(6);
+}}
+console.log('audio_card_quality_label_ok');
 """
         try:
             result = subprocess.run(

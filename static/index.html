@@ -2653,11 +2653,21 @@ function updateRecordingEstimate() {
   hint.textContent = `${prefix}${current}每小時預估容量：${formatBytes(bytesPerHour)}`;
 }
 
+function cardWarningTypeLabel(warningPreview = '', hasReviewSegments = false) {
+  const warning = String(warningPreview || '').trim();
+  if (warning.startsWith('摘要品質警示')) return '摘要警示';
+  if (/錄音|音檔|媒體|音量|爆音|靜音|聲道|取樣率/.test(warning)) return '錄音警示';
+  if (warning.startsWith('逐字稿品質警示') || hasReviewSegments) return '逐字稿警示';
+  return '品質警示';
+}
+
 function renderCardQuality(record) {
   const warningCount = Number(record?.quality_warning_count || 0);
   const score = record?.quality_score;
   const label = String(record?.quality_label || '').trim();
   const warningPreview = String(record?.quality_warning_preview || '').trim();
+  const recordId = Number(record?.id);
+  const hasRecordId = Number.isInteger(recordId) && recordId > 0;
   const reviewSegmentDetails = (record?.quality_review_segment_details || [])
     .map(segment => {
       const label = String(segment?.label || '').trim();
@@ -2699,14 +2709,17 @@ function renderCardQuality(record) {
     chips.push(`<span class="card-quality-chip needs-review">${escapeHtml(label)}</span>`);
   }
   if (warningCount > 0) {
-    chips.push(`<span class="card-quality-chip needs-review">需複核 ${warningCount}</span>`);
+    const warningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0);
+    chips.push(`<span class="card-quality-chip needs-review" title="${escapeHtml(warningPreview || warningType)}">${escapeHtml(warningType)} ${warningCount}</span>`);
+    if (warningPreview.startsWith('摘要品質警示') && hasRecordId) {
+      chips.push(`<button type="button" class="card-quality-chip needs-review card-quality-action" title="沿用逐字稿，只重新產生摘要、決議與待辦" aria-label="重整摘要：${escapeHtml(record?.title || `#${recordId}`)}" onclick="rerunSummaryFromCard(event, ${recordId})">↻ 重整摘要</button>`);
+    }
   }
   if (reviewSegments.length) {
     const segmentText = reviewSegments.length > 3
       ? `${reviewSegments.slice(0, 3).join('、')} 等 ${reviewSegments.length} 段`
       : reviewSegments.join('、');
-    const recordId = Number(record?.id);
-    const focusSegment = Number.isInteger(recordId) && recordId > 0
+    const focusSegment = hasRecordId
       ? reviewSegmentDetails.find(segment => Number.isInteger(segment.index) && segment.index >= 0)
       : null;
     if (focusSegment) {
@@ -2786,6 +2799,12 @@ async function openDetailAndFocusSegment(event, id, segmentIndex, fallbackStartS
   } else {
     setTimeout(focus, 0);
   }
+}
+
+async function rerunSummaryFromCard(event, id) {
+  event?.stopPropagation();
+  event?.preventDefault();
+  await rerunMeeting(id, null, true, false);
 }
 
 function setElementBusy(element, busy) {
