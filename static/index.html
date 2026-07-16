@@ -477,6 +477,17 @@
       min-width: 0;
       white-space: nowrap;
     }
+    .evidence-upload-status {
+      flex: 1 1 220px;
+      min-width: 0;
+      color: var(--text-dim);
+      font-size: 12px;
+      line-height: 1.5;
+      overflow-wrap: break-word;
+      word-break: keep-all;
+    }
+    .evidence-upload-status.success { color: var(--green); }
+    .evidence-upload-status.error { color: var(--red); }
     .quality-strip {
       width: 100%; max-width: 1280px; margin: 0 auto 22px;
       padding: 0 0 18px; border-bottom: 1px solid var(--border);
@@ -985,6 +996,9 @@
       .detail-actions .btn-secondary {
         flex: 1 1 160px;
         justify-content: center;
+      }
+      .evidence-upload-status {
+        flex-basis: 100%;
       }
       .source-storage-item {
         grid-template-columns: 1fr;
@@ -3045,24 +3059,37 @@ function closeRevisionHistory() {
 }
 
 // ── 上傳補充資料 ────────────────────────────────────────────────────
+function setEvidenceUploadStatus(message = '', level = 'info', busy = false) {
+  const status = document.getElementById('evidence-upload-status');
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle('success', level === 'success' && Boolean(message));
+  status.classList.toggle('error', level === 'error' && Boolean(message));
+  status.setAttribute('aria-busy', String(Boolean(busy)));
+}
+
 async function uploadEvidence(id, file) {
   if (!file) return;
 
   const allowed = ['.png', '.jpg', '.jpeg', '.webp', '.pdf', '.txt', '.md', '.csv', '.docx'];
   const suffix = file.name.includes('.') ? `.${file.name.split('.').pop().toLowerCase()}` : '';
   if (!allowed.includes(suffix)) {
+    setEvidenceUploadStatus(`不支援的補充資料格式：${suffix || '無副檔名'}`, 'error');
     alert(`不支援的補充資料格式：${suffix || '無副檔名'}`);
     return;
   }
   if (file.size > runtimeConfig.max_upload_bytes) {
+    setEvidenceUploadStatus(`補充資料過大，請上傳 ${formatBytes(runtimeConfig.max_upload_bytes)} 以內的檔案。`, 'error');
     alert(`檔案過大，請上傳 ${formatBytes(runtimeConfig.max_upload_bytes)} 以內的補充資料。`);
     return;
   }
 
   const button = document.getElementById('evidence-upload-button');
   const originalButtonText = button?.innerHTML;
+  setEvidenceUploadStatus(`正在分析補充資料：${file.name}`, 'info', true);
   if (button) {
     button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
     button.innerHTML = '<span class="loading-spinner"></span> 分析中';
   }
 
@@ -3077,11 +3104,14 @@ async function uploadEvidence(id, file) {
     if (!res.ok) throw new Error(await apiErrorMessage(res));
     await openDetail(id);
     await loadMeetings(document.getElementById('search-input').value.trim());
+    setEvidenceUploadStatus(`補充資料已完成分析：${file.name}`, 'success', false);
   } catch (err) {
+    setEvidenceUploadStatus(`補充資料分析失敗：${err.message}`, 'error', false);
     alert(`補充資料分析失敗：${err.message}`);
   } finally {
     if (button) {
       button.disabled = false;
+      button.setAttribute('aria-busy', 'false');
       button.innerHTML = originalButtonText || '📎 補充資料';
     }
   }
@@ -3161,11 +3191,12 @@ async function openDetail(id) {
             <button id="rerun-summary-button" class="btn-secondary" title="沿用逐字稿，只重新產生摘要、決議與待辦" onclick="rerunMeeting(${id}, null, true)">↻ 重整摘要</button>
             <button id="rerun-summary-high-quality-button" class="btn-secondary" title="沿用逐字稿，增加一次第二模型證據查核" onclick="rerunMeeting(${id}, null, true, true)">✓ 高品質重整</button>
             <button id="rerun-meeting-button" class="btn-secondary" onclick="rerunMeeting(${id})">🔁 重跑</button>
-            <button id="evidence-upload-button" class="btn-secondary" onclick="document.getElementById('evidence-file-input').click()">📎 補充資料</button>
+            <button id="evidence-upload-button" class="btn-secondary" aria-describedby="evidence-upload-status" aria-busy="false" onclick="document.getElementById('evidence-file-input').click()">📎 補充資料</button>
             <input id="evidence-file-input"
                    type="file"
                    accept=".png,.jpg,.jpeg,.webp,.pdf,.txt,.md,.csv,.docx"
                    onchange="uploadEvidence(${id}, this.files[0]); this.value='';">
+            <span id="evidence-upload-status" class="evidence-upload-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></span>
             <a href="${API}/meetings/${id}/export/docx" class="btn-primary" style="text-decoration: none; flex-shrink: 0;" download>📥 下載 4-QA-005 V01</a>
           </div>
         </div>

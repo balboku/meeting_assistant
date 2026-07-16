@@ -3729,8 +3729,19 @@ class UiRegressionTests(unittest.TestCase):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn('id="evidence-file-input"', html)
+        self.assertIn('id="evidence-upload-button" class="btn-secondary" aria-describedby="evidence-upload-status" aria-busy="false"', html)
+        self.assertIn('id="evidence-upload-status" class="evidence-upload-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"', html)
+        self.assertIn(".evidence-upload-status.success", html)
+        self.assertIn(".evidence-upload-status.error", html)
+        self.assertIn("function setEvidenceUploadStatus", html)
+        self.assertIn("status.setAttribute('aria-busy', String(Boolean(busy)));", html)
         self.assertIn("async function uploadEvidence", html)
         self.assertIn("/meetings/${id}/evidence", html)
+        self.assertIn("setEvidenceUploadStatus(`正在分析補充資料：${file.name}`, 'info', true)", html)
+        self.assertIn("setEvidenceUploadStatus(`補充資料已完成分析：${file.name}`, 'success', false)", html)
+        self.assertIn("setEvidenceUploadStatus(`補充資料分析失敗：${err.message}`, 'error', false)", html)
+        self.assertIn("button.setAttribute('aria-busy', 'true');", html)
+        self.assertIn("button.setAttribute('aria-busy', 'false');", html)
         self.assertIn("補充資料", html)
 
     def test_web_ui_can_rerun_a_meeting_from_detail_view(self):
