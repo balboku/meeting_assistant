@@ -1329,12 +1329,12 @@
       <div class="job-list" id="job-list" role="list" aria-label="任務清單" aria-live="polite" aria-busy="false">
         <div class="job-empty">載入任務中...</div>
       </div>
-      <div class="job-event-panel" id="job-event-panel">
+      <div class="job-event-panel" id="job-event-panel" role="region" aria-labelledby="job-event-heading" aria-live="polite" aria-hidden="true">
         <div class="job-event-title">
           <span id="job-event-heading">任務事件</span>
-          <button class="job-action" onclick="closeJobEvents()">關閉</button>
+          <button class="job-action" aria-label="關閉任務事件" onclick="closeJobEvents()">關閉</button>
         </div>
-        <div class="job-event-list" id="job-event-list"></div>
+        <div class="job-event-list" id="job-event-list" role="list" aria-label="任務事件清單" aria-busy="false"></div>
       </div>
     </div>
   </section>
@@ -1465,7 +1465,7 @@
       <div class="modal-title" id="revision-modal-title">版本紀錄</div>
       <button class="modal-close" aria-label="關閉版本紀錄" onclick="closeRevisionHistory()">×</button>
     </div>
-    <div id="revision-list" class="revision-list"></div>
+    <div id="revision-list" class="revision-list" role="list" aria-label="版本紀錄清單" aria-live="polite" aria-busy="false"></div>
   </div>
 </div>
 
@@ -3025,14 +3025,15 @@ async function saveTranscriptEdit() {
 async function openRevisionHistory() {
   if (!currentId) return;
   const list = document.getElementById('revision-list');
-  list.innerHTML = '<div class="detail-placeholder"><div class="loading-spinner"></div></div>';
+  setElementBusy(list, true);
+  list.innerHTML = '<div class="detail-placeholder" role="listitem"><div class="loading-spinner"></div></div>';
   openAccessibleModal(document.getElementById('revision-modal'));
   try {
     const res = await fetch(`${API}/meetings/${currentId}/revisions`);
     if (!res.ok) throw new Error(await apiErrorMessage(res));
     const revisions = await res.json();
     if (!revisions.length) {
-      list.innerHTML = '<div class="quality-warning">尚無人工修訂版本。</div>';
+      list.innerHTML = '<div class="quality-warning" role="listitem">尚無人工修訂版本。</div>';
       return;
     }
     list.innerHTML = revisions.map((revision, index) => {
@@ -3044,13 +3045,15 @@ async function openRevisionHistory() {
       const preview = revision.source === 'manual_transcript_edit'
         ? extractTranscriptMarkdown(revision.content)
         : extractEditableSummaryMarkdown(revision.content);
-      return `<details class="revision-item">
+      return `<details class="revision-item" role="listitem">
         <summary>${escapeHtml(label)} · ${escapeHtml(formatDate(revision.created_at))}</summary>
         <pre>${escapeHtml(preview)}</pre>
       </details>`;
     }).join('');
   } catch (err) {
-    list.innerHTML = `<div class="quality-warning">無法載入版本：${escapeHtml(err.message)}</div>`;
+    list.innerHTML = `<div class="quality-warning" role="listitem">無法載入版本：${escapeHtml(err.message)}</div>`;
+  } finally {
+    setElementBusy(list, false);
   }
 }
 
@@ -3310,7 +3313,7 @@ function renderJobEvent(event) {
   const detail = event.detail ? `<small>${escapeHtml(event.detail)}</small>` : '';
   const message = event.message ? `<small>${escapeHtml(event.message)}</small>` : '';
   return `
-    <div class="job-event">
+    <div class="job-event" role="listitem">
       <strong>${escapeHtml(jobEventLabel(event.event_type))}</strong>
       ${message}
       ${detail}
@@ -3349,7 +3352,12 @@ function updateJobDashboardSummary(jobs = []) {
 
 function closeJobEvents() {
   const panel = document.getElementById('job-event-panel');
-  if (panel) panel.classList.remove('show');
+  const list = document.getElementById('job-event-list');
+  if (panel) {
+    panel.classList.remove('show');
+    panel.setAttribute('aria-hidden', 'true');
+  }
+  setElementBusy(list, false);
 }
 
 async function loadJobEvents(jobId) {
@@ -3360,8 +3368,10 @@ async function loadJobEvents(jobId) {
 
   setJobDashboardExpanded(true);
   panel.classList.add('show');
+  panel.setAttribute('aria-hidden', 'false');
   heading.textContent = `任務事件 · ${jobId.slice(0, 12)}`;
-  list.innerHTML = '<div class="job-empty">載入事件中...</div>';
+  setElementBusy(list, true);
+  list.innerHTML = '<div class="job-empty" role="listitem">載入事件中...</div>';
 
   try {
     const res = await fetch(`${API}/jobs/${jobId}/events`);
@@ -3370,9 +3380,11 @@ async function loadJobEvents(jobId) {
     const events = data.events || [];
     list.innerHTML = events.length
       ? events.map(renderJobEvent).join('')
-      : '<div class="job-empty">尚無事件</div>';
+      : '<div class="job-empty" role="listitem">尚無事件</div>';
   } catch (err) {
-    list.innerHTML = `<div class="job-empty">事件載入失敗：${escapeHtml(err.message)}</div>`;
+    list.innerHTML = `<div class="job-empty" role="listitem">事件載入失敗：${escapeHtml(err.message)}</div>`;
+  } finally {
+    setElementBusy(list, false);
   }
 }
 
