@@ -1235,6 +1235,7 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         index: Optional[int] = None,
         start_seconds: Optional[int] = None,
         end_seconds: Optional[int] = None,
+        issues: Optional[list[str]] = None,
     ) -> None:
         cleaned = str(label or "").strip()
         if not cleaned:
@@ -1248,6 +1249,18 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             detail["start_seconds"] = start_seconds
         if end_seconds is not None:
             detail["end_seconds"] = end_seconds
+        clean_issues = [
+            str(issue).strip()
+            for issue in issues or []
+            if str(issue).strip()
+        ]
+        if clean_issues:
+            existing_issues = [
+                str(issue).strip()
+                for issue in detail.get("issues") or []
+                if str(issue).strip()
+            ]
+            detail["issues"] = list(dict.fromkeys([*existing_issues, *clean_issues]))
 
     def add_review_segment_labels_from_text(text: str) -> None:
         for index in review_segment_indices_from_text(text):
@@ -1280,11 +1293,17 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             segment_index = int_or_none(review_segment.get("index"))
             if not label:
                 label = review_segment_label(segment_index) if segment_index is not None else "分段"
+            segment_issues = [
+                str(issue).strip()
+                for issue in review_segment.get("issues") or []
+                if str(issue).strip()
+            ]
             add_review_segment_label(
                 label,
                 index=segment_index,
                 start_seconds=int_or_none(review_segment.get("start_seconds")),
                 end_seconds=int_or_none(review_segment.get("end_seconds")),
+                issues=segment_issues,
             )
         for segment in quality_report.get("segments") or []:
             if not isinstance(segment, dict):
@@ -1300,6 +1319,7 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
                         index=segment_index,
                         start_seconds=int_or_none(segment.get("start_seconds")),
                         end_seconds=int_or_none(segment.get("end_seconds")),
+                        issues=[issue_text],
                     )
         if segment_issue_previews:
             warning_count += len(segment_issue_previews)

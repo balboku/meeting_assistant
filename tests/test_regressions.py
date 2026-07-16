@@ -2737,10 +2737,21 @@ class SearchRegressionTests(unittest.TestCase):
             "第 2 段：疑似連續重複轉錄：同一句連續重複 31 次",
         )
         self.assertEqual(listed["quality_review_segments"], ["第 2 段"])
+        self.assertEqual(
+            listed["quality_review_segment_details"],
+            [
+                {
+                    "label": "第 2 段",
+                    "index": 1,
+                    "issues": ["疑似連續重複轉錄：同一句連續重複 31 次"],
+                },
+            ],
+        )
         self.assertEqual(listed["quality_review_segment_count"], 1)
         self.assertEqual(searched["quality_warning_count"], listed["quality_warning_count"])
         self.assertEqual(searched["quality_warning_preview"], listed["quality_warning_preview"])
         self.assertEqual(searched["quality_review_segments"], ["第 2 段"])
+        self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
         self.assertEqual(searched["quality_review_segment_count"], 1)
         self.assertEqual(issue_search["id"], meeting_id)
         self.assertEqual(issue_review_search["id"], meeting_id)
@@ -2779,8 +2790,8 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(
             listed["quality_review_segment_details"],
             [
-                {"label": "第 2 段", "index": 1, "start_seconds": 600, "end_seconds": 1200},
-                {"label": "第 4 段", "index": 3, "start_seconds": 1800, "end_seconds": 2400},
+                {"label": "第 2 段", "index": 1, "start_seconds": 600, "end_seconds": 1200, "issues": ["疑似連續重複轉錄"]},
+                {"label": "第 4 段", "index": 3, "start_seconds": 1800, "end_seconds": 2400, "issues": ["時間戳不連續"]},
             ],
         )
         self.assertEqual(listed["quality_review_segment_count"], 2)
@@ -5354,9 +5365,12 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality_review_segments", html)
         self.assertIn("quality_review_segment_details", html)
         self.assertIn("const reviewSegmentDetails = (record?.quality_review_segment_details || [])", html)
+        self.assertIn("const issues = (segment?.issues || [])", html)
+        self.assertIn("const issueText = issues[0] ? `：${issues[0]}` : '';", html)
+        self.assertIn("const reviewSegmentTitles = (reviewSegmentDetails.length ? reviewSegmentDetails : reviewSegments)", html)
         self.assertIn("clockText(segment.start_seconds)}-${clockText(segment.end_seconds)", html)
         self.assertIn("card-quality-chip needs-review review-segments", html)
-        self.assertIn("需複核分段：${escapeHtml(reviewSegments.join('、'))}", html)
+        self.assertIn("需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}", html)
         self.assertIn("分段：${escapeHtml(segmentText)}", html)
         self.assertIn("card-quality-chip", html)
         self.assertIn("card-review-reason", html)
