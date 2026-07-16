@@ -1303,7 +1303,7 @@
       </div>
     </div>
     <div class="job-dashboard-details" id="job-dashboard-details">
-      <div class="job-list" id="job-list">
+      <div class="job-list" id="job-list" role="list" aria-label="任務清單" aria-live="polite" aria-busy="false">
         <div class="job-empty">載入任務中...</div>
       </div>
       <div class="job-event-panel" id="job-event-panel">
@@ -1357,7 +1357,7 @@
   <div class="content">
 
     <!-- List -->
-    <div class="list-panel" id="list-panel">
+    <div class="list-panel" id="list-panel" aria-label="會議記錄清單" aria-live="polite" aria-busy="true">
       <div class="empty-state">
         <div class="icon">⏳</div>
         <p>載入中...</p>
@@ -2391,6 +2391,10 @@ function handleMeetingCardKeydown(event, id) {
   openDetail(id);
 }
 
+function setElementBusy(element, busy) {
+  element?.setAttribute('aria-busy', String(Boolean(busy)));
+}
+
 // ── 主要資料載入 ──────────────────────────────────────────────────
 async function loadMeetings(query = '') {
   const listEl = document.getElementById('list-panel');
@@ -2399,6 +2403,7 @@ async function loadMeetings(query = '') {
   if (activeMeetingsRequest) activeMeetingsRequest.abort();
   const requestController = new AbortController();
   activeMeetingsRequest = requestController;
+  setElementBusy(listEl, true);
   listEl.innerHTML = `<div class="empty-state"><div class="loading-spinner"></div></div>`;
   statusEl.textContent = query ? '搜尋中…' : '載入會議記錄中…';
 
@@ -2476,6 +2481,7 @@ async function loadMeetings(query = '') {
       </div>`;
     statusEl.textContent = `載入失敗：${err.message}`;
   } finally {
+    if (activeMeetingsRequest === requestController) setElementBusy(listEl, false);
     if (activeMeetingsRequest === requestController) activeMeetingsRequest = null;
   }
 }
@@ -3227,7 +3233,7 @@ function renderJobPill(job) {
     canDelete ? `<button class="job-action" onclick="deleteJob('${escapeHtml(jobId)}')">刪除</button>` : ''
   ].join('');
   return `
-    <div class="job-pill status-${statusClass}">
+    <div class="job-pill status-${statusClass}" role="listitem">
       <div class="job-pill-top">
         <strong title="${escapeHtml(jobId)}">${escapeHtml(jobId.slice(0, 12))}</strong>
         <span>${escapeHtml(jobStatusLabel(status))}</span>
@@ -3328,6 +3334,8 @@ async function loadJobs() {
   const jobList = document.getElementById('job-list');
   const summary = document.getElementById('job-dashboard-summary');
   if (!jobList) return;
+  setElementBusy(jobList, true);
+  if (summary) summary.textContent = '載入任務中...';
 
   try {
     const res = await fetch(`${API}/jobs?limit=20`);
@@ -3345,6 +3353,8 @@ async function loadJobs() {
   } catch (err) {
     jobList.innerHTML = `<div class="job-empty">任務載入失敗：${escapeHtml(err.message)}</div>`;
     if (summary) summary.textContent = '無法載入任務';
+  } finally {
+    setElementBusy(jobList, false);
   }
 }
 

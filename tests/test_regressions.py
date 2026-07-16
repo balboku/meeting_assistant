@@ -3445,11 +3445,17 @@ class UiRegressionTests(unittest.TestCase):
 
         self.assertIn('id="job-dashboard"', html)
         self.assertIn('id="job-dashboard-summary"', html)
+        self.assertIn('id="job-list" role="list" aria-label="任務清單" aria-live="polite" aria-busy="false"', html)
         self.assertIn('id="job-dashboard-toggle"', html)
         self.assertIn('aria-expanded="false"', html)
+        self.assertIn("function setElementBusy", html)
         self.assertIn("function toggleJobDashboard", html)
         self.assertIn("function updateJobDashboardSummary", html)
         self.assertIn("async function loadJobs", html)
+        self.assertIn("setElementBusy(jobList, true)", html)
+        self.assertIn("setElementBusy(jobList, false)", html)
+        self.assertIn("summary.textContent = '載入任務中...'", html)
+        self.assertIn('class="job-pill status-${statusClass}" role="listitem"', html)
         self.assertIn("/jobs?limit=20", html)
         self.assertIn("任務狀態", html)
 
@@ -4910,6 +4916,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn('id="search-status"', html)
+        self.assertIn('class="list-panel" id="list-panel" aria-label="會議記錄清單" aria-live="polite" aria-busy="true"', html)
+        self.assertIn("setElementBusy(listEl, true)", html)
+        self.assertIn("setElementBusy(listEl, false)", html)
         self.assertIn("AbortController", html)
         self.assertIn("找到 ${fetchedRecords.length} 筆${reviewOnly ? '需複核且相關' : '相關'}會議記錄", html)
         self.assertIn("function renderQualityReport", html)
