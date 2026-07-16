@@ -1562,7 +1562,7 @@
     </div>
 
     <!-- 進度 -->
-    <div class="progress-box" id="rec-progress-box">
+    <div class="progress-box" id="rec-progress-box" role="status" aria-live="polite" aria-atomic="true" aria-busy="false">
       <div class="progress-text">
         <div class="loading-spinner" style="width: 14px; height: 14px; border-width: 2px;"></div>
         <span id="rec-progress-msg">正在上傳...</span>
@@ -3834,6 +3834,7 @@ async function cancelActiveRecording() {
   const jobId = activeRecordingJobId;
   const closeBtn = document.getElementById('rec-close-btn');
   closeBtn.disabled = true;
+  setRecordingProgressBusy(true);
   recProgMsg.textContent = '正在取消處理...';
   try {
     await cancelBackendJob(jobId);
@@ -3848,6 +3849,7 @@ async function cancelActiveRecording() {
   activeRecordingProfileId = null;
   setRecordingConfigurationLocked(false);
   setRecordingSubmissionLocked(false);
+  setRecordingProgressBusy(false);
   recProgMsg.textContent = '已取消處理。';
   closeBtn.disabled = false;
   loadJobs();
@@ -3875,6 +3877,7 @@ function resetRecorder() {
   btnRecMic.textContent = '🎙 關閉麥克風';
   setRecordingResult();
   recProg.classList.remove('show');
+  setRecordingProgressBusy(false);
   recPreview.classList.remove('show');
   recPreview.srcObject = null;
   if (recIncludeMic) recIncludeMic.checked = true;
@@ -3938,6 +3941,10 @@ function setRecordingConfigurationLocked(locked) {
 
 function setRecordingSubmissionLocked(locked) {
   document.getElementById('rec-title').disabled = locked;
+}
+
+function setRecordingProgressBusy(busy) {
+  recProg?.setAttribute('aria-busy', String(Boolean(busy)));
 }
 
 function switchRecMode(mode) {
@@ -4327,6 +4334,7 @@ async function onRecordingStopped() {
     activeRecordingProfileId = null;
     setRecordingConfigurationLocked(false);
     setRecordingSubmissionLocked(false);
+    setRecordingProgressBusy(false);
     return;
   }
   if (file.size > runtimeConfig.max_upload_bytes) {
@@ -4338,11 +4346,13 @@ async function onRecordingStopped() {
     activeRecordingProfileId = null;
     setRecordingConfigurationLocked(false);
     setRecordingSubmissionLocked(false);
+    setRecordingProgressBusy(false);
     return;
   }
 
   setRecordingResult(`✅ ${completedModeLabel}完成！正在送出 AI 分析，請稍候...`);
   recProg.classList.add('show');
+  setRecordingProgressBusy(true);
   recProgMsg.textContent = `${completedModeLabel}完成（${formatBytes(file.size)}），正在上傳...`;
 
   // 關閉錄製按鈕，禁止關閉
@@ -4373,6 +4383,7 @@ async function onRecordingStopped() {
     activeRecordingProfileId = null;
     setRecordingConfigurationLocked(false);
     setRecordingSubmissionLocked(false);
+    setRecordingProgressBusy(false);
   }
 }
 
@@ -4399,6 +4410,7 @@ async function pollRecStatus(jobId) {
         activeRecordingProfileId = null;
         setRecordingConfigurationLocked(false);
         setRecordingSubmissionLocked(false);
+        setRecordingProgressBusy(false);
         setRecordingResult('✅ AI 分析完成！');
         recProgMsg.textContent = '✅ AI 分析完成！';
         document.getElementById('rec-close-btn').disabled = false;
@@ -4419,6 +4431,7 @@ async function pollRecStatus(jobId) {
         activeRecordingProfileId = null;
         setRecordingConfigurationLocked(false);
         setRecordingSubmissionLocked(false);
+        setRecordingProgressBusy(false);
         setRecordingResult('❌ AI 分析失敗', 'error');
         recProgMsg.textContent = `❌ AI 分析失敗：${data.message || '未知錯誤'}`;
         document.getElementById('rec-close-btn').disabled = false;
@@ -4431,6 +4444,7 @@ async function pollRecStatus(jobId) {
         activeRecordingProfileId = null;
         setRecordingConfigurationLocked(false);
         setRecordingSubmissionLocked(false);
+        setRecordingProgressBusy(false);
         setRecordingResult('已取消處理。', 'error');
         recProgMsg.textContent = '已取消處理。';
         document.getElementById('rec-close-btn').disabled = false;
