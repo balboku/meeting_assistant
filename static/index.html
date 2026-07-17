@@ -2710,11 +2710,19 @@ function updateRecordingEstimate() {
   hint.textContent = `${prefix}${current}每小時預估容量：${formatBytes(bytesPerHour)}`;
 }
 
-function cardWarningTypeLabel(warningPreview = '', hasReviewSegments = false) {
-  const warning = String(warningPreview || '').trim();
-  if (warning.startsWith('摘要品質警示')) return '摘要警示';
-  if (isRecordingQualityWarning(warning)) return '錄音警示';
-  if (warning.startsWith('逐字稿品質警示') || hasReviewSegments) return '逐字稿警示';
+function cardWarningTypeLabel(warningPreview = '', hasReviewSegments = false, warningText = '') {
+  const warning = [warningText, warningPreview]
+    .map(value => String(value || '').trim())
+    .filter(Boolean)
+    .join('\n');
+  const summaryWarning = warning.includes('摘要品質警示');
+  const recordingWarning = isRecordingQualityWarning(warning);
+  const transcriptWarning = warning.includes('逐字稿品質警示');
+  const typeCount = [summaryWarning, recordingWarning, transcriptWarning].filter(Boolean).length;
+  if (typeCount > 1) return '多重警示';
+  if (summaryWarning) return '摘要警示';
+  if (recordingWarning) return '錄音警示';
+  if (transcriptWarning || hasReviewSegments) return '逐字稿警示';
   return '品質警示';
 }
 
@@ -2817,7 +2825,7 @@ function renderCardQuality(record) {
     chips.push(`<span class="card-quality-chip needs-review">${escapeHtml(label)}</span>`);
   }
   if (warningCount > 0) {
-    const warningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0);
+    const warningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0, warningText);
     const hasSummaryWarning = warningText.includes('摘要品質警示');
     const hasRecordingWarning = isRecordingQualityWarning(warningText);
     hasTranscriptWarningChip = warningType === '逐字稿警示';

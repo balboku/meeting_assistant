@@ -6121,7 +6121,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("onclick=\"focusSourceMediaEvidence()\"", html)
         self.assertIn("openDetailAndFocusSourceMedia(event, ${recordId})", html)
         self.assertIn("檢查原始檔：${escapeHtml(record?.title || `#${recordId}`)}", html)
-        self.assertIn("const warningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0);", html)
+        self.assertIn("function cardWarningTypeLabel(warningPreview = '', hasReviewSegments = false, warningText = '')", html)
+        self.assertIn("if (typeCount > 1) return '多重警示';", html)
+        self.assertIn("const warningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0, warningText);", html)
         self.assertIn("const warningText = String(record?.quality_warning_text || warningPreview).trim();", html)
         self.assertIn("const hasSummaryWarning = warningText.includes('摘要品質警示');", html)
         self.assertIn("const hasRecordingWarning = isRecordingQualityWarning(warningText);", html)
@@ -6562,7 +6564,7 @@ result = renderCardQuality({{
   quality_warning_text: '偵測到可能的爆音；原始媒體檔已保留。\\\\n摘要品質警示：討論摘要未使用 D 編號'
 }});
 `, sandbox);
-if (!sandbox.result.includes('錄音警示 2')) {{
+if (!sandbox.result.includes('多重警示 2')) {{
   console.error(sandbox.result);
   process.exit(4);
 }}
