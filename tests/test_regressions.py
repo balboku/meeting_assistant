@@ -2911,7 +2911,7 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(listed["quality_warning_count"], 1)
         self.assertEqual(
             listed["quality_warning_preview"],
-            "第 2 段：疑似連續重複轉錄：同一句連續重複 31 次",
+            "第 2 段：疑似連續重複轉錄；同一句連續重複 31 次",
         )
         self.assertEqual(listed["quality_review_segments"], ["第 2 段"])
         self.assertEqual(
@@ -2920,13 +2920,13 @@ class SearchRegressionTests(unittest.TestCase):
                 {
                     "label": "第 2 段",
                     "index": 1,
-                    "issues": ["疑似連續重複轉錄：同一句連續重複 31 次"],
+                    "issues": ["疑似連續重複轉錄；同一句連續重複 31 次"],
                 },
             ],
         )
         self.assertEqual(
             listed["quality_review_segment_summary"],
-            "第 2 段：疑似連續重複轉錄：同一句連續重複 31 次",
+            "第 2 段：疑似連續重複轉錄；同一句連續重複 31 次",
         )
         self.assertEqual(listed["quality_review_segment_count"], 1)
         self.assertEqual(searched["quality_warning_count"], listed["quality_warning_count"])
@@ -3033,10 +3033,10 @@ class SearchRegressionTests(unittest.TestCase):
 ## 完整逐字稿 (Verbatim Transcript)
 ### 【第 7 段｜59:59 – 70:04】
 
-[70:01] **[發言者 A]**：因為我是結所以我領車
-[70:02] **[發言者 A]**：因為我是結所以我領車
-[70:03] **[發言者 A]**：因為我是結所以我領車
-[70:04] **[發言者 A]**：因為我是結所以我領車
+[70:01] **[發言者 A]**：因為我是結，所以我領車
+[70:02] **[發言者 A]**：因為我是結，所以我領車
+[70:03] **[發言者 A]**：因為我是結，所以我領車
+[70:04] **[發言者 A]**：因為我是結，所以我領車
 
 ### 【第 8 段｜70:01 – 80:01】
 
@@ -3054,7 +3054,10 @@ class SearchRegressionTests(unittest.TestCase):
                     "label": "第 7 段",
                     "start_seconds": 3599,
                     "end_seconds": 4204,
-                    "issues": ["分段疑似重複轉錄幻覺"],
+                    "issues": [
+                        "分段疑似重複轉錄幻覺",
+                        "疑似連續重複轉錄：同一句連續重複 4 次：因為我是結所以我領車（70:01-70:04）",
+                    ],
                 },
             ],
             "segments": [
@@ -3074,10 +3077,17 @@ class SearchRegressionTests(unittest.TestCase):
         listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
         searched = database.search_meetings("Legacy Transcript Repetition")[0]
 
-        expected = "第 7 段 59:59-70:04、第 8 段 70:01-80:01：疑似連續重複轉錄：同一句連續重複 4 次：因為我是結所以我領車（70:01-70:04）"
+        expected = "第 7 段 59:59-70:04、第 8 段 70:01-80:01：疑似連續重複轉錄；同一句連續重複 4 次：因為我是結所以我領車；重複時間：70:01-70:04"
         self.assertEqual(listed["quality_review_segment_summary"], expected)
         self.assertEqual(searched["quality_review_segment_summary"], expected)
         self.assertEqual(listed["quality_review_segment_count"], 2)
+        self.assertEqual(
+            listed["quality_review_segment_details"][0]["issues"],
+            [
+                "分段疑似重複轉錄幻覺",
+                "疑似連續重複轉錄；同一句連續重複 4 次：因為我是結所以我領車；重複時間：70:01-70:04",
+            ],
+        )
 
     def test_needs_review_filter_includes_review_segments_without_warnings(self):
         database, tmp_path = self._isolated_database()
@@ -3471,24 +3481,24 @@ class SearchRegressionTests(unittest.TestCase):
                     "index": 3,
                     "start_seconds": 1800,
                     "end_seconds": 2400,
-                    "issues": ["疑似連續重複轉錄：同一句連續重複 4 次：因為我是結所以我領車（31:00-31:03）"],
+                    "issues": ["疑似連續重複轉錄；同一句連續重複 4 次：因為我是結所以我領車；重複時間：31:00-31:03"],
                 },
                 {
                     "label": "第 6 段",
                     "index": 5,
                     "start_seconds": 3000,
                     "end_seconds": 3600,
-                    "issues": ["疑似連續重複轉錄：同一句連續重複 4 次：那這個分數就歸零（51:00-51:03）"],
+                    "issues": ["疑似連續重複轉錄；同一句連續重複 4 次：那這個分數就歸零；重複時間：51:00-51:03"],
                 },
             ],
         )
         self.assertIn("逐字稿品質警示：疑似連續重複轉錄", listed["quality_warning_text"])
         self.assertIn(
-            "需複核分段：第 4 段 30:00-40:00：疑似連續重複轉錄：同一句連續重複 4 次：因為我是結所以我領車（31:00-31:03）",
+            "需複核分段：第 4 段 30:00-40:00：疑似連續重複轉錄；同一句連續重複 4 次：因為我是結所以我領車；重複時間：31:00-31:03",
             listed["quality_warning_text"],
         )
         self.assertIn(
-            "第 6 段 50:00-60:00：疑似連續重複轉錄：同一句連續重複 4 次：那這個分數就歸零（51:00-51:03）",
+            "第 6 段 50:00-60:00：疑似連續重複轉錄；同一句連續重複 4 次：那這個分數就歸零；重複時間：51:00-51:03",
             listed["quality_warning_text"],
         )
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
@@ -3538,7 +3548,7 @@ class SearchRegressionTests(unittest.TestCase):
                     "index": 2,
                     "start_seconds": 1200,
                     "end_seconds": 1800,
-                    "issues": ["疑似連續重複轉錄：同一句連續重複 4 次：因為我是結所以我領車（21:00-21:03）"],
+                    "issues": ["疑似連續重複轉錄；同一句連續重複 4 次：因為我是結所以我領車；重複時間：21:00-21:03"],
                 },
             ],
         )

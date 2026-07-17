@@ -1705,8 +1705,8 @@ def _detail_transcript_repeated_turn_diagnostic(
         location_text = f"；{location}" if location else ""
         descriptions.append(f"同一句連續重複 {run_length} 次：{preview}{location_text}")
         issue = (
-            f"疑似連續重複轉錄：同一句連續重複 {run_length} 次：{preview}"
-            f"（{_detail_format_clock(min(timestamps))}-{_detail_format_clock(max(timestamps))}）"
+            f"疑似連續重複轉錄；同一句連續重複 {run_length} 次：{preview}"
+            f"；重複時間：{_detail_format_clock(min(timestamps))}-{_detail_format_clock(max(timestamps))}"
         )
         for match in segment_matches:
             key = (int(match["index"]), issue)

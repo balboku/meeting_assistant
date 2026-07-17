@@ -100,6 +100,53 @@ def _quality_review_issue_priority(issue: str) -> tuple[int, int]:
     return (score, len(cleaned))
 
 
+def _normalize_quality_review_issue_text(issue: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(issue or "").strip())
+    if not cleaned:
+        return ""
+
+    repeated = re.match(
+        r"^疑似連續重複轉錄[：:]\s*"
+        r"同一句連續重複\s*(?P<count>\d+)\s*次"
+        r"(?:[：:]\s*(?P<phrase>.*?))?"
+        r"(?:[（(]\s*(?P<start>\d{1,3}:[0-5]\d)\s*[-–—~至到]\s*"
+        r"(?P<end>\d{1,3}:[0-5]\d)\s*[）)])?$",
+        cleaned,
+    )
+    if repeated:
+        normalized = f"疑似連續重複轉錄；同一句連續重複 {repeated.group('count')} 次"
+        phrase = str(repeated.group("phrase") or "").strip()
+        if phrase:
+            phrase = re.sub(r"[，,。．.；;：:、]+", "", phrase).strip()
+            normalized += f"：{phrase}"
+        if repeated.group("start") and repeated.group("end"):
+            normalized += f"；重複時間：{repeated.group('start')}-{repeated.group('end')}"
+        return normalized
+
+    return cleaned
+
+
+def _quality_review_issue_dedupe_key(issue: str) -> str:
+    cleaned = _normalize_quality_review_issue_text(issue)
+    repeated = re.match(
+        r"^疑似連續重複轉錄；同一句連續重複\s*(?P<count>\d+)\s*次"
+        r"(?:[：:]\s*(?P<phrase>.*?))?"
+        r"(?:；重複時間[：:]\s*(?P<start>\d{1,3}:[0-5]\d)\s*[-–—~至到]\s*"
+        r"(?P<end>\d{1,3}:[0-5]\d))?$",
+        cleaned,
+    )
+    if repeated:
+        phrase = re.sub(r"[\s，,。．.；;：:、]+", "", str(repeated.group("phrase") or ""))
+        return "|".join([
+            "repeat",
+            repeated.group("count") or "",
+            phrase,
+            repeated.group("start") or "",
+            repeated.group("end") or "",
+        ])
+    return cleaned
+
+
 def _quality_review_segment_summary(details: list[dict[str, Any]], limit: int = 3) -> Optional[str]:
     if not details:
         return None
@@ -128,20 +175,27 @@ def _quality_review_segment_summary(details: list[dict[str, Any]], limit: int = 
 
     def preferred_issue(detail: dict[str, Any]) -> str:
         issues = [
-            str(issue).strip()
+            _normalize_quality_review_issue_text(str(issue).strip())
             for issue in detail.get("issues") or []
-            if str(issue).strip()
+            if _normalize_quality_review_issue_text(str(issue).strip())
         ]
         if not issues:
             return ""
         return max(issues, key=_quality_review_issue_priority)
 
-    grouped_segments: dict[str, list[str]] = {}
+    grouped_segments: dict[str, dict[str, Any]] = {}
     for detail in details[:limit]:
-        grouped_segments.setdefault(preferred_issue(detail), []).append(segment_text(detail))
+        issue = preferred_issue(detail)
+        key = _quality_review_issue_dedupe_key(issue)
+        group = grouped_segments.setdefault(key, {"issue": issue, "segments": []})
+        if issue and _quality_review_issue_priority(issue)[0] > _quality_review_issue_priority(group["issue"])[0]:
+            group["issue"] = issue
+        group["segments"].append(segment_text(detail))
 
     summaries: list[str] = []
-    for issue, segments in grouped_segments.items():
+    for group in grouped_segments.values():
+        issue = group["issue"]
+        segments = group["segments"]
         segment_list = "、".join(segments)
         summaries.append(f"{segment_list}{f'：{issue}' if issue else ''}")
     if len(details) > limit:
@@ -272,6 +326,7 @@ def _repeated_transcript_turn_review_segments(
     def preview_text(value: str, max_chars: int = 24) -> str:
         cleaned = re.sub(r"\s+", " ", str(value or "").strip())
         cleaned = cleaned.strip("：:，。,.、；;！!？?")
+        cleaned = re.sub(r"[，,。．.；;：:、]+", "", cleaned)
         return cleaned[:max_chars]
 
     for line in (transcript or "").splitlines():
@@ -355,8 +410,8 @@ def _repeated_transcript_turn_review_segments(
         preview = str(run.get("text") or "").strip()
         preview_part = f"：{preview}" if preview else ""
         issue = (
-            f"疑似連續重複轉錄：同一句連續重複 {run_length} 次"
-            f"{preview_part}（{_format_clock(start_time)}-{_format_clock(end_time)}）"
+            f"疑似連續重複轉錄；同一句連續重複 {run_length} 次"
+            f"{preview_part}；重複時間：{_format_clock(start_time)}-{_format_clock(end_time)}"
         )
         for match in segment_matches(timestamps):
             index = int(match["index"])
@@ -1605,24 +1660,32 @@ def apply_quality_preview_fields(
         if end_seconds is not None:
             detail["end_seconds"] = end_seconds
         clean_issues = [
-            str(issue).strip()
+            _normalize_quality_review_issue_text(str(issue).strip())
             for issue in issues or []
-            if str(issue).strip()
+            if _normalize_quality_review_issue_text(str(issue).strip())
         ]
         if clean_issues:
             existing_issues = [
-                str(issue).strip()
+                _normalize_quality_review_issue_text(str(issue).strip())
                 for issue in detail.get("issues") or []
-                if str(issue).strip()
+                if _normalize_quality_review_issue_text(str(issue).strip())
             ]
-            detail["issues"] = list(dict.fromkeys([*existing_issues, *clean_issues]))
+            merged_issues: list[str] = []
+            seen_issue_keys: set[str] = set()
+            for issue in [*existing_issues, *clean_issues]:
+                key = _quality_review_issue_dedupe_key(issue)
+                if key in seen_issue_keys:
+                    continue
+                merged_issues.append(issue)
+                seen_issue_keys.add(key)
+            detail["issues"] = merged_issues
 
     def add_review_segment_labels_from_text(text: str) -> None:
         for detail in review_segment_details_from_text(text):
             detail_issues = [
-                str(issue).strip()
+                _normalize_quality_review_issue_text(str(issue).strip())
                 for issue in detail.get("issues") or []
-                if str(issue).strip()
+                if _normalize_quality_review_issue_text(str(issue).strip())
             ] or ["品質警示提及此分段"]
             add_review_segment_label(
                 detail.get("label") or review_segment_label(int(detail["index"])),
@@ -1661,9 +1724,9 @@ def apply_quality_preview_fields(
             if not label:
                 label = review_segment_label(segment_index) if segment_index is not None else "分段"
             segment_issues = [
-                str(issue).strip()
+                _normalize_quality_review_issue_text(str(issue).strip())
                 for issue in review_segment.get("issues") or []
-                if str(issue).strip()
+                if _normalize_quality_review_issue_text(str(issue).strip())
             ]
             for issue_text in segment_issues:
                 review_segment_issue_previews.append(f"{label}：{issue_text}")
@@ -1682,7 +1745,7 @@ def apply_quality_preview_fields(
                 known_segment_indices.add(segment_index)
             segment_label = review_segment_label(segment_index) if segment_index is not None else "分段"
             for issue in segment.get("issues") or []:
-                issue_text = str(issue).strip()
+                issue_text = _normalize_quality_review_issue_text(str(issue).strip())
                 if issue_text:
                     segment_issue_previews.append(f"{segment_label}：{issue_text}")
                     add_review_segment_label(
@@ -1706,9 +1769,9 @@ def apply_quality_preview_fields(
                 add_review_segment_labels_from_text(warning)
     for detail in _legacy_markdown_repeated_turn_review_segments(str(record.get("output_path") or "")):
         segment_issues = [
-            str(issue).strip()
+            _normalize_quality_review_issue_text(str(issue).strip())
             for issue in detail.get("issues") or []
-            if str(issue).strip()
+            if _normalize_quality_review_issue_text(str(issue).strip())
         ]
         add_review_segment_label(
             detail.get("label") or review_segment_label(int(detail["index"])),
