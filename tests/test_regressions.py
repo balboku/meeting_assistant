@@ -3366,24 +3366,24 @@ class SearchRegressionTests(unittest.TestCase):
                     "index": 3,
                     "start_seconds": 1800,
                     "end_seconds": 2400,
-                    "issues": ["疑似連續重複轉錄：同一句連續重複 4 次（31:00-31:03）"],
+                    "issues": ["疑似連續重複轉錄：同一句連續重複 4 次：因為我是結所以我領車（31:00-31:03）"],
                 },
                 {
                     "label": "第 6 段",
                     "index": 5,
                     "start_seconds": 3000,
                     "end_seconds": 3600,
-                    "issues": ["疑似連續重複轉錄：同一句連續重複 4 次（51:00-51:03）"],
+                    "issues": ["疑似連續重複轉錄：同一句連續重複 4 次：那這個分數就歸零（51:00-51:03）"],
                 },
             ],
         )
         self.assertIn("逐字稿品質警示：疑似連續重複轉錄", listed["quality_warning_text"])
         self.assertIn(
-            "需複核分段：第 4 段 30:00-40:00：疑似連續重複轉錄：同一句連續重複 4 次（31:00-31:03）",
+            "需複核分段：第 4 段 30:00-40:00：疑似連續重複轉錄：同一句連續重複 4 次：因為我是結所以我領車（31:00-31:03）",
             listed["quality_warning_text"],
         )
         self.assertIn(
-            "第 6 段 50:00-60:00：疑似連續重複轉錄：同一句連續重複 4 次（51:00-51:03）",
+            "第 6 段 50:00-60:00：疑似連續重複轉錄：同一句連續重複 4 次：那這個分數就歸零（51:00-51:03）",
             listed["quality_warning_text"],
         )
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
@@ -3433,7 +3433,7 @@ class SearchRegressionTests(unittest.TestCase):
                     "index": 2,
                     "start_seconds": 1200,
                     "end_seconds": 1800,
-                    "issues": ["疑似連續重複轉錄：同一句連續重複 4 次（21:00-21:03）"],
+                    "issues": ["疑似連續重複轉錄：同一句連續重複 4 次：因為我是結所以我領車（21:00-21:03）"],
                 },
             ],
         )

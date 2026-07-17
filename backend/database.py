@@ -233,6 +233,7 @@ def _repeated_transcript_turn_review_segments(
     )
     runs: list[dict[str, Any]] = []
     current_text = ""
+    current_preview = ""
     current_run = 0
     current_timestamps: list[int] = []
 
@@ -240,19 +241,27 @@ def _repeated_transcript_turn_review_segments(
         if current_run <= limit or not current_timestamps:
             return
         runs.append({
+            "text": current_preview,
             "run": current_run,
             "timestamps": list(current_timestamps),
         })
+
+    def preview_text(value: str, max_chars: int = 24) -> str:
+        cleaned = re.sub(r"\s+", " ", str(value or "").strip())
+        cleaned = cleaned.strip("：:，。,.、；;！!？?")
+        return cleaned[:max_chars]
 
     for line in (transcript or "").splitlines():
         match = pattern.search(line)
         if not match:
             continue
+        raw_text = match.group("text")
         normalized = _normalize_turn_text(match.group("text"))
         timestamp = int(match.group("minutes")) * 60 + int(match.group("seconds"))
         if len(normalized) < 8:
             flush_current()
             current_text = ""
+            current_preview = ""
             current_run = 0
             current_timestamps = []
             continue
@@ -262,6 +271,7 @@ def _repeated_transcript_turn_review_segments(
         else:
             flush_current()
             current_text = normalized
+            current_preview = preview_text(raw_text)
             current_run = 1
             current_timestamps = [timestamp]
     flush_current()
@@ -277,9 +287,11 @@ def _repeated_transcript_turn_review_segments(
         start_time = min(timestamps)
         end_time = max(timestamps)
         run_length = int(run.get("run") or 0)
+        preview = str(run.get("text") or "").strip()
+        preview_part = f"：{preview}" if preview else ""
         issue = (
             f"疑似連續重複轉錄：同一句連續重複 {run_length} 次"
-            f"（{_format_clock(start_time)}-{_format_clock(end_time)}）"
+            f"{preview_part}（{_format_clock(start_time)}-{_format_clock(end_time)}）"
         )
         first_index = max(0, start_time // segment_seconds)
         last_index = max(first_index, end_time // segment_seconds)
