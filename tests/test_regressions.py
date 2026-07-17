@@ -3484,6 +3484,11 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(listed["quality_review_segment_details"][0]["start_seconds"], 0)
         self.assertEqual(listed["quality_review_segment_details"][0]["end_seconds"], 600)
         self.assertTrue(any("疑似連續重複轉錄" in issue for issue in listed["quality_review_segment_details"][0]["issues"]))
+        self.assertIn(
+            "逐字稿品質警示：疑似連續重複轉錄；問題位置：第 1 段 00:00-10:00：疑似連續重複轉錄；同一句連續重複 4 次：這一句不應該連續重複；重複時間：00:00-00:03",
+            listed["quality_warning_text"],
+        )
+        self.assertNotIn("逐字稿品質警示：疑似連續重複轉錄\n", listed["quality_warning_text"])
         self.assertEqual(searched["quality_warning_count"], listed["quality_warning_count"])
         self.assertEqual(searched["quality_warning_preview"], listed["quality_warning_preview"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])

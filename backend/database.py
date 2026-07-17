@@ -564,8 +564,20 @@ def _legacy_markdown_quality_warnings(output_path: str) -> list[str]:
 
     if transcript and any(re.search(pattern, transcript, flags=re.IGNORECASE) for pattern in LEGACY_TRANSCRIPT_OMISSION_PATTERNS):
         warnings.append("逐字稿品質警示：舊紀錄逐字稿疑似省略或自動過濾內容")
-    if _has_repeated_transcript_turn_loop(transcript):
-        warnings.append("逐字稿品質警示：疑似連續重複轉錄")
+    repeated_review_segments = _repeated_transcript_turn_review_segments(
+        transcript,
+        segments=_transcript_segment_spans(transcript),
+    )
+    if repeated_review_segments:
+        review_summary = _quality_review_segment_summary(repeated_review_segments, limit=5)
+        if review_summary:
+            warnings.append(
+                "逐字稿品質警示：疑似連續重複轉錄；"
+                f"問題位置：{review_summary}。"
+                "建議重跑上述分段或複核相關內容。"
+            )
+        else:
+            warnings.append("逐字稿品質警示：疑似連續重複轉錄")
 
     return list(dict.fromkeys(warnings))
 
