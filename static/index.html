@@ -1074,6 +1074,19 @@
       color: var(--bg);
       background: var(--blue);
     }
+    .timecode-button.transcript-timecode-highlight {
+      color: var(--bg);
+      background: var(--yellow);
+      border-color: var(--yellow);
+      box-shadow: 0 0 0 3px rgba(242, 213, 207, 0.18);
+    }
+    .transcript-focus-highlight {
+      outline: 2px solid rgba(242, 213, 207, 0.72);
+      outline-offset: 4px;
+      border-radius: 6px;
+      background: rgba(242, 213, 207, 0.08);
+      transition: background 0.18s ease, outline-color 0.18s ease;
+    }
     .document-view {
       width: 100%;
       max-width: 1280px;
@@ -1846,6 +1859,7 @@ let debounceTimer = null;
 let activeMeetingsRequest = null;
 let currentId = null;
 let currentMeetingData = null;
+let transcriptFocusHighlightTimer = null;
 let runtimeConfig = {
   model: '',
   max_upload_mb: 500,
@@ -3259,6 +3273,15 @@ function parseClockSeconds(value = '') {
   return Number(match[1]) * 60 + Number(match[2]);
 }
 
+function reviewIssueFocusSeconds(issues = [], fallbackSeconds = null) {
+  const issueText = preferredReviewIssue(issues) || (issues || []).join(' ');
+  const match = String(issueText || '').match(/(?:重複時間|重複時段|問題時間|異常時間)[：:]\s*(\d{1,3}:[0-5]\d)/);
+  const issueSeconds = parseClockSeconds(match?.[1]);
+  if (issueSeconds !== null) return issueSeconds;
+  const seconds = Number(fallbackSeconds);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+}
+
 function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegments = []) {
   const knownIndices = new Set((segments || [])
     .map(segment => Number(segment.index))
@@ -3273,12 +3296,14 @@ function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegment
     if (!Number.isInteger(index) || index < 0) return;
     const startSeconds = Number(sourceSegment?.start_seconds);
     const hasStartSeconds = Number.isFinite(startSeconds) && startSeconds >= 0;
-    if (knownIndices.size && !knownIndices.has(index) && !hasStartSeconds) return;
-    if (!knownIndices.size && !hasStartSeconds) return;
+    const focusSeconds = reviewIssueFocusSeconds(sourceSegment?.issues || [], hasStartSeconds ? startSeconds : null);
+    const hasFocusSeconds = focusSeconds !== null;
+    if (knownIndices.size && !knownIndices.has(index) && !hasFocusSeconds) return;
+    if (!knownIndices.size && !hasFocusSeconds) return;
     if (targets.some(target => target.index === index)) return;
     targets.push({
       index,
-      start_seconds: hasStartSeconds ? startSeconds : null,
+      start_seconds: hasFocusSeconds ? focusSeconds : null,
     });
   };
   const addIndex = (rawIndex, sourceText = '') => {
@@ -3354,6 +3379,109 @@ function reviewSegmentIssueSummary(reviewSegments = [], limit = 5) {
   return summaries.join('；');
 }
 
+function clearTranscriptFocusHighlights() {
+  if (transcriptFocusHighlightTimer) {
+    clearTimeout(transcriptFocusHighlightTimer);
+    transcriptFocusHighlightTimer = null;
+  }
+  document.querySelectorAll('.transcript-focus-highlight, .transcript-timecode-highlight')
+    .forEach(element => {
+      element.classList.remove('transcript-focus-highlight');
+      element.classList.remove('transcript-timecode-highlight');
+    });
+}
+
+function transcriptSegmentHeadingIndex(text = '') {
+  const match = String(text || '').match(/第\s*(\d+)\s*段|Segment\s*#?\s*(\d+)/i);
+  const raw = Number(match?.[1] || match?.[2]);
+  return Number.isInteger(raw) && raw > 0 ? raw - 1 : null;
+}
+
+function transcriptSegmentHeadings() {
+  return Array.from(document.querySelectorAll('.md-content h3, .md-content h4, .md-content h5, .md-content h6'));
+}
+
+function findTranscriptSegmentHeading(segmentIndex) {
+  const index = Number(segmentIndex);
+  if (!Number.isInteger(index) || index < 0) return null;
+  return transcriptSegmentHeadings()
+    .find(heading => transcriptSegmentHeadingIndex(heading.textContent) === index) || null;
+}
+
+function transcriptSegmentBodyElements(heading) {
+  if (!heading) return [];
+  const elements = [];
+  let node = heading.nextElementSibling;
+  while (node && !/^H[3-6]$/i.test(node.tagName || '')) {
+    elements.push(node);
+    node = node.nextElementSibling;
+  }
+  return elements;
+}
+
+function findTranscriptTimecodeButton(segmentIndex, seconds = null) {
+  const heading = findTranscriptSegmentHeading(segmentIndex);
+  const scopedElements = heading ? transcriptSegmentBodyElements(heading) : [];
+  const scopedButtons = scopedElements.flatMap(element => Array.from(element.querySelectorAll?.('.timecode-button[data-seconds]') || []));
+  const allButtons = Array.from(document.querySelectorAll('.md-content .timecode-button[data-seconds]'));
+  const buttons = scopedButtons.length ? scopedButtons : allButtons;
+  if (!buttons.length && !allButtons.length) return null;
+
+  const targetSeconds = Number(seconds);
+  if (!Number.isFinite(targetSeconds) || targetSeconds < 0) return buttons[0] || allButtons[0] || null;
+
+  const nearestMatch = candidateButtons => {
+    let nearestButton = null;
+    let nearestDistance = Infinity;
+    let nearestPreviousButton = null;
+    let nearestPreviousDistance = Infinity;
+    candidateButtons.forEach(button => {
+      const buttonSeconds = Number(button.dataset.seconds);
+      if (!Number.isFinite(buttonSeconds)) return;
+      const distance = Math.abs(buttonSeconds - targetSeconds);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestButton = button;
+      }
+      const previousDistance = targetSeconds - buttonSeconds;
+      if (previousDistance >= -0.75 && previousDistance < nearestPreviousDistance) {
+        nearestPreviousDistance = previousDistance;
+        nearestPreviousButton = button;
+      }
+    });
+    if (nearestPreviousButton && nearestPreviousDistance <= 120) {
+      return { button: nearestPreviousButton, distance: nearestPreviousDistance };
+    }
+    if (nearestButton && nearestDistance <= 120) {
+      return { button: nearestButton, distance: nearestDistance };
+    }
+    return null;
+  };
+
+  const scopedMatch = nearestMatch(scopedButtons);
+  const globalMatch = scopedButtons.length ? nearestMatch(allButtons) : null;
+  if (globalMatch && (!scopedMatch || globalMatch.distance + 0.25 < scopedMatch.distance)) {
+    return globalMatch.button;
+  }
+  return scopedMatch?.button || globalMatch?.button || null;
+}
+
+function focusTranscriptLocation(segmentIndex, seconds = null) {
+  const heading = findTranscriptSegmentHeading(segmentIndex);
+  const timecodeButton = findTranscriptTimecodeButton(segmentIndex, seconds);
+  const row = timecodeButton?.closest('p, li, blockquote, td, th') || null;
+  const target = row || timecodeButton || heading;
+  if (!target) return false;
+
+  clearTranscriptFocusHighlights();
+  target.classList.add('transcript-focus-highlight');
+  timecodeButton?.classList.add('transcript-timecode-highlight');
+  target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  (timecodeButton || target)?.focus?.({ preventScroll: true });
+  transcriptFocusHighlightTimer = setTimeout(clearTranscriptFocusHighlights, 5200);
+  return true;
+}
+
 function focusQualitySegment(segmentIndex, fallbackStartSeconds = null) {
   const index = Number(segmentIndex);
   const button = document.getElementById(`rerun-segment-${index}`);
@@ -3361,8 +3489,14 @@ function focusQualitySegment(segmentIndex, fallbackStartSeconds = null) {
   const hasFallbackSeconds = Number.isFinite(fallbackSeconds) && fallbackSeconds >= 0;
   if (!button) {
     const mediaCued = hasFallbackSeconds && cueSourceMedia(fallbackSeconds);
+    const transcriptCued = focusTranscriptLocation(index, hasFallbackSeconds ? fallbackSeconds : null);
     if (mediaCued) {
-      setDetailStatus(`已定位第 ${index + 1} 段，原始檔已跳到 ${clockText(fallbackSeconds)}；此舊紀錄沒有可重跑的分段控制`);
+      const transcriptHint = transcriptCued ? '，逐字稿也已定位' : '';
+      setDetailStatus(`已定位第 ${index + 1} 段，原始檔已跳到 ${clockText(fallbackSeconds)}${transcriptHint}；此舊紀錄沒有可重跑的分段控制`);
+      return;
+    }
+    if (transcriptCued) {
+      setDetailStatus(`已定位第 ${index + 1} 段逐字稿；此舊紀錄沒有可重跑的分段控制`);
       return;
     }
     setDetailStatus(`找不到第 ${index + 1} 段的重跑控制`);
@@ -3378,10 +3512,14 @@ function focusQualitySegment(segmentIndex, fallbackStartSeconds = null) {
   const hasStartSeconds = Number.isFinite(startSeconds) && startSeconds >= 0;
   const mediaCued = hasStartSeconds && cueSourceMedia(startSeconds);
   const mediaHint = mediaCued ? `，原始檔已跳到 ${clockText(startSeconds)}` : '';
+  const transcriptCued = focusTranscriptLocation(index, hasStartSeconds ? startSeconds : null);
+  const transcriptHint = transcriptCued
+    ? `，逐字稿已定位${hasStartSeconds ? `到 ${clockText(startSeconds)}` : ''}`
+    : '';
   segment?.classList.add('highlight');
-  segment?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  if (!transcriptCued) segment?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   button.focus({ preventScroll: true });
-  setDetailStatus(`已定位第 ${index + 1} 段${mediaHint}，可按「重跑」重新處理此分段`);
+  setDetailStatus(`已定位第 ${index + 1} 段${mediaHint}${transcriptHint}，可按「重跑」重新處理此分段`);
   setTimeout(() => segment?.classList.remove('highlight'), 2600);
 }
 
@@ -3430,8 +3568,10 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
         : '';
       const startSeconds = Number(segment.start_seconds);
       const hasStartSeconds = Number.isFinite(startSeconds) && startSeconds >= 0;
-      const canCueSource = hasStartSeconds;
-      const focusArgs = hasStartSeconds ? `${index}, ${startSeconds}` : `${index}`;
+      const focusSeconds = reviewIssueFocusSeconds(issues, hasStartSeconds ? startSeconds : null);
+      const hasFocusSeconds = focusSeconds !== null;
+      const canCueSource = hasFocusSeconds;
+      const focusArgs = hasFocusSeconds ? `${index}, ${focusSeconds}` : `${index}`;
       if (!canFocusSegment) {
         if (canCueSource) {
           return `<button type="button" class="quality-review-segment media-only" aria-describedby="detail-status" title="此舊紀錄沒有可重跑的分段控制，可定位原始檔時間" onclick="focusQualitySegment(${focusArgs})">

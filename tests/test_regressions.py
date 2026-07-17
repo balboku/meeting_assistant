@@ -6174,6 +6174,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality-warning-body", html)
         self.assertIn("quality-warning-actions", html)
         self.assertIn("quality-warning-jump", html)
+        self.assertIn("transcript-focus-highlight", html)
+        self.assertIn("transcript-timecode-highlight", html)
         self.assertIn("quality-review-segments", html)
         self.assertIn("quality-review-segment", html)
         self.assertIn("quality-review-segment-label", html)
@@ -6192,9 +6194,15 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const REVIEW_SEGMENT_SECONDS = 600;", html)
         self.assertIn("function parseClockSeconds", html)
         self.assertIn("return Number(match[1]) * 60 + Number(match[2]);", html)
+        self.assertIn("function reviewIssueFocusSeconds", html)
         self.assertIn("function qualityWarningSegmentTargets", html)
         self.assertIn("function qualityWarningSegmentIndices", html)
         self.assertIn("function reviewSegmentIssueSummary", html)
+        self.assertIn("function clearTranscriptFocusHighlights", html)
+        self.assertIn("function transcriptSegmentHeadingIndex", html)
+        self.assertIn("function findTranscriptSegmentHeading", html)
+        self.assertIn("function findTranscriptTimecodeButton", html)
+        self.assertIn("function focusTranscriptLocation", html)
         self.assertIn("function focusQualitySegment", html)
         self.assertIn("function renderQualityWarning", html)
         self.assertIn("function renderQualityReviewSegments", html)
@@ -6218,8 +6226,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const reviewSegments = renderQualityReviewSegments(meeting.id, report.review_segments || [], segmentItems);", html)
         self.assertIn("const knownSegmentIndices = new Set((knownSegments || [])", html)
         self.assertIn("const rerunnableSegmentIndices = reviewSegmentIndices", html)
-        self.assertIn("const canCueSource = hasStartSeconds;", html)
-        self.assertIn("const focusArgs = hasStartSeconds ? `${index}, ${startSeconds}` : `${index}`;", html)
+        self.assertIn("const focusSeconds = reviewIssueFocusSeconds(issues, hasStartSeconds ? startSeconds : null);", html)
+        self.assertIn("const canCueSource = hasFocusSeconds;", html)
+        self.assertIn("const focusArgs = hasFocusSeconds ? `${index}, ${focusSeconds}` : `${index}`;", html)
         self.assertIn("quality-review-segment unavailable", html)
         self.assertIn("quality-review-segment media-only", html)
         self.assertIn('title="此舊紀錄沒有可定位的分段控制"', html)
@@ -6238,10 +6247,14 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function focusQualitySegment(segmentIndex, fallbackStartSeconds = null)", html)
         self.assertIn("const fallbackSeconds = Number(fallbackStartSeconds);", html)
         self.assertIn("const mediaCued = hasStartSeconds && cueSourceMedia(startSeconds);", html)
+        self.assertIn("const transcriptCued = focusTranscriptLocation(index, hasStartSeconds ? startSeconds : null);", html)
+        self.assertIn("const globalMatch = scopedButtons.length ? nearestMatch(allButtons) : null;", html)
+        self.assertIn("globalMatch.distance + 0.25 < scopedMatch.distance", html)
         self.assertIn("原始檔已跳到 ${clockText(startSeconds)}", html)
-        self.assertIn("原始檔已跳到 ${clockText(fallbackSeconds)}；此舊紀錄沒有可重跑的分段控制", html)
+        self.assertIn("原始檔已跳到 ${clockText(fallbackSeconds)}${transcriptHint}；此舊紀錄沒有可重跑的分段控制", html)
         self.assertIn("button.focus({ preventScroll: true });", html)
-        self.assertIn("已定位第 ${index + 1} 段${mediaHint}，可按「重跑」重新處理此分段", html)
+        self.assertIn("逐字稿已定位${hasStartSeconds ? `到 ${clockText(startSeconds)}` : ''}", html)
+        self.assertIn("已定位第 ${index + 1} 段${mediaHint}${transcriptHint}，可按「重跑」重新處理此分段", html)
         self.assertIn("找不到第 ${index + 1} 段的重跑控制", html)
         self.assertIn("setTimeout(() => segment?.classList.remove('highlight'), 2600);", html)
         self.assertIn("renderQualityWarning(warning, segmentItems, report.review_segments || [])", html)
@@ -6953,6 +6966,7 @@ const code = [
   grab('escapeHtml'),
   grab('clockText'),
   grab('parseClockSeconds'),
+  grab('reviewIssueFocusSeconds'),
   grab('qualityWarningSegmentTargets'),
   grab('reviewIssuePriority'),
   grab('preferredReviewIssue'),
@@ -6961,7 +6975,7 @@ const code = [
 ].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
-const issue = '疑似連續重複轉錄；同一句連續重複 31 次；重複時間：10:00-10:03';
+const issue = '疑似連續重複轉錄；同一句連續重複 31 次；重複時間：10:12-10:15';
 const genericIssue = '分段疑似重複轉錄幻覺';
 result = renderQualityWarning(
   '逐字稿品質警示：疑似連續重複轉錄，建議重跑或複核相關分段。',
@@ -6987,6 +7001,10 @@ if (!sandbox.result.includes('quality-warning-body')) {{
 if (!sandbox.result.includes('定位第 2 段') || !sandbox.result.includes('定位第 4 段')) {{
   console.error(sandbox.result);
   process.exit(7);
+}}
+if (!sandbox.result.includes('focusQualitySegment(1, 612)')) {{
+  console.error(sandbox.result);
+  process.exit(9);
 }}
 if (sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
   console.error(sandbox.result);
@@ -7024,7 +7042,16 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('normalizeSegmentIndices'), grab('reviewIssuePriority'), grab('preferredReviewIssue'), grab('renderQualityReviewSegments')].join('\\n');
+const code = [
+  grab('escapeHtml'),
+  grab('clockText'),
+  grab('parseClockSeconds'),
+  grab('normalizeSegmentIndices'),
+  grab('reviewIssuePriority'),
+  grab('preferredReviewIssue'),
+  grab('reviewIssueFocusSeconds'),
+  grab('renderQualityReviewSegments')
+].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 const genericIssue = '分段疑似重複轉錄幻覺';
@@ -7051,6 +7078,10 @@ if (!sandbox.unavailable.includes('同一句連續重複 22 次：台語這樣�
   console.error(sandbox.unavailable);
   process.exit(11);
 }}
+if (!sandbox.unavailable.includes('focusQualitySegment(10, 6184)')) {{
+  console.error(sandbox.unavailable);
+  process.exit(13);
+}}
 if (sandbox.unavailable.includes('分段疑似重複轉錄幻覺')) {{
   console.error(sandbox.unavailable);
   process.exit(12);
@@ -7071,7 +7102,86 @@ if (sandbox.available.includes('quality-rerun-review-full-button')) {{
   console.error(sandbox.available);
   process.exit(10);
 }}
+if (!sandbox.available.includes('focusQualitySegment(7, 4200)')) {{
+  console.error(sandbox.available);
+  process.exit(14);
+}}
 console.log('quality_review_segment_note_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_transcript_timecode_locator_prefers_exact_cross_boundary_time(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function findTranscriptTimecodeButton'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [
+  grab('transcriptSegmentHeadingIndex'),
+  grab('transcriptSegmentHeadings'),
+  grab('findTranscriptSegmentHeading'),
+  grab('transcriptSegmentBodyElements'),
+  grab('findTranscriptTimecodeButton')
+].join('\\n');
+const sandbox = {{
+  document: {{
+    querySelectorAll(selector) {{
+      if (selector.includes('.md-content h3')) return [heading7, heading8];
+      if (selector === '.md-content .timecode-button[data-seconds]') return [button6959, button7001];
+      return [];
+    }}
+  }},
+  Array,
+  Number,
+  RegExp,
+  String,
+  Infinity
+}};
+const button6959 = {{ dataset: {{ seconds: '4199' }}, marker: '69:59' }};
+const button7001 = {{ dataset: {{ seconds: '4201' }}, marker: '70:01' }};
+const heading8 = {{ tagName: 'H3', textContent: '【第 8 段｜70:01 – 80:01】', nextElementSibling: null }};
+const body7 = {{
+  tagName: 'P',
+  nextElementSibling: heading8,
+  querySelectorAll(selector) {{
+    return selector === '.timecode-button[data-seconds]' ? [button6959] : [];
+  }}
+}};
+const heading7 = {{ tagName: 'H3', textContent: '【第 7 段｜59:59 – 70:04】', nextElementSibling: body7 }};
+sandbox.heading7 = heading7;
+sandbox.heading8 = heading8;
+sandbox.button6959 = button6959;
+sandbox.button7001 = button7001;
+vm.runInNewContext(code + `
+result = findTranscriptTimecodeButton(6, 4201)?.marker;
+`, sandbox);
+if (sandbox.result !== '70:01') {{
+  console.error('expected exact 70:01, got', sandbox.result);
+  process.exit(4);
+}}
+console.log('transcript_cross_boundary_timecode_ok');
 """
         try:
             result = subprocess.run(
