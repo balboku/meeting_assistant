@@ -2983,6 +2983,102 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(searched["quality_review_rerunnable_segments"], listed["quality_review_rerunnable_segments"])
         self.assertEqual(searched["quality_review_segment_count"], 2)
 
+    def test_list_and_search_quality_summary_prefers_actionable_review_issue(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "actionable-review-issue.md"
+        output_path.write_text("actionable-review-issue-content", encoding="utf-8")
+        quality_report = {
+            "score": 80,
+            "label": "需複核",
+            "warnings": ["逐字稿品質警示：需抽查"],
+            "review_segments": [
+                {
+                    "index": 6,
+                    "label": "第 7 段",
+                    "start_seconds": 3599,
+                    "end_seconds": 4204,
+                    "issues": [
+                        "分段疑似重複轉錄幻覺",
+                        "疑似連續重複轉錄；同一句連續重複 4 次：那時候你把那個做；重複時間：64:47-65:44",
+                    ],
+                },
+            ],
+            "segments": [{"index": 6, "issues": []}],
+        }
+        meeting_id = database.save_meeting(
+            title="Actionable Review Issue",
+            date="2026/07/12",
+            source_audio="actionable-review-issue.webm",
+            output_path=str(output_path),
+            summary="actionable-review-issue-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Actionable Review Issue")[0]
+
+        self.assertEqual(
+            listed["quality_review_segment_summary"],
+            "第 7 段 59:59-70:04：疑似連續重複轉錄；同一句連續重複 4 次：那時候你把那個做；重複時間：64:47-65:44",
+        )
+        self.assertEqual(searched["quality_review_segment_summary"], listed["quality_review_segment_summary"])
+
+    def test_list_and_search_quality_summary_merges_legacy_transcript_repetition(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "legacy-transcript-repetition.md"
+        output_path.write_text(
+            """
+# Meeting Notes
+
+## 完整逐字稿 (Verbatim Transcript)
+### 【第 7 段｜59:59 – 70:04】
+
+[70:01] **[發言者 A]**：因為我是結所以我領車
+[70:02] **[發言者 A]**：因為我是結所以我領車
+[70:03] **[發言者 A]**：因為我是結所以我領車
+[70:04] **[發言者 A]**：因為我是結所以我領車
+
+### 【第 8 段｜70:01 – 80:01】
+
+[70:05] **[發言者 B]**：下一句正常內容
+""".strip(),
+            encoding="utf-8",
+        )
+        quality_report = {
+            "score": 80,
+            "label": "需複核",
+            "warnings": ["逐字稿品質警示：疑似連續重複轉錄，建議重跑或複核相關分段。"],
+            "review_segments": [
+                {
+                    "index": 6,
+                    "label": "第 7 段",
+                    "start_seconds": 3599,
+                    "end_seconds": 4204,
+                    "issues": ["分段疑似重複轉錄幻覺"],
+                },
+            ],
+            "segments": [
+                {"index": 6, "start_seconds": 3599, "end_seconds": 4204, "issues": []},
+                {"index": 7, "start_seconds": 4201, "end_seconds": 4801, "issues": []},
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Legacy Transcript Repetition",
+            date="2026/07/12",
+            source_audio="legacy-transcript-repetition.webm",
+            output_path=str(output_path),
+            summary="legacy-transcript-repetition-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Legacy Transcript Repetition")[0]
+
+        expected = "第 7 段 59:59-70:04、第 8 段 70:01-80:01：疑似連續重複轉錄：同一句連續重複 4 次：因為我是結所以我領車（70:01-70:04）"
+        self.assertEqual(listed["quality_review_segment_summary"], expected)
+        self.assertEqual(searched["quality_review_segment_summary"], expected)
+        self.assertEqual(listed["quality_review_segment_count"], 2)
+
     def test_needs_review_filter_includes_review_segments_without_warnings(self):
         database, tmp_path = self._isolated_database()
         output_path = tmp_path / "review-segment-only.md"
@@ -6189,10 +6285,12 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("重整摘要：${escapeHtml(record?.title || `#${recordId}`)}", html)
         self.assertIn("const reviewSegmentDetails = (record?.quality_review_segment_details || [])", html)
         self.assertIn("const reviewSegmentSummary = String(record?.quality_review_segment_summary || '').trim();", html)
+        self.assertIn("function reviewIssuePriority", html)
+        self.assertIn("function preferredReviewIssue", html)
         self.assertIn("const issues = (segment?.issues || [])", html)
-        self.assertIn("const issueText = issues[0] ? `：${issues[0]}` : '';", html)
-        self.assertIn("issue: issues[0] || ''", html)
-        self.assertIn("reason: issues[0] ? `${display}：${issues[0]}` : ''", html)
+        self.assertIn("const issue = preferredReviewIssue(issues);", html)
+        self.assertIn("issue,", html)
+        self.assertIn("reason: issue ? `${display}：${issue}` : ''", html)
         self.assertIn("const reviewSegmentTitles = (reviewSegmentDetails.length ? reviewSegmentDetails : reviewSegments)", html)
         self.assertIn("const groupedReasonMap = new Map();", html)
         self.assertIn("if (!groupedReasonMap.has(issue)) groupedReasonMap.set(issue, []);", html)
@@ -6444,20 +6542,21 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('renderCardQuality')].join('\\n');
+const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('reviewIssuePriority'), grab('preferredReviewIssue'), grab('renderCardQuality')].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 const label1 = '第 1 段';
 const label2 = '第 2 段';
 const issue = '疑似連續重複轉錄；重複時間：09:59-10:02';
+const genericIssue = '分段疑似重複轉錄幻覺';
 result = renderCardQuality({{
   id: 17,
   quality_warning_count: 1,
   quality_warning_preview: '逐字稿品質警示',
   quality_review_rerunnable_segments: [0, 1],
   quality_review_segment_details: [
-    {{ index: 0, label: label1, start_seconds: 599, end_seconds: 600, issues: [issue] }},
-    {{ index: 1, label: label2, start_seconds: 600, end_seconds: 602, issues: [issue] }}
+    {{ index: 0, label: label1, start_seconds: 599, end_seconds: 600, issues: [genericIssue, issue] }},
+    {{ index: 1, label: label2, start_seconds: 600, end_seconds: 602, issues: [genericIssue, issue] }}
   ]
 }});
 `, sandbox);
@@ -6489,6 +6588,10 @@ if (sandbox.result.includes('>逐字稿警示 1<')) {{
 if (!sandbox.result.includes('title="逐字稿需複核分段：第 1 段 09:59-10:00：疑似連續重複轉錄')) {{
   console.error(sandbox.result);
   process.exit(13);
+}}
+if (sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
+  console.error(sandbox.result);
+  process.exit(14);
 }}
 if (!sandbox.result.includes('rerunReviewSegmentsFromCard(event, 17, [0,1])')) {{
   console.error(sandbox.result);
@@ -6534,7 +6637,7 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('renderCardQuality')].join('\\n');
+const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('reviewIssuePriority'), grab('preferredReviewIssue'), grab('renderCardQuality')].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderCardQuality({{
@@ -6588,7 +6691,7 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('renderCardQuality')].join('\\n');
+const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('reviewIssuePriority'), grab('preferredReviewIssue'), grab('renderCardQuality')].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderCardQuality({{
@@ -6661,7 +6764,7 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('renderCardQuality')].join('\\n');
+const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('reviewIssuePriority'), grab('preferredReviewIssue'), grab('renderCardQuality')].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderCardQuality({{
@@ -6720,7 +6823,7 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('renderCardQuality')].join('\\n');
+const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('reviewIssuePriority'), grab('preferredReviewIssue'), grab('renderCardQuality')].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderCardQuality({{
@@ -6786,18 +6889,21 @@ const code = [
   grab('clockText'),
   grab('parseClockSeconds'),
   grab('qualityWarningSegmentTargets'),
+  grab('reviewIssuePriority'),
+  grab('preferredReviewIssue'),
   grab('reviewSegmentIssueSummary'),
   grab('renderQualityWarning')
 ].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 const issue = '疑似連續重複轉錄；同一句連續重複 31 次；重複時間：10:00-10:03';
+const genericIssue = '分段疑似重複轉錄幻覺';
 result = renderQualityWarning(
   '逐字稿品質警示：疑似連續重複轉錄，建議重跑或複核相關分段。',
   [{{ index: 1 }}, {{ index: 3 }}],
   [
-    {{ index: 1, label: '第 2 段', start_seconds: 600, end_seconds: 1200, issues: [issue] }},
-    {{ index: 3, label: '第 4 段', start_seconds: 1800, end_seconds: 2400, issues: [issue] }}
+    {{ index: 1, label: '第 2 段', start_seconds: 600, end_seconds: 1200, issues: [genericIssue, issue] }},
+    {{ index: 3, label: '第 4 段', start_seconds: 1800, end_seconds: 2400, issues: [genericIssue, issue] }}
   ]
 );
 `, sandbox);
@@ -6816,6 +6922,10 @@ if (!sandbox.result.includes('quality-warning-body')) {{
 if (!sandbox.result.includes('定位第 2 段') || !sandbox.result.includes('定位第 4 段')) {{
   console.error(sandbox.result);
   process.exit(7);
+}}
+if (sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
+  console.error(sandbox.result);
+  process.exit(8);
 }}
 console.log('quality_warning_summary_ok');
 """
@@ -6849,11 +6959,13 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('normalizeSegmentIndices'), grab('renderQualityReviewSegments')].join('\\n');
+const code = [grab('escapeHtml'), grab('clockText'), grab('normalizeSegmentIndices'), grab('reviewIssuePriority'), grab('preferredReviewIssue'), grab('renderQualityReviewSegments')].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
+const genericIssue = '分段疑似重複轉錄幻覺';
+const actionableIssue = '疑似連續重複轉錄；同一句連續重複 22 次：台語這樣比較好這樣比較好；重複時間：103:04-105:14';
 const reviewSegments = [
-  {{ index: 10, label: '第 11 段', start_seconds: 6000, end_seconds: 6600, issues: ['疑似連續重複轉錄'] }}
+  {{ index: 10, label: '第 11 段', start_seconds: 6000, end_seconds: 6600, issues: [genericIssue, actionableIssue] }}
 ];
 unavailable = renderQualityReviewSegments(31, reviewSegments, []);
 available = renderQualityReviewSegments(43, [{{ index: 7, start_seconds: 4200, end_seconds: 4800, issues: ['疑似連續重複轉錄'] }}], [{{ index: 7 }}]);
@@ -6869,6 +6981,14 @@ if (!sandbox.unavailable.includes('此紀錄缺少可直接重跑的分段資料
 if (!sandbox.unavailable.includes('quality-rerun-review-full-button')) {{
   console.error(sandbox.unavailable);
   process.exit(6);
+}}
+if (!sandbox.unavailable.includes('同一句連續重複 22 次：台語這樣比較好這樣比較好')) {{
+  console.error(sandbox.unavailable);
+  process.exit(11);
+}}
+if (sandbox.unavailable.includes('分段疑似重複轉錄幻覺')) {{
+  console.error(sandbox.unavailable);
+  process.exit(12);
 }}
 if (sandbox.unavailable.includes('quality-rerun-review-segments-button')) {{
   console.error(sandbox.unavailable);

@@ -78,6 +78,28 @@ def _format_clock(total_seconds: int) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
+def _quality_review_issue_priority(issue: str) -> tuple[int, int]:
+    cleaned = str(issue or "").strip()
+    if not cleaned:
+        return (0, 0)
+    score = 1
+    if "曾觸發轉錄補救" in cleaned:
+        score += 5
+    if "重複轉錄幻覺" in cleaned:
+        score += 20
+    if "疑似連續重複轉錄" in cleaned:
+        score += 30
+    if re.search(r"(?:重複時間|問題時間|異常時間)[：:]", cleaned):
+        score += 30
+    if re.search(r"\d{1,3}:[0-5]\d\s*[-–—~至到]\s*\d{1,3}:[0-5]\d", cleaned):
+        score += 20
+    if "同一句連續重複" in cleaned:
+        score += 50
+    if re.search(r"同一句連續重複\s*\d+\s*次[：:]", cleaned):
+        score += 60
+    return (score, len(cleaned))
+
+
 def _quality_review_segment_summary(details: list[dict[str, Any]], limit: int = 3) -> Optional[str]:
     if not details:
         return None
@@ -104,19 +126,19 @@ def _quality_review_segment_summary(details: list[dict[str, Any]], limit: int = 
             time_text = f" {_format_clock(start or 0)}-{_format_clock(end or start or 0)}"
         return f"{label}{time_text}"
 
-    def first_issue(detail: dict[str, Any]) -> str:
-        return next(
-            (
-                str(issue).strip()
-                for issue in detail.get("issues") or []
-                if str(issue).strip()
-            ),
-            "",
-        )
+    def preferred_issue(detail: dict[str, Any]) -> str:
+        issues = [
+            str(issue).strip()
+            for issue in detail.get("issues") or []
+            if str(issue).strip()
+        ]
+        if not issues:
+            return ""
+        return max(issues, key=_quality_review_issue_priority)
 
     grouped_segments: dict[str, list[str]] = {}
     for detail in details[:limit]:
-        grouped_segments.setdefault(first_issue(detail), []).append(segment_text(detail))
+        grouped_segments.setdefault(preferred_issue(detail), []).append(segment_text(detail))
 
     summaries: list[str] = []
     for issue, segments in grouped_segments.items():
@@ -226,6 +248,7 @@ def _repeated_transcript_turn_review_segments(
     *,
     limit: int = 3,
     segment_seconds: int = 600,
+    segments: Optional[list[dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
     pattern = re.compile(
         r"\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\d)\]\s*"
@@ -279,6 +302,48 @@ def _repeated_transcript_turn_review_segments(
     if not runs:
         return []
 
+    def fallback_matches(start_time: int, end_time: int) -> list[dict[str, int]]:
+        first_index = max(0, start_time // segment_seconds)
+        last_index = max(first_index, end_time // segment_seconds)
+        return [
+            {
+                "index": index,
+                "start_seconds": index * segment_seconds,
+                "end_seconds": (index + 1) * segment_seconds,
+            }
+            for index in range(first_index, last_index + 1)
+        ]
+
+    def segment_matches(timestamps: list[int]) -> list[dict[str, int]]:
+        if not timestamps:
+            return []
+        start_time = min(timestamps)
+        end_time = max(timestamps)
+        matched: list[dict[str, int]] = []
+        seen_indices: set[int] = set()
+        for position, segment in enumerate(segments or []):
+            try:
+                index = int(segment.get("index", position))
+                start_seconds = int(segment.get("start_seconds", 0))
+                end_seconds = int(segment.get("end_seconds", start_seconds + 1))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if end_seconds <= start_seconds:
+                end_seconds = start_seconds + 1
+            overlaps = (
+                any(start_seconds <= timestamp < end_seconds for timestamp in timestamps)
+                or (start_seconds <= start_time < end_seconds)
+                or (start_seconds < end_time < end_seconds)
+            )
+            if overlaps and index not in seen_indices:
+                matched.append({
+                    "index": index,
+                    "start_seconds": start_seconds,
+                    "end_seconds": end_seconds,
+                })
+                seen_indices.add(index)
+        return matched or fallback_matches(start_time, end_time)
+
     details_by_index: dict[int, dict[str, Any]] = {}
     for run in runs:
         timestamps = run.get("timestamps") or []
@@ -293,25 +358,57 @@ def _repeated_transcript_turn_review_segments(
             f"疑似連續重複轉錄：同一句連續重複 {run_length} 次"
             f"{preview_part}（{_format_clock(start_time)}-{_format_clock(end_time)}）"
         )
-        first_index = max(0, start_time // segment_seconds)
-        last_index = max(first_index, end_time // segment_seconds)
-        for index in range(first_index, last_index + 1):
+        for match in segment_matches(timestamps):
+            index = int(match["index"])
             detail = details_by_index.setdefault(
                 index,
                 {
                     "index": index,
                     "label": review_segment_label(index),
-                    "start_seconds": index * segment_seconds,
-                    "end_seconds": (index + 1) * segment_seconds,
+                    "start_seconds": int(match["start_seconds"]),
+                    "end_seconds": int(match["end_seconds"]),
                     "issues": [],
                 },
             )
+            detail["start_seconds"] = int(match["start_seconds"])
+            detail["end_seconds"] = int(match["end_seconds"])
             if issue not in detail["issues"]:
                 detail["issues"].append(issue)
     return [
         details_by_index[index]
         for index in sorted(details_by_index)
     ]
+
+
+def _clock_text_to_seconds(value: Any) -> Optional[int]:
+    match = re.fullmatch(r"\s*(\d{1,3}):([0-5]\d)\s*", str(value or ""))
+    if not match:
+        return None
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def _transcript_segment_spans(transcript: str) -> list[dict[str, int]]:
+    spans: list[dict[str, int]] = []
+    for match in _TRANSCRIPT_SEGMENT_HEADING_PATTERN.finditer(transcript or ""):
+        raw_index = match.group("zh_index") or match.group("en_index")
+        raw_start = match.group("zh_start") or match.group("en_start")
+        raw_end = match.group("zh_end") or match.group("en_end")
+        try:
+            index = int(raw_index) - 1
+        except (TypeError, ValueError):
+            continue
+        start_seconds = _clock_text_to_seconds(raw_start)
+        end_seconds = _clock_text_to_seconds(raw_end)
+        if index < 0 or start_seconds is None:
+            continue
+        if end_seconds is None or end_seconds <= start_seconds:
+            end_seconds = start_seconds + 1
+        spans.append({
+            "index": index,
+            "start_seconds": start_seconds,
+            "end_seconds": end_seconds,
+        })
+    return spans
 
 
 def _legacy_markdown_repeated_turn_review_segments(output_path: str) -> list[dict[str, Any]]:
@@ -323,7 +420,8 @@ def _legacy_markdown_repeated_turn_review_segments(output_path: str) -> list[dic
     except OSError:
         return []
     transcript = _markdown_section(text, ("完整逐字稿", "Verbatim Transcript"), ())
-    return _repeated_transcript_turn_review_segments(transcript)
+    segments = _transcript_segment_spans(transcript)
+    return _repeated_transcript_turn_review_segments(transcript, segments=segments)
 
 
 LEGACY_TRANSCRIPT_OMISSION_PATTERNS = (
@@ -1606,28 +1704,23 @@ def apply_quality_preview_fields(
             warning_preview = legacy_warnings[0]
             for warning in legacy_warnings:
                 add_review_segment_labels_from_text(warning)
-    should_infer_legacy_review_segments = (
-        not review_segment_labels
-        and warning_count > 0
-    )
-    if should_infer_legacy_review_segments:
-        for detail in _legacy_markdown_repeated_turn_review_segments(str(record.get("output_path") or "")):
-            segment_issues = [
-                str(issue).strip()
-                for issue in detail.get("issues") or []
-                if str(issue).strip()
-            ]
-            add_review_segment_label(
-                detail.get("label") or review_segment_label(int(detail["index"])),
-                index=int_or_none(detail.get("index")),
-                start_seconds=int_or_none(detail.get("start_seconds")),
-                end_seconds=int_or_none(detail.get("end_seconds")),
-                issues=segment_issues,
-            )
-            if not warning_count:
-                warning_count = 1
-            if not warning_preview and segment_issues:
-                warning_preview = f"{detail.get('label') or review_segment_label(int(detail['index']))}：{segment_issues[0]}"
+    for detail in _legacy_markdown_repeated_turn_review_segments(str(record.get("output_path") or "")):
+        segment_issues = [
+            str(issue).strip()
+            for issue in detail.get("issues") or []
+            if str(issue).strip()
+        ]
+        add_review_segment_label(
+            detail.get("label") or review_segment_label(int(detail["index"])),
+            index=int_or_none(detail.get("index")),
+            start_seconds=int_or_none(detail.get("start_seconds")),
+            end_seconds=int_or_none(detail.get("end_seconds")),
+            issues=segment_issues,
+        )
+        if segment_issues and not warning_count:
+            warning_count = 1
+        if not warning_preview and segment_issues:
+            warning_preview = f"{detail.get('label') or review_segment_label(int(detail['index']))}：{segment_issues[0]}"
     if not warning_preview:
         try:
             quality_score = int(record["quality_score"]) if record.get("quality_score") is not None else None

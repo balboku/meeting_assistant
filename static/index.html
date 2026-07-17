@@ -2786,6 +2786,27 @@ function qualityTypeMatchesRecord(record, type = 'all') {
   return recordQualityWarningTypes(record).has(type);
 }
 
+function reviewIssuePriority(issue = '') {
+  const text = String(issue || '').trim();
+  if (!text) return 0;
+  let score = 1;
+  if (text.includes('曾觸發轉錄補救')) score += 5;
+  if (text.includes('重複轉錄幻覺')) score += 20;
+  if (text.includes('疑似連續重複轉錄')) score += 30;
+  if (/(?:重複時間|問題時間|異常時間)[：:]/.test(text)) score += 30;
+  if (/\d{1,3}:[0-5]\d\s*(?:-|–|—|~|至|到)\s*\d{1,3}:[0-5]\d/.test(text)) score += 20;
+  if (text.includes('同一句連續重複')) score += 50;
+  if (/同一句連續重複\s*\d+\s*次[：:]/.test(text)) score += 60;
+  return score + Math.min(text.length, 120) / 1000;
+}
+
+function preferredReviewIssue(issues = []) {
+  return (issues || [])
+    .map(issue => String(issue || '').trim())
+    .filter(Boolean)
+    .sort((a, b) => reviewIssuePriority(b) - reviewIssuePriority(a))[0] || '';
+}
+
 function renderCardQuality(record) {
   const warningCount = Number(record?.quality_warning_count || 0);
   const score = record?.quality_score;
@@ -2803,18 +2824,19 @@ function renderCardQuality(record) {
       const issues = (segment?.issues || [])
         .map(issue => String(issue || '').trim())
         .filter(Boolean);
+      const issue = preferredReviewIssue(issues);
       const hasTimeRange = segment.start_seconds !== undefined || segment.end_seconds !== undefined;
       const timeText = hasTimeRange
         ? ` ${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)}`
         : '';
       const display = `${label}${timeText}`;
-      const issueText = issues[0] ? `：${issues[0]}` : '';
+      const issueText = issue ? `：${issue}` : '';
       return {
         index: hasIndex ? index : null,
         start_seconds: segment?.start_seconds,
         display,
-        issue: issues[0] || '',
-        reason: issues[0] ? `${display}：${issues[0]}` : '',
+        issue,
+        reason: issue ? `${display}：${issue}` : '',
         title: `${display}${issueText}`,
       };
     })
@@ -3320,7 +3342,7 @@ function reviewSegmentIssueSummary(reviewSegments = [], limit = 5) {
     const issues = (segment?.issues || [])
       .map(issue => String(issue || '').trim())
       .filter(Boolean);
-    const issue = issues[0] || '需複核';
+    const issue = preferredReviewIssue(issues) || '需複核';
     if (!grouped.has(issue)) grouped.set(issue, []);
     grouped.get(issue).push(`${label}${timeText}`);
   });
@@ -3401,7 +3423,7 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
       const issues = (segment.issues || [])
         .map(issue => String(issue || '').trim())
         .filter(Boolean);
-      const issueText = issues[0] || '需複核';
+      const issueText = preferredReviewIssue(issues) || '需複核';
       const hasTimeRange = segment.start_seconds !== undefined || segment.end_seconds !== undefined;
       const timeText = hasTimeRange
         ? `${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)} · `
