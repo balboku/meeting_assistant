@@ -3398,12 +3398,52 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
   </div>`;
 }
 
+function fallbackQualityReportFromMeeting(meeting) {
+  const warningText = String(meeting?.quality_warning_text || meeting?.quality_warning_preview || '').trim();
+  const warnings = warningText
+    .split(/\r?\n/)
+    .map(item => item.trim())
+    .filter(Boolean);
+  const reviewSegments = Array.isArray(meeting?.quality_review_segment_details)
+    ? meeting.quality_review_segment_details
+    : [];
+  const hasQualityFields = warnings.length
+    || reviewSegments.length
+    || Number(meeting?.quality_warning_count || 0) > 0
+    || Number(meeting?.quality_review_segment_count || 0) > 0;
+  if (!hasQualityFields) return null;
+  return {
+    score: meeting?.quality_score ?? null,
+    label: meeting?.quality_label || (reviewSegments.length ? '需複核' : '品質警示'),
+    warnings,
+    segments: [],
+    review_segments: reviewSegments,
+    timestamp_count: 0,
+    speaker_labels: [],
+  };
+}
+
+function detailQualityReport(meeting) {
+  const report = meeting?.quality_report && typeof meeting.quality_report === 'object'
+    ? { ...meeting.quality_report }
+    : null;
+  const fallback = fallbackQualityReportFromMeeting(meeting);
+  if (!report) return fallback;
+  if ((!Array.isArray(report.warnings) || !report.warnings.length) && fallback?.warnings?.length) {
+    report.warnings = fallback.warnings;
+  }
+  if ((!Array.isArray(report.review_segments) || !report.review_segments.length) && fallback?.review_segments?.length) {
+    report.review_segments = fallback.review_segments;
+  }
+  return report;
+}
+
 function renderQualityReport(meeting) {
-  const report = meeting.quality_report;
+  const report = detailQualityReport(meeting);
   if (!report) return '';
-  const warningItems = report.warnings || [];
+  const warningItems = Array.isArray(report.warnings) ? report.warnings : [];
   const qualityActions = renderQualityActions(meeting, warningItems);
-  const segmentItems = report.segments || [];
+  const segmentItems = Array.isArray(report.segments) ? report.segments : [];
   const reviewSegments = renderQualityReviewSegments(meeting.id, report.review_segments || [], segmentItems);
   const warnings = warningItems
     .map(warning => renderQualityWarning(warning, segmentItems, report.review_segments || []))

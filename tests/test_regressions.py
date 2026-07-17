@@ -5971,6 +5971,12 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("AbortController", html)
         self.assertIn("找到 ${records.length} 筆${reviewOnly ? `需複核${filterSuffix}且相關` : '相關'}會議記錄", html)
         self.assertIn("function renderQualityReport", html)
+        self.assertIn("function fallbackQualityReportFromMeeting", html)
+        self.assertIn("function detailQualityReport", html)
+        self.assertIn("const report = detailQualityReport(meeting);", html)
+        self.assertIn("meeting?.quality_warning_text || meeting?.quality_warning_preview", html)
+        self.assertIn("meeting?.quality_review_segment_details", html)
+        self.assertIn("quality_review_segment_count", html)
         self.assertIn("quality_report", html)
         self.assertIn("quality-warning", html)
         self.assertIn("quality-warning-actions", html)
@@ -6330,6 +6336,62 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("audioBitsPerSecond", html)
         self.assertIn("videoBitsPerSecond", html)
         self.assertIn("recording_profile", html)
+
+    def test_detail_quality_report_falls_back_to_top_level_review_fields(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function detailQualityReport'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [grab('fallbackQualityReportFromMeeting'), grab('detailQualityReport')].join('\\n');
+const sandbox = {{}};
+vm.runInNewContext(code + `
+const legacy = detailQualityReport({{
+  quality_warning_text: '逐字稿品質警示：疑似連續重複轉錄\\\\n第 8 段：同一句連續重複 31 次',
+  quality_review_segment_count: 1,
+  quality_review_segment_details: [
+    {{ index: 7, label: '第 8 段', start_seconds: 4200, end_seconds: 4800, issues: ['疑似連續重複轉錄'] }}
+  ]
+}});
+if (!legacy || legacy.warnings.length !== 2) process.exit(4);
+if (legacy.review_segments[0].index !== 7) process.exit(5);
+if (legacy.label !== '需複核') process.exit(6);
+const merged = detailQualityReport({{
+  quality_report: {{ score: 95, label: '良好', warnings: [], segments: [] }},
+  quality_warning_text: '摘要品質警示：需補 D 編號',
+  quality_review_segment_details: [{{ index: 2, label: '第 3 段', issues: ['需複核'] }}]
+}});
+if (merged.score !== 95 || merged.warnings[0] !== '摘要品質警示：需補 D 編號') process.exit(7);
+if (merged.review_segments[0].label !== '第 3 段') process.exit(8);
+result = 'detail_quality_fallback_ok';
+`, sandbox);
+if (sandbox.result !== 'detail_quality_fallback_ok') process.exit(9);
+console.log(sandbox.result);
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=20,
+            )
+        except FileNotFoundError:
+            self.skipTest("node executable is required for static render regression")
+
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+        self.assertIn("detail_quality_fallback_ok", result.stdout)
 
     def test_render_card_quality_groups_review_reasons_by_issue(self):
         static_path = json.dumps(str(ROOT / "static" / "index.html"))
