@@ -2738,15 +2738,19 @@ function qualityFilterLabel(type = 'all') {
 
 function recordQualityWarningTypes(record) {
   const warningPreview = String(record?.quality_warning_preview || '').trim();
+  const warningText = [record?.quality_warning_text, warningPreview]
+    .map(value => String(value || '').trim())
+    .filter(Boolean)
+    .join('\n');
   const reviewSegmentCount = Number(record?.quality_review_segment_count || 0);
   const reviewDetails = record?.quality_review_segment_details || [];
   const warningCount = Number(record?.quality_warning_count || 0);
   const score = record?.quality_score;
   const label = String(record?.quality_label || '').trim();
   const types = new Set();
-  if (warningPreview.startsWith('摘要品質警示')) types.add('summary');
-  if (isRecordingQualityWarning(warningPreview)) types.add('recording');
-  if (warningPreview.startsWith('逐字稿品質警示') || reviewSegmentCount > 0 || reviewDetails.length > 0) {
+  if (warningText.includes('摘要品質警示')) types.add('summary');
+  if (isRecordingQualityWarning(warningText)) types.add('recording');
+  if (warningText.includes('逐字稿品質警示') || reviewSegmentCount > 0 || reviewDetails.length > 0) {
     types.add('transcript');
   }
   const hasScore = score !== null && score !== undefined && score !== '';
@@ -2767,6 +2771,7 @@ function renderCardQuality(record) {
   const score = record?.quality_score;
   const label = String(record?.quality_label || '').trim();
   const warningPreview = String(record?.quality_warning_preview || '').trim();
+  const warningText = String(record?.quality_warning_text || warningPreview).trim();
   const recordId = Number(record?.id);
   const hasRecordId = Number.isInteger(recordId) && recordId > 0;
   const reviewSegmentDetails = (record?.quality_review_segment_details || [])
@@ -2819,7 +2824,7 @@ function renderCardQuality(record) {
       : `${warningType} ${warningCount}`;
     const warningChipTitle = hasTranscriptWarningChip && reviewSegments.length
       ? `逐字稿需複核分段：${reviewSegmentSummary || reviewSegmentTitles.join('、') || reviewSegments.join('、')}`
-      : (warningPreview || warningType);
+      : (warningText || warningPreview || warningType);
     chips.push(`<span class="card-quality-chip needs-review" title="${escapeHtml(warningChipTitle)}">${escapeHtml(warningChipText)}</span>`);
     if (warningPreview.startsWith('摘要品質警示') && hasRecordId) {
       chips.push(`<button type="button" class="card-quality-chip needs-review card-quality-action" title="沿用逐字稿，只重新產生摘要、決議與待辦" aria-label="重整摘要：${escapeHtml(record?.title || `#${recordId}`)}" onclick="rerunSummaryFromCard(event, ${recordId})">↻ 重整摘要</button>`);

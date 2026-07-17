@@ -2864,10 +2864,12 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(listed["quality_label"], "需複核")
         self.assertEqual(listed["quality_warning_count"], 2)
         self.assertEqual(listed["quality_warning_preview"], "錄音音量偏低")
+        self.assertEqual(listed["quality_warning_text"], "錄音音量偏低\n摘要未串聯待辦")
         self.assertEqual(searched["quality_score"], 72)
         self.assertEqual(searched["quality_label"], "需複核")
         self.assertEqual(searched["quality_warning_count"], 2)
         self.assertEqual(searched["quality_warning_preview"], "錄音音量偏低")
+        self.assertEqual(searched["quality_warning_text"], listed["quality_warning_text"])
 
     def test_list_and_search_include_segment_quality_issues(self):
         database, tmp_path = self._isolated_database()
@@ -3575,6 +3577,58 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in list_response.json()["records"]], [summary_id])
         self.assertEqual(search_response.status_code, 200)
         self.assertEqual([row["id"] for row in search_response.json()], [transcript_id])
+
+    def test_quality_type_filter_uses_all_warning_text_not_only_preview(self):
+        database, tmp_path = self._isolated_database()
+        shared = "mixed-quality-type-keyword"
+        output_path = tmp_path / "mixed-quality-type.md"
+        output_path.write_text(shared, encoding="utf-8")
+        mixed_id = database.save_meeting(
+            title="Mixed Quality Types",
+            date="2026/07/12",
+            source_audio="mixed.webm",
+            output_path=str(output_path),
+            summary=shared,
+            quality_report={
+                "warnings": [
+                    "偵測到可能的爆音；原始媒體檔已保留。",
+                    "摘要品質警示：討論摘要未使用 D 編號",
+                    "逐字稿品質警示：疑似連續重複轉錄（重複時間：10:00-10:03）",
+                ],
+            },
+        )
+
+        listed = database.list_meetings()[0]
+
+        self.assertEqual(listed["id"], mixed_id)
+        self.assertEqual(listed["quality_warning_preview"], "偵測到可能的爆音；原始媒體檔已保留。")
+        self.assertIn("摘要品質警示：討論摘要未使用 D 編號", listed["quality_warning_text"])
+        self.assertIn("逐字稿品質警示：疑似連續重複轉錄", listed["quality_warning_text"])
+        self.assertEqual([row["id"] for row in database.list_meetings(quality_type="recording")], [mixed_id])
+        self.assertEqual([row["id"] for row in database.list_meetings(quality_type="summary")], [mixed_id])
+        self.assertEqual([row["id"] for row in database.list_meetings(quality_type="transcript")], [mixed_id])
+        self.assertEqual(
+            [row["id"] for row in database.search_meetings(shared, quality_type="summary")],
+            [mixed_id],
+        )
+
+        import backend.main as main
+
+        list_response = asgi_request(main.app, "GET", "/meetings?quality_type=summary&limit=10")
+        search_response = asgi_request(
+            main.app,
+            "GET",
+            f"/meetings/search?q={shared}&quality_type=transcript&limit=10",
+        )
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual([row["id"] for row in list_response.json()["records"]], [mixed_id])
+        self.assertEqual(
+            list_response.json()["records"][0]["quality_warning_text"],
+            listed["quality_warning_text"],
+        )
+        self.assertEqual(search_response.status_code, 200)
+        self.assertEqual([row["id"] for row in search_response.json()], [mixed_id])
 
 
 class MeetingEvidenceRegressionTests(unittest.TestCase):
@@ -6054,6 +6108,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("if (selectedQualityFilterType() !== 'all' && filter) filter.checked = true;", html)
         self.assertIn("quality_warning_count", html)
         self.assertIn("quality_warning_preview", html)
+        self.assertIn("quality_warning_text", html)
         self.assertIn("quality_review_segments", html)
         self.assertIn("quality_review_segment_details", html)
         self.assertIn("quality_review_segment_summary", html)
@@ -6067,9 +6122,11 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("openDetailAndFocusSourceMedia(event, ${recordId})", html)
         self.assertIn("檢查原始檔：${escapeHtml(record?.title || `#${recordId}`)}", html)
         self.assertIn("const warningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0);", html)
+        self.assertIn("const warningText = String(record?.quality_warning_text || warningPreview).trim();", html)
         self.assertIn("const warningChipText = hasTranscriptWarningChip && reviewSegments.length", html)
         self.assertIn("${warningType} ${reviewSegments.length} 段", html)
         self.assertIn("const warningChipTitle = hasTranscriptWarningChip && reviewSegments.length", html)
+        self.assertIn(": (warningText || warningPreview || warningType);", html)
         self.assertIn("title=\"${escapeHtml(warningChipTitle)}\"", html)
         self.assertIn("onclick=\"rerunSummaryFromCard(event, ${recordId})\"", html)
         self.assertIn("重整摘要：${escapeHtml(record?.title || `#${recordId}`)}", html)
@@ -6679,11 +6736,19 @@ vm.runInNewContext(code + `
 const summary = {{ quality_warning_count: 1, quality_warning_preview: '摘要品質警示：討論摘要未使用 D 編號' }};
 const recording = {{ quality_warning_count: 1, quality_warning_preview: '偵測到可能的爆音；原始媒體檔已保留。' }};
 const transcript = {{ quality_warning_count: 0, quality_review_segment_count: 1, quality_review_segment_details: [{{ index: 0 }}] }};
+const mixed = {{
+  quality_warning_count: 3,
+  quality_warning_preview: '偵測到可能的爆音；原始媒體檔已保留。',
+  quality_warning_text: '偵測到可能的爆音；原始媒體檔已保留。\\\\n摘要品質警示：討論摘要未使用 D 編號\\\\n逐字稿品質警示：疑似連續重複轉錄'
+}};
 const other = {{ quality_score: 80, quality_label: '需注意', quality_warning_count: 0 }};
 result = [
   qualityTypeMatchesRecord(summary, 'summary'),
   qualityTypeMatchesRecord(recording, 'recording'),
   qualityTypeMatchesRecord(transcript, 'transcript'),
+  qualityTypeMatchesRecord(mixed, 'recording'),
+  qualityTypeMatchesRecord(mixed, 'summary'),
+  qualityTypeMatchesRecord(mixed, 'transcript'),
   qualityTypeMatchesRecord(other, 'other'),
   !qualityTypeMatchesRecord(recording, 'summary'),
   qualityTypeMatchesRecord(recording, 'all')

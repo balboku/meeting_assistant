@@ -1386,6 +1386,7 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
     review_segment_labels: list[str] = []
     review_segment_detail_by_label: dict[str, dict[str, Any]] = {}
     known_segment_indices: set[int] = set()
+    segment_issue_previews: list[str] = []
 
     def add_review_segment_label(
         label: str,
@@ -1455,7 +1456,6 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
                 warning_preview = str(warnings[0]).strip() or None
             for warning in warnings:
                 add_review_segment_labels_from_text(str(warning))
-        segment_issue_previews: list[str] = []
         for review_segment in quality_report.get("review_segments") or []:
             if not isinstance(review_segment, dict):
                 continue
@@ -1540,6 +1540,14 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
             warning_preview = f"品質標籤：{label}"
     record["quality_warning_count"] = warning_count
     record["quality_warning_preview"] = warning_preview
+    warning_text_items = [
+        str(item).strip()
+        for item in [quality_warning_text, *segment_issue_previews]
+        if str(item).strip()
+    ]
+    if not warning_text_items and warning_preview:
+        warning_text_items.append(str(warning_preview).strip())
+    record["quality_warning_text"] = "\n".join(dict.fromkeys(warning_text_items)) or None
     sorted_review_segment_labels = sorted(review_segment_labels, key=review_segment_label_sort_key)
     record["quality_review_segments"] = sorted_review_segment_labels
     record["quality_review_segment_details"] = [
@@ -1596,17 +1604,22 @@ def _is_recording_quality_warning(warning: str) -> bool:
 
 def _meeting_record_quality_types(record: dict[str, Any]) -> set[str]:
     warning_preview = str(record.get("quality_warning_preview") or "").strip()
+    warning_text = "\n".join(
+        str(value).strip()
+        for value in (record.get("quality_warning_text"), warning_preview)
+        if str(value or "").strip()
+    )
     warning_count = int(record.get("quality_warning_count") or 0)
     review_segment_count = int(record.get("quality_review_segment_count") or 0)
     review_segment_details = record.get("quality_review_segment_details") or []
     types: set[str] = set()
 
-    if warning_preview.startswith("摘要品質警示"):
+    if "摘要品質警示" in warning_text:
         types.add("summary")
-    if _is_recording_quality_warning(warning_preview):
+    if _is_recording_quality_warning(warning_text):
         types.add("recording")
     if (
-        warning_preview.startswith("逐字稿品質警示")
+        "逐字稿品質警示" in warning_text
         or review_segment_count > 0
         or bool(review_segment_details)
     ):

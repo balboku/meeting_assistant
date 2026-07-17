@@ -245,6 +245,7 @@ class MeetingRecord(BaseModel):
     quality_label: Optional[str] = Field(None, description="本機品質檢查結果")
     quality_warning_count: int = Field(0, description="已儲存品質警示數量")
     quality_warning_preview: Optional[str] = Field(None, description="第一個品質警示摘要")
+    quality_warning_text: Optional[str] = Field(None, description="完整品質警示文字")
     quality_review_segments: list[str] = Field(default_factory=list, description="需複核的分段標籤")
     quality_review_segment_details: list[dict] = Field(default_factory=list, description="需複核分段與時間範圍")
     quality_review_segment_summary: Optional[str] = Field(None, description="需複核分段、時間與原因摘要")
