@@ -88,8 +88,7 @@ def _quality_review_segment_summary(details: list[dict[str, Any]], limit: int = 
         except (TypeError, ValueError):
             return None
 
-    summaries: list[str] = []
-    for detail in details[:limit]:
+    def segment_text(detail: dict[str, Any]) -> str:
         label = str(detail.get("label") or "").strip()
         index = int_or_none(detail.get("index"))
         if not label and index is not None:
@@ -103,7 +102,10 @@ def _quality_review_segment_summary(details: list[dict[str, Any]], limit: int = 
             start = start_seconds if start_seconds is not None else end_seconds
             end = end_seconds if end_seconds is not None else start_seconds
             time_text = f" {_format_clock(start or 0)}-{_format_clock(end or start or 0)}"
-        issue = next(
+        return f"{label}{time_text}"
+
+    def first_issue(detail: dict[str, Any]) -> str:
+        return next(
             (
                 str(issue).strip()
                 for issue in detail.get("issues") or []
@@ -111,7 +113,15 @@ def _quality_review_segment_summary(details: list[dict[str, Any]], limit: int = 
             ),
             "",
         )
-        summaries.append(f"{label}{time_text}{f'：{issue}' if issue else ''}")
+
+    grouped_segments: dict[str, list[str]] = {}
+    for detail in details[:limit]:
+        grouped_segments.setdefault(first_issue(detail), []).append(segment_text(detail))
+
+    summaries: list[str] = []
+    for issue, segments in grouped_segments.items():
+        segment_list = "、".join(segments)
+        summaries.append(f"{segment_list}{f'：{issue}' if issue else ''}")
     if len(details) > limit:
         summaries.append(f"另有 {len(details) - limit} 段")
     return "；".join(summaries) or None

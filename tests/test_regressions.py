@@ -3097,10 +3097,16 @@ class SearchRegressionTests(unittest.TestCase):
             ],
         )
         self.assertEqual(listed["quality_review_segment_count"], 2)
+        expected_summary = (
+            "第 2 段 10:00-20:00、第 4 段 30:00-40:00："
+            "疑似連續重複轉錄；同一句連續重複 31 次；重複時間：10:00-10:03"
+        )
+        self.assertEqual(listed["quality_review_segment_summary"], expected_summary)
         self.assertEqual(listed["quality_warning_text"], quality_report["warnings"][0])
         self.assertEqual(searched["quality_review_segments"], ["第 2 段", "第 4 段"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
         self.assertEqual(searched["quality_review_segment_count"], 2)
+        self.assertEqual(searched["quality_review_segment_summary"], expected_summary)
         self.assertEqual(searched["quality_warning_text"], listed["quality_warning_text"])
 
     def test_list_and_search_parse_full_transcript_repetition_warning_segments(self):
@@ -5742,8 +5748,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(payload["quality_review_segment_details"], report["review_segments"])
         self.assertEqual(payload["quality_review_segment_count"], 2)
         self.assertEqual(payload["quality_review_rerunnable_segments"], [1, 3])
-        self.assertIn("第 2 段 10:00-20:00", payload["quality_review_segment_summary"])
-        self.assertIn("第 4 段 30:00-40:00", payload["quality_review_segment_summary"])
+        self.assertEqual(
+            payload["quality_review_segment_summary"],
+            "第 2 段 10:00-20:00、第 4 段 30:00-40:00：疑似連續重複轉錄；重複時間：10:00-10:03",
+        )
 
     def test_meeting_detail_keeps_warning_segments_when_metadata_is_unavailable(self):
         import backend.main as main
