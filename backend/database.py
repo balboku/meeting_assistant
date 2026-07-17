@@ -1377,9 +1377,20 @@ def save_meeting(
     return meeting_id
 
 
-def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
-    record = dict(row)
-    quality_report_json = record.pop("quality_report_json", None)
+def apply_quality_preview_fields(
+    record: dict[str, Any],
+    *,
+    quality_report: Optional[dict[str, Any]] = None,
+    quality_report_json: Optional[str] = None,
+) -> dict[str, Any]:
+    """Populate derived quality fields used by list, search, and detail APIs."""
+    record = dict(record)
+    if quality_report_json is None and "quality_report_json" in record:
+        quality_report_json = record.pop("quality_report_json", None)
+    else:
+        record.pop("quality_report_json", None)
+    if quality_report is None and isinstance(record.get("quality_report"), dict):
+        quality_report = record.get("quality_report")
     warning_count = 0
     warning_preview = None
     quality_warning_text = ""
@@ -1443,10 +1454,11 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         except (TypeError, ValueError):
             return None
 
-    try:
-        quality_report = json.loads(quality_report_json) if quality_report_json else None
-    except json.JSONDecodeError:
-        quality_report = None
+    if quality_report is None:
+        try:
+            quality_report = json.loads(quality_report_json) if quality_report_json else None
+        except (TypeError, json.JSONDecodeError):
+            quality_report = None
     record["source_media_type"] = _source_media_type_from_metadata(record, quality_report)
     if isinstance(quality_report, dict):
         warnings = quality_report.get("warnings") or []
@@ -1541,6 +1553,13 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         label = str(record.get("quality_label") or "").strip()
         if label and any(token in label for token in ("需", "警", "低", "不")):
             warning_preview = f"品質標籤：{label}"
+    if known_segment_indices:
+        review_segment_labels = [
+            label
+            for label in review_segment_labels
+            if not isinstance(review_segment_detail_by_label.get(label, {}).get("index"), int)
+            or review_segment_detail_by_label[label]["index"] in known_segment_indices
+        ]
     record["quality_warning_count"] = warning_count
     record["quality_warning_preview"] = warning_preview
     warning_text_items = [
@@ -1570,6 +1589,10 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
         if isinstance(detail.get("index"), int) and detail["index"] in known_segment_indices
     ]
     return record
+
+
+def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
+    return apply_quality_preview_fields(dict(row))
 
 
 def _meeting_record_needs_review(record: dict[str, Any]) -> bool:

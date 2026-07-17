@@ -56,6 +56,7 @@ from backend.database import (
     list_job_events,
     list_meetings,
     count_meetings,
+    apply_quality_preview_fields,
     list_meeting_source_audio_refs,
     get_meeting,
     search_meetings,
@@ -2209,6 +2210,14 @@ async def get_meeting_detail(meeting_id: int):
         **record,
         "quality_report": detail_quality_report,
     }, source_path)
+    quality_fields = apply_quality_preview_fields(
+        {
+            **record,
+            "summary_preview": record.get("summary", "")[:200],
+            "quality_report": detail_quality_report,
+        },
+        quality_report=detail_quality_report if isinstance(detail_quality_report, dict) else None,
+    )
 
     return MeetingDetail(
         id=record["id"],
@@ -2220,6 +2229,14 @@ async def get_meeting_detail(meeting_id: int):
         job_id=record.get("job_id"),
         quality_score=record.get("quality_score"),
         quality_label=record.get("quality_label"),
+        quality_warning_count=quality_fields.get("quality_warning_count") or 0,
+        quality_warning_preview=quality_fields.get("quality_warning_preview"),
+        quality_warning_text=quality_fields.get("quality_warning_text"),
+        quality_review_segments=quality_fields.get("quality_review_segments") or [],
+        quality_review_segment_details=quality_fields.get("quality_review_segment_details") or [],
+        quality_review_segment_summary=quality_fields.get("quality_review_segment_summary"),
+        quality_review_segment_count=quality_fields.get("quality_review_segment_count") or 0,
+        quality_review_rerunnable_segments=quality_fields.get("quality_review_rerunnable_segments") or [],
         created_at=record["created_at"],
         full_content=record["full_content"],
         quality_report=quality_report or None,

@@ -5712,7 +5712,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             response = asgi_request(main.app, "GET", "/meetings/15")
 
         self.assertEqual(response.status_code, 200)
-        report = response.json()["quality_report"]
+        payload = response.json()
+        report = payload["quality_report"]
         self.assertEqual([segment["index"] for segment in report["review_segments"]], [1, 3])
         self.assertEqual(report["review_segments"][0]["label"], "第 2 段")
         self.assertEqual(report["review_segments"][0]["start_seconds"], 600)
@@ -5723,6 +5724,14 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             for segment in report["review_segments"]
         ))
         self.assertNotIn(98, [segment["index"] for segment in report["review_segments"]])
+        self.assertGreaterEqual(payload["quality_warning_count"], 1)
+        self.assertIn("疑似連續重複轉錄", payload["quality_warning_text"])
+        self.assertEqual(payload["quality_review_segments"], ["第 2 段", "第 4 段"])
+        self.assertEqual(payload["quality_review_segment_details"], report["review_segments"])
+        self.assertEqual(payload["quality_review_segment_count"], 2)
+        self.assertEqual(payload["quality_review_rerunnable_segments"], [1, 3])
+        self.assertIn("第 2 段 10:00-20:00", payload["quality_review_segment_summary"])
+        self.assertIn("第 4 段 30:00-40:00", payload["quality_review_segment_summary"])
 
     def test_meeting_detail_keeps_warning_segments_when_metadata_is_unavailable(self):
         import backend.main as main
