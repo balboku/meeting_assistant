@@ -1387,6 +1387,7 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
     review_segment_detail_by_label: dict[str, dict[str, Any]] = {}
     known_segment_indices: set[int] = set()
     segment_issue_previews: list[str] = []
+    review_segment_issue_previews: list[str] = []
 
     def add_review_segment_label(
         label: str,
@@ -1468,6 +1469,8 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
                 for issue in review_segment.get("issues") or []
                 if str(issue).strip()
             ]
+            for issue_text in segment_issues:
+                review_segment_issue_previews.append(f"{label}：{issue_text}")
             add_review_segment_label(
                 label,
                 index=segment_index,
@@ -1542,7 +1545,7 @@ def _meeting_row_with_quality_preview(row: sqlite3.Row) -> dict[str, Any]:
     record["quality_warning_preview"] = warning_preview
     warning_text_items = [
         str(item).strip()
-        for item in [quality_warning_text, *segment_issue_previews]
+        for item in [quality_warning_text, *review_segment_issue_previews, *segment_issue_previews]
         if str(item).strip()
     ]
     if not warning_text_items and warning_preview:

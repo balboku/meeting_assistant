@@ -3006,9 +3006,11 @@ class SearchRegressionTests(unittest.TestCase):
         searched = database.search_meetings("segment-only-keyword", needs_review=True)
 
         self.assertEqual(listed["quality_warning_count"], 0)
+        self.assertEqual(listed["quality_warning_text"], "第 1 段：曾觸發轉錄補救")
         self.assertEqual(listed["quality_review_segment_count"], 1)
         self.assertEqual(listed["quality_review_segments"], ["第 1 段"])
         self.assertEqual(listed["quality_review_rerunnable_segments"], [])
+        self.assertEqual(searched[0]["quality_warning_text"], listed["quality_warning_text"])
         self.assertEqual([row["id"] for row in filtered], [meeting_id])
         self.assertEqual([row["id"] for row in searched], [meeting_id])
 
