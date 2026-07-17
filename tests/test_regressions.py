@@ -5915,6 +5915,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality-review-segment-label", html)
         self.assertIn("quality-rerun-review-segments", html)
         self.assertIn("quality-review-note", html)
+        self.assertIn('id="quality-rerun-review-full-button"', html)
         self.assertIn("segment-issue", html)
         self.assertIn("segment-status${issues.length ? ' has-issue' : ''}", html)
         self.assertIn("(segment.issues || [])", html)
@@ -5965,6 +5966,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('id="quality-rerun-review-segments-button"', html)
         self.assertIn("↻ 重跑需複核分段", html)
         self.assertIn("此紀錄缺少可直接重跑的分段資料；可定位原始檔時間複核，必要時使用完整重跑。", html)
+        self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, null, false, false, 'quality-rerun-review-full-button')\"", html)
         self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, [${rerunnableSegmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')\"", html)
         self.assertIn("const segmentStartSeconds = Number(segment?.dataset.startSeconds);", html)
         self.assertIn("const startSeconds = hasFallbackSeconds", html)
@@ -6555,17 +6557,25 @@ if (!sandbox.unavailable.includes('此紀錄缺少可直接重跑的分段資料
   console.error(sandbox.unavailable);
   process.exit(5);
 }}
-if (sandbox.unavailable.includes('quality-rerun-review-segments-button')) {{
+if (!sandbox.unavailable.includes('quality-rerun-review-full-button')) {{
   console.error(sandbox.unavailable);
   process.exit(6);
 }}
+if (sandbox.unavailable.includes('quality-rerun-review-segments-button')) {{
+  console.error(sandbox.unavailable);
+  process.exit(7);
+}}
 if (!sandbox.available.includes('quality-rerun-review-segments-button')) {{
   console.error(sandbox.available);
-  process.exit(7);
+  process.exit(8);
 }}
 if (sandbox.available.includes('quality-review-note')) {{
   console.error(sandbox.available);
-  process.exit(8);
+  process.exit(9);
+}}
+if (sandbox.available.includes('quality-rerun-review-full-button')) {{
+  console.error(sandbox.available);
+  process.exit(10);
 }}
 console.log('quality_review_segment_note_ok');
 """
