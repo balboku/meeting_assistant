@@ -6367,6 +6367,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function preferredReviewIssue", html)
         self.assertIn("const issues = (segment?.issues || [])", html)
         self.assertIn("const issue = preferredReviewIssue(issues);", html)
+        self.assertIn("const focusSeconds = reviewIssueFocusSeconds(issues, segment?.start_seconds);", html)
+        self.assertIn("focus_seconds: hasFocusSeconds ? focusSeconds : null", html)
         self.assertIn("issue,", html)
         self.assertIn("reason: issue ? `${display}：${issue}` : ''", html)
         self.assertIn("const reviewSegmentTitles = (reviewSegmentDetails.length ? reviewSegmentDetails : reviewSegments)", html)
@@ -6381,6 +6383,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const reasonTitle = [...new Set([warningPreview, reviewSegmentSummary, ...reviewSegmentReasons].filter(Boolean))].join('\\n');", html)
         self.assertIn("clockText(segment.start_seconds)}-${clockText(segment.end_seconds)", html)
         self.assertIn("card-quality-chip needs-review review-segments", html)
+        self.assertIn("const focusSeconds = Number(focusSegment.focus_seconds);", html)
+        self.assertIn("const focusLabel = hasFocusSeconds", html)
         self.assertIn("card-quality-chip needs-review transcript-review", html)
         self.assertIn("card-quality-chip needs-review review-segment-note", html)
         self.assertIn("問題分段：${escapeHtml(segmentText)}", html)
@@ -6393,7 +6397,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("需詳情複核", html)
         self.assertIn("card-quality-action", html)
         self.assertIn("onclick=\"openDetailAndFocusSegment(event, ${focusArgs})\"", html)
-        self.assertIn("開啟會議並定位${escapeHtml(focusSegment.display)}", html)
+        self.assertIn("開啟會議並定位${escapeHtml(focusLabel)}", html)
         self.assertIn("需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}", html)
         self.assertIn("分段：${escapeHtml(segmentText)}", html)
         self.assertIn("card-quality-chip", html)
@@ -6620,7 +6624,18 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('reviewIssuePriority'), grab('preferredReviewIssue'), grab('renderCardQuality')].join('\\n');
+const code = [
+  grab('escapeHtml'),
+  grab('clockText'),
+  grab('parseClockSeconds'),
+  grab('isRecordingQualityWarning'),
+  grab('cardWarningTypeLabel'),
+  grab('normalizeSegmentIndices'),
+  grab('reviewIssuePriority'),
+  grab('preferredReviewIssue'),
+  grab('reviewIssueFocusSeconds'),
+  grab('renderCardQuality')
+].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 const label1 = '第 1 段';
@@ -6715,7 +6730,18 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('reviewIssuePriority'), grab('preferredReviewIssue'), grab('renderCardQuality')].join('\\n');
+const code = [
+  grab('escapeHtml'),
+  grab('clockText'),
+  grab('parseClockSeconds'),
+  grab('isRecordingQualityWarning'),
+  grab('cardWarningTypeLabel'),
+  grab('normalizeSegmentIndices'),
+  grab('reviewIssuePriority'),
+  grab('preferredReviewIssue'),
+  grab('reviewIssueFocusSeconds'),
+  grab('renderCardQuality')
+].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderCardQuality({{
@@ -6769,7 +6795,18 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('reviewIssuePriority'), grab('preferredReviewIssue'), grab('renderCardQuality')].join('\\n');
+const code = [
+  grab('escapeHtml'),
+  grab('clockText'),
+  grab('parseClockSeconds'),
+  grab('isRecordingQualityWarning'),
+  grab('cardWarningTypeLabel'),
+  grab('normalizeSegmentIndices'),
+  grab('reviewIssuePriority'),
+  grab('preferredReviewIssue'),
+  grab('reviewIssueFocusSeconds'),
+  grab('renderCardQuality')
+].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderCardQuality({{
@@ -6778,7 +6815,7 @@ result = renderCardQuality({{
   quality_warning_preview: '偵測到可能的爆音；原始媒體檔已保留，重要內容請抽查。',
   quality_review_rerunnable_segments: [7],
   quality_review_segment_details: [
-    {{ index: 7, label: '第 8 段', start_seconds: 4200, end_seconds: 4800, issues: ['疑似連續重複轉錄'] }}
+    {{ index: 7, label: '第 8 段', start_seconds: 4200, end_seconds: 4800, issues: ['疑似連續重複轉錄；重複時間：70:01-73:00'] }}
   ]
 }});
 `, sandbox);
@@ -6794,9 +6831,17 @@ if (!sandbox.result.includes('問題分段：第 8 段 70:00-80:00')) {{
   console.error(sandbox.result);
   process.exit(6);
 }}
-if (!sandbox.result.includes('需複核：第 8 段 70:00-80:00：疑似連續重複轉錄')) {{
+if (!sandbox.result.includes('需複核：第 8 段 70:00-80:00：疑似連續重複轉錄；重複時間：70:01-73:00')) {{
   console.error(sandbox.result);
   process.exit(7);
+}}
+if (!sandbox.result.includes('openDetailAndFocusSegment(event, 43, 7, 4201)')) {{
+  console.error(sandbox.result);
+  process.exit(11);
+}}
+if (!sandbox.result.includes('aria-label="開啟會議並定位第 8 段 70:00-80:00 70:01"')) {{
+  console.error(sandbox.result);
+  process.exit(12);
 }}
 if (!sandbox.result.includes('openDetailAndFocusSourceMedia(event, 43)')) {{
   console.error(sandbox.result);
@@ -6842,7 +6887,18 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('reviewIssuePriority'), grab('preferredReviewIssue'), grab('renderCardQuality')].join('\\n');
+const code = [
+  grab('escapeHtml'),
+  grab('clockText'),
+  grab('parseClockSeconds'),
+  grab('isRecordingQualityWarning'),
+  grab('cardWarningTypeLabel'),
+  grab('normalizeSegmentIndices'),
+  grab('reviewIssuePriority'),
+  grab('preferredReviewIssue'),
+  grab('reviewIssueFocusSeconds'),
+  grab('renderCardQuality')
+].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderCardQuality({{
@@ -6901,7 +6957,18 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('reviewIssuePriority'), grab('preferredReviewIssue'), grab('renderCardQuality')].join('\\n');
+const code = [
+  grab('escapeHtml'),
+  grab('clockText'),
+  grab('parseClockSeconds'),
+  grab('isRecordingQualityWarning'),
+  grab('cardWarningTypeLabel'),
+  grab('normalizeSegmentIndices'),
+  grab('reviewIssuePriority'),
+  grab('preferredReviewIssue'),
+  grab('reviewIssueFocusSeconds'),
+  grab('renderCardQuality')
+].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderCardQuality({{

@@ -2845,9 +2845,12 @@ function renderCardQuality(record) {
         : '';
       const display = `${label}${timeText}`;
       const issueText = issue ? `：${issue}` : '';
+      const focusSeconds = reviewIssueFocusSeconds(issues, segment?.start_seconds);
+      const hasFocusSeconds = focusSeconds !== null;
       return {
         index: hasIndex ? index : null,
         start_seconds: segment?.start_seconds,
+        focus_seconds: hasFocusSeconds ? focusSeconds : null,
         display,
         issue,
         reason: issue ? `${display}：${issue}` : '',
@@ -2904,12 +2907,15 @@ function renderCardQuality(record) {
       ? reviewSegmentDetails.find(segment => Number.isInteger(segment.index) && segment.index >= 0)
       : null;
     if (focusSegment) {
-      const startSeconds = Number(focusSegment.start_seconds);
-      const hasStartSeconds = Number.isFinite(startSeconds) && startSeconds >= 0;
-      const focusArgs = hasStartSeconds
-        ? `${recordId}, ${focusSegment.index}, ${startSeconds}`
+      const focusSeconds = Number(focusSegment.focus_seconds);
+      const hasFocusSeconds = Number.isFinite(focusSeconds) && focusSeconds >= 0;
+      const focusLabel = hasFocusSeconds
+        ? `${focusSegment.display} ${clockText(focusSeconds)}`
+        : focusSegment.display;
+      const focusArgs = hasFocusSeconds
+        ? `${recordId}, ${focusSegment.index}, ${focusSeconds}`
         : `${recordId}, ${focusSegment.index}`;
-      chips.push(`<button type="button" class="card-quality-chip needs-review review-segments card-quality-action" title="開啟會議並定位需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}" aria-label="開啟會議並定位${escapeHtml(focusSegment.display)}" onclick="openDetailAndFocusSegment(event, ${focusArgs})">問題分段：${escapeHtml(segmentText)}</button>`);
+      chips.push(`<button type="button" class="card-quality-chip needs-review review-segments card-quality-action" title="開啟會議並定位需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}" aria-label="開啟會議並定位${escapeHtml(focusLabel)}" onclick="openDetailAndFocusSegment(event, ${focusArgs})">問題分段：${escapeHtml(segmentText)}</button>`);
     } else {
       chips.push(`<span class="card-quality-chip needs-review review-segments" title="需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}">問題分段：${escapeHtml(segmentText)}</span>`);
     }
