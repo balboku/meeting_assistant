@@ -610,6 +610,12 @@
       font-size: 12px;
       font-weight: 700;
     }
+    .quality-review-segment-wrap {
+      display: inline-flex;
+      align-items: stretch;
+      gap: 4px;
+      max-width: min(100%, 620px);
+    }
     .quality-review-segment {
       display: inline-flex; align-items: center; gap: 6px;
       min-height: 30px;
@@ -622,6 +628,10 @@
       font-size: 12px;
       cursor: pointer;
       max-width: min(100%, 460px);
+    }
+    .quality-review-segment-wrap .quality-review-segment {
+      min-width: 0;
+      max-width: 100%;
     }
     .quality-review-segment:hover { border-color: var(--yellow); background: rgba(242, 213, 207, 0.16); }
     .quality-review-segment.media-only { border-style: dashed; }
@@ -640,6 +650,20 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .quality-review-segment-rerun {
+      min-height: 30px;
+      padding: 5px 9px;
+      border: 1px solid rgba(122,162,247,0.72);
+      border-radius: 6px;
+      background: rgba(122,162,247,0.1);
+      color: var(--blue);
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .quality-review-segment-rerun:hover { background: rgba(122,162,247,0.18); }
+    .quality-review-segment-rerun:disabled { opacity: 0.55; cursor: wait; }
     .quality-rerun-review-segments {
       min-height: 30px;
       padding: 5px 10px;
@@ -3578,22 +3602,26 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
       const hasFocusSeconds = focusSeconds !== null;
       const canCueSource = hasFocusSeconds;
       const focusArgs = hasFocusSeconds ? `${index}, ${focusSeconds}` : `${index}`;
+      const rerunButtonId = `quality-rerun-review-segment-${index}`;
+      const rerunControl = canFocusSegment
+        ? `<button id="${rerunButtonId}" type="button" class="quality-review-segment-rerun" aria-describedby="detail-status" aria-busy="false" title="只重跑第 ${index + 1} 段，其他分段沿用快取" onclick="rerunMeeting(${Number(meetingId) || 0}, ${index}, false, false, '${rerunButtonId}')">↻ 重跑</button>`
+        : '';
       if (!canFocusSegment) {
         if (canCueSource) {
-          return `<button type="button" class="quality-review-segment media-only" aria-describedby="detail-status" title="此舊紀錄沒有可重跑的分段控制，可定位原始檔時間" onclick="focusQualitySegment(${focusArgs})">
+          return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment media-only" aria-describedby="detail-status" title="此舊紀錄沒有可重跑的分段控制，可定位原始檔時間" onclick="focusQualitySegment(${focusArgs})">
             <span class="quality-review-segment-label">第 ${index + 1} 段</span>
             <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
-          </button>`;
+          </button></span>`;
         }
-        return `<span class="quality-review-segment unavailable" aria-disabled="true" title="此舊紀錄沒有可定位的分段控制">
+        return `<span class="quality-review-segment-wrap"><span class="quality-review-segment unavailable" aria-disabled="true" title="此舊紀錄沒有可定位的分段控制">
           <span class="quality-review-segment-label">第 ${index + 1} 段</span>
           <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
-        </span>`;
+        </span></span>`;
       }
-      return `<button type="button" class="quality-review-segment" aria-describedby="detail-status" onclick="focusQualitySegment(${focusArgs})">
+      return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment" aria-describedby="detail-status" title="定位第 ${index + 1} 段問題逐字稿與原始檔時間" onclick="focusQualitySegment(${focusArgs})">
         <span class="quality-review-segment-label">第 ${index + 1} 段</span>
         <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
-      </button>`;
+      </button>${rerunControl}</span>`;
     })
     .filter(Boolean)
     .join('');

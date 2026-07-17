@@ -6178,7 +6178,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("transcript-timecode-highlight", html)
         self.assertIn("quality-review-segments", html)
         self.assertIn("quality-review-segment", html)
+        self.assertIn("quality-review-segment-wrap", html)
         self.assertIn("quality-review-segment-label", html)
+        self.assertIn("quality-review-segment-rerun", html)
         self.assertIn("quality-rerun-review-segments", html)
         self.assertIn("quality-review-note", html)
         self.assertIn('id="quality-rerun-review-full-button"', html)
@@ -6235,7 +6237,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('title="此舊紀錄沒有可重跑的分段控制，可定位原始檔時間"', html)
         self.assertIn("aria-label=\"需複核分段\"", html)
         self.assertIn("onclick=\"focusQualitySegment(${focusArgs})\"", html)
-        self.assertIn('return `<button type="button" class="quality-review-segment" aria-describedby="detail-status" onclick="focusQualitySegment(${focusArgs})">', html)
+        self.assertIn('return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment"', html)
+        self.assertIn('id="${rerunButtonId}" type="button" class="quality-review-segment-rerun"', html)
+        self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, ${index}, false, false, '${rerunButtonId}')\"", html)
         self.assertIn("quality-review-title", html)
         self.assertIn('id="quality-rerun-review-segments-button"', html)
         self.assertIn("↻ 重跑需複核分段", html)
@@ -7157,6 +7161,10 @@ if (sandbox.unavailable.includes('quality-rerun-review-segments-button')) {{
   console.error(sandbox.unavailable);
   process.exit(7);
 }}
+if (sandbox.unavailable.includes('quality-review-segment-rerun')) {{
+  console.error(sandbox.unavailable);
+  process.exit(15);
+}}
 if (!sandbox.available.includes('quality-rerun-review-segments-button')) {{
   console.error(sandbox.available);
   process.exit(8);
@@ -7172,6 +7180,14 @@ if (sandbox.available.includes('quality-rerun-review-full-button')) {{
 if (!sandbox.available.includes('focusQualitySegment(7, 4200)')) {{
   console.error(sandbox.available);
   process.exit(14);
+}}
+if (!sandbox.available.includes('quality-rerun-review-segment-7')) {{
+  console.error(sandbox.available);
+  process.exit(16);
+}}
+if (!sandbox.available.includes("rerunMeeting(43, 7, false, false, 'quality-rerun-review-segment-7')")) {{
+  console.error(sandbox.available);
+  process.exit(17);
 }}
 console.log('quality_review_segment_note_ok');
 """
