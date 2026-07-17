@@ -3097,9 +3097,11 @@ class SearchRegressionTests(unittest.TestCase):
             ],
         )
         self.assertEqual(listed["quality_review_segment_count"], 2)
+        self.assertEqual(listed["quality_warning_text"], quality_report["warnings"][0])
         self.assertEqual(searched["quality_review_segments"], ["第 2 段", "第 4 段"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
         self.assertEqual(searched["quality_review_segment_count"], 2)
+        self.assertEqual(searched["quality_warning_text"], listed["quality_warning_text"])
 
     def test_list_and_search_parse_full_transcript_repetition_warning_segments(self):
         database, tmp_path = self._isolated_database()

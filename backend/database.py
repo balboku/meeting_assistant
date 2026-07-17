@@ -117,6 +117,70 @@ def _quality_review_segment_summary(details: list[dict[str, Any]], limit: int = 
     return "；".join(summaries) or None
 
 
+def _review_segment_label_variants(label: str) -> list[str]:
+    cleaned = str(label or "").strip()
+    variants = [cleaned] if cleaned else []
+    match = re.search(r"第\s*(\d+)\s*段", cleaned)
+    if match:
+        number = match.group(1)
+        variants.extend([
+            f"第 {number} 段",
+            f"第{number}段",
+            f"Segment #{number}",
+            f"Segment {number}",
+        ])
+    return list(dict.fromkeys(value for value in variants if value))
+
+
+def _warning_covers_segment_issue(warning_text: str, preview_text: str) -> bool:
+    warning = str(warning_text or "")
+    preview = str(preview_text or "").strip()
+    if not warning or "：" not in preview:
+        return False
+
+    label, issue = preview.split("：", 1)
+    if not any(variant in warning for variant in _review_segment_label_variants(label)):
+        return False
+
+    issue_tokens = [
+        token
+        for token in (
+            "疑似連續重複轉錄",
+            "重複轉錄",
+            "曾觸發轉錄補救",
+            "轉錄內容為空",
+            "自動過濾",
+            "截斷提示",
+        )
+        if token in issue
+    ]
+    repeated_match = re.search(r"(?:同一句連續重複\s*\d+\s*次|連續重複\s*\d+\s*句|重複比例\s*\d+%)", issue)
+    time_match = re.search(r"\d{1,3}:[0-5]\d\s*[-–—~至到]\s*\d{1,3}:[0-5]\d", issue)
+    if repeated_match:
+        issue_tokens.append(repeated_match.group(0))
+    if time_match:
+        issue_tokens.append(time_match.group(0).replace(" ", ""))
+
+    if not issue_tokens:
+        return False
+    normalized_warning = warning.replace(" ", "")
+    return any(token.replace(" ", "") in normalized_warning for token in issue_tokens)
+
+
+def _append_uncovered_quality_previews(
+    warning_text_items: list[str],
+    warning_text: str,
+    previews: list[str],
+) -> None:
+    for preview in previews:
+        cleaned = str(preview or "").strip()
+        if not cleaned:
+            continue
+        if _warning_covers_segment_issue(warning_text, cleaned):
+            continue
+        warning_text_items.append(cleaned)
+
+
 _TRANSCRIPT_SEGMENT_HEADING_PATTERN = re.compile(
     r"(?m)^#{1,6}\s*(?:"
     r"【第\s*(?P<zh_index>\d+)\s*段\s*[｜|]\s*"
@@ -1574,9 +1638,14 @@ def apply_quality_preview_fields(
     record["quality_warning_preview"] = warning_preview
     warning_text_items = [
         str(item).strip()
-        for item in [quality_warning_text, *review_segment_issue_previews, *segment_issue_previews]
+        for item in [quality_warning_text]
         if str(item).strip()
     ]
+    _append_uncovered_quality_previews(
+        warning_text_items,
+        quality_warning_text,
+        [*review_segment_issue_previews, *segment_issue_previews],
+    )
     if not warning_text_items and warning_preview:
         warning_text_items.append(str(warning_preview).strip())
     combined_warning_text = "\n".join(dict.fromkeys(warning_text_items))
