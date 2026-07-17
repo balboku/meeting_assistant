@@ -6123,12 +6123,15 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("檢查原始檔：${escapeHtml(record?.title || `#${recordId}`)}", html)
         self.assertIn("const warningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0);", html)
         self.assertIn("const warningText = String(record?.quality_warning_text || warningPreview).trim();", html)
+        self.assertIn("const hasSummaryWarning = warningText.includes('摘要品質警示');", html)
+        self.assertIn("const hasRecordingWarning = isRecordingQualityWarning(warningText);", html)
         self.assertIn("const warningChipText = hasTranscriptWarningChip && reviewSegments.length", html)
         self.assertIn("${warningType} ${reviewSegments.length} 段", html)
         self.assertIn("const warningChipTitle = hasTranscriptWarningChip && reviewSegments.length", html)
         self.assertIn(": (warningText || warningPreview || warningType);", html)
         self.assertIn("title=\"${escapeHtml(warningChipTitle)}\"", html)
         self.assertIn("onclick=\"rerunSummaryFromCard(event, ${recordId})\"", html)
+        self.assertIn("if (hasRecordingWarning && hasRecordId)", html)
         self.assertIn("重整摘要：${escapeHtml(record?.title || `#${recordId}`)}", html)
         self.assertIn("const reviewSegmentDetails = (record?.quality_review_segment_details || [])", html)
         self.assertIn("const reviewSegmentSummary = String(record?.quality_review_segment_summary || '').trim();", html)
@@ -6517,6 +6520,65 @@ if (sandbox.result.includes('需詳情複核')) {{
   process.exit(10);
 }}
 console.log('audio_card_quality_label_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_render_card_quality_offers_all_actions_from_full_warning_text(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function renderCardQuality'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [grab('escapeHtml'), grab('clockText'), grab('isRecordingQualityWarning'), grab('cardWarningTypeLabel'), grab('normalizeSegmentIndices'), grab('renderCardQuality')].join('\\n');
+const sandbox = {{}};
+vm.runInNewContext(code + `
+result = renderCardQuality({{
+  id: 77,
+  title: '混合品質警示',
+  quality_warning_count: 2,
+  quality_warning_preview: '偵測到可能的爆音；原始媒體檔已保留。',
+  quality_warning_text: '偵測到可能的爆音；原始媒體檔已保留。\\\\n摘要品質警示：討論摘要未使用 D 編號'
+}});
+`, sandbox);
+if (!sandbox.result.includes('錄音警示 2')) {{
+  console.error(sandbox.result);
+  process.exit(4);
+}}
+if (!sandbox.result.includes('rerunSummaryFromCard(event, 77)')) {{
+  console.error(sandbox.result);
+  process.exit(5);
+}}
+if (!sandbox.result.includes('openDetailAndFocusSourceMedia(event, 77)')) {{
+  console.error(sandbox.result);
+  process.exit(6);
+}}
+if (!sandbox.result.includes('摘要品質警示：討論摘要未使用 D 編號')) {{
+  console.error(sandbox.result);
+  process.exit(7);
+}}
+console.log('mixed_warning_card_actions_ok');
 """
         try:
             result = subprocess.run(

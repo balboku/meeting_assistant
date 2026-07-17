@@ -2818,6 +2818,8 @@ function renderCardQuality(record) {
   }
   if (warningCount > 0) {
     const warningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0);
+    const hasSummaryWarning = warningText.includes('摘要品質警示');
+    const hasRecordingWarning = isRecordingQualityWarning(warningText);
     hasTranscriptWarningChip = warningType === '逐字稿警示';
     const warningChipText = hasTranscriptWarningChip && reviewSegments.length
       ? `${warningType} ${reviewSegments.length} 段`
@@ -2826,9 +2828,10 @@ function renderCardQuality(record) {
       ? `逐字稿需複核分段：${reviewSegmentSummary || reviewSegmentTitles.join('、') || reviewSegments.join('、')}`
       : (warningText || warningPreview || warningType);
     chips.push(`<span class="card-quality-chip needs-review" title="${escapeHtml(warningChipTitle)}">${escapeHtml(warningChipText)}</span>`);
-    if (warningPreview.startsWith('摘要品質警示') && hasRecordId) {
+    if (hasSummaryWarning && hasRecordId) {
       chips.push(`<button type="button" class="card-quality-chip needs-review card-quality-action" title="沿用逐字稿，只重新產生摘要、決議與待辦" aria-label="重整摘要：${escapeHtml(record?.title || `#${recordId}`)}" onclick="rerunSummaryFromCard(event, ${recordId})">↻ 重整摘要</button>`);
-    } else if (isRecordingQualityWarning(warningPreview) && hasRecordId) {
+    }
+    if (hasRecordingWarning && hasRecordId) {
       chips.push(`<button type="button" class="card-quality-chip needs-review card-quality-action" title="開啟會議並檢查原始音訊或錄影" aria-label="檢查原始檔：${escapeHtml(record?.title || `#${recordId}`)}" onclick="openDetailAndFocusSourceMedia(event, ${recordId})">🎧 檢查原始檔</button>`);
     }
   }
