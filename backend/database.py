@@ -100,6 +100,23 @@ def _quality_review_issue_priority(issue: str) -> tuple[int, int]:
     return (score, len(cleaned))
 
 
+def _normalize_repeated_phrase_preview(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(value or "").strip())
+    cleaned = re.sub(
+        r"^(?:\[[^\]]{1,12}\]|【[^】]{1,12}】|（[^）]{1,12}）|\([^)]{1,12}\))\s*",
+        "",
+        cleaned,
+    )
+    cleaned = cleaned.strip("：:，。,.、；;！!？?()（）[]【】「」『』")
+    cleaned = re.sub(r"[，,。．.；;：:、]+", "", cleaned)
+    return cleaned.strip()
+
+
+def _repeated_phrase_dedupe_key(value: str) -> str:
+    cleaned = re.sub(r"\s+", "", _normalize_repeated_phrase_preview(value))
+    return re.sub(r"^(?:台語|臺語|閩南語|英語|英文|日語|日文|中文|國語|普通話)", "", cleaned)
+
+
 def _normalize_quality_review_issue_text(issue: str) -> str:
     cleaned = re.sub(r"\s+", " ", str(issue or "").strip())
     if not cleaned:
@@ -117,7 +134,7 @@ def _normalize_quality_review_issue_text(issue: str) -> str:
         normalized = f"疑似連續重複轉錄；同一句連續重複 {repeated.group('count')} 次"
         phrase = str(repeated.group("phrase") or "").strip()
         if phrase:
-            phrase = re.sub(r"[，,。．.；;：:、]+", "", phrase).strip()
+            phrase = _normalize_repeated_phrase_preview(phrase)
             normalized += f"：{phrase}"
         if repeated.group("start") and repeated.group("end"):
             normalized += f"；重複時間：{repeated.group('start')}-{repeated.group('end')}"
@@ -136,7 +153,7 @@ def _quality_review_issue_dedupe_key(issue: str) -> str:
         cleaned,
     )
     if repeated:
-        phrase = re.sub(r"[\s，,。．.；;：:、]+", "", str(repeated.group("phrase") or ""))
+        phrase = _repeated_phrase_dedupe_key(str(repeated.group("phrase") or ""))
         return "|".join([
             "repeat",
             repeated.group("count") or "",
@@ -324,9 +341,7 @@ def _repeated_transcript_turn_review_segments(
         })
 
     def preview_text(value: str, max_chars: int = 24) -> str:
-        cleaned = re.sub(r"\s+", " ", str(value or "").strip())
-        cleaned = cleaned.strip("：:，。,.、；;！!？?")
-        cleaned = re.sub(r"[，,。．.；;：:、]+", "", cleaned)
+        cleaned = _normalize_repeated_phrase_preview(value)
         return cleaned[:max_chars]
 
     for line in (transcript or "").splitlines():

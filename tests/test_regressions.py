@@ -3089,6 +3089,61 @@ class SearchRegressionTests(unittest.TestCase):
             ],
         )
 
+    def test_quality_review_issue_dedupes_leading_language_marker(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "language-marker-repeat.md"
+        output_path.write_text(
+            """
+# Meeting Notes
+
+## 完整逐字稿 (Verbatim Transcript)
+### 【第 11 段｜100:00 – 110:00】
+
+[103:04] **[發言者 A]**：[台語] 這樣比較好，這樣比較好
+[103:05] **[發言者 A]**：[台語] 這樣比較好，這樣比較好
+[103:06] **[發言者 A]**：[台語] 這樣比較好，這樣比較好
+[103:07] **[發言者 A]**：[台語] 這樣比較好，這樣比較好
+""".strip(),
+            encoding="utf-8",
+        )
+        quality_report = {
+            "score": 80,
+            "label": "需複核",
+            "warnings": ["逐字稿品質警示：疑似連續重複轉錄"],
+            "review_segments": [
+                {
+                    "index": 10,
+                    "label": "第 11 段",
+                    "start_seconds": 6000,
+                    "end_seconds": 6600,
+                    "issues": [
+                        "疑似連續重複轉錄；同一句連續重複 4 次：台語這樣比較好這樣比較好；重複時間：103:04-103:07",
+                    ],
+                },
+            ],
+            "segments": [
+                {"index": 10, "start_seconds": 6000, "end_seconds": 6600, "issues": []},
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Language Marker Repeat",
+            date="2026/07/12",
+            source_audio="language-marker-repeat.webm",
+            output_path=str(output_path),
+            summary="language-marker-repeat-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        self.assertEqual(
+            listed["quality_review_segment_details"][0]["issues"],
+            ["疑似連續重複轉錄；同一句連續重複 4 次：台語這樣比較好這樣比較好；重複時間：103:04-103:07"],
+        )
+        self.assertEqual(
+            listed["quality_review_segment_summary"],
+            "第 11 段 100:00-110:00：疑似連續重複轉錄；同一句連續重複 4 次：台語這樣比較好這樣比較好；重複時間：103:04-103:07",
+        )
+
     def test_needs_review_filter_includes_review_segments_without_warnings(self):
         database, tmp_path = self._isolated_database()
         output_path = tmp_path / "review-segment-only.md"
