@@ -6067,7 +6067,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("openDetailAndFocusSourceMedia(event, ${recordId})", html)
         self.assertIn("檢查原始檔：${escapeHtml(record?.title || `#${recordId}`)}", html)
         self.assertIn("const warningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0);", html)
-        self.assertIn("${escapeHtml(warningType)} ${warningCount}", html)
+        self.assertIn("const warningChipText = hasTranscriptWarningChip && reviewSegments.length", html)
+        self.assertIn("${warningType} ${reviewSegments.length} 段", html)
+        self.assertIn("const warningChipTitle = hasTranscriptWarningChip && reviewSegments.length", html)
+        self.assertIn("title=\"${escapeHtml(warningChipTitle)}\"", html)
         self.assertIn("onclick=\"rerunSummaryFromCard(event, ${recordId})\"", html)
         self.assertIn("重整摘要：${escapeHtml(record?.title || `#${recordId}`)}", html)
         self.assertIn("const reviewSegmentDetails = (record?.quality_review_segment_details || [])", html)
@@ -6305,9 +6308,17 @@ if (!sandbox.result.includes('開啟會議並定位第 1 段 09:59-10:00')) {{
   console.error(sandbox.result);
   process.exit(7);
 }}
-if (!sandbox.result.includes('逐字稿警示 1')) {{
+if (!sandbox.result.includes('逐字稿警示 2 段')) {{
   console.error(sandbox.result);
   process.exit(8);
+}}
+if (sandbox.result.includes('>逐字稿警示 1<')) {{
+  console.error(sandbox.result);
+  process.exit(12);
+}}
+if (!sandbox.result.includes('title="逐字稿需複核分段：第 1 段 09:59-10:00：疑似連續重複轉錄')) {{
+  console.error(sandbox.result);
+  process.exit(13);
 }}
 if (!sandbox.result.includes('rerunReviewSegmentsFromCard(event, 17, [0,1])')) {{
   console.error(sandbox.result);
