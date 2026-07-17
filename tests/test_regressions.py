@@ -2731,6 +2731,15 @@ class SearchRegressionTests(unittest.TestCase):
                 },
             ],
         )
+        phrase_text = (
+            "逐字稿品質警示：疑似連續重複轉錄"
+            "（同一句連續重複 31 次：因為我是結所以我領車；"
+            "疑似分段：第 4 段｜30:00-40:00；重複時間：31:00-31:03）"
+        )
+        self.assertEqual(
+            review_segment_details_from_text(phrase_text)[0]["issues"],
+            ["疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：31:00-31:03"],
+        )
         boundary_text = "逐字稿品質警示：疑似連續重複轉錄（重複時間：09:59-10:02）"
         self.assertEqual(review_segment_indices_from_text(boundary_text), [0, 1])
         self.assertEqual(
@@ -3085,21 +3094,21 @@ class SearchRegressionTests(unittest.TestCase):
                     "index": 1,
                     "start_seconds": 600,
                     "end_seconds": 1200,
-                    "issues": ["疑似連續重複轉錄；同一句連續重複 31 次；重複時間：10:00-10:03"],
+                    "issues": ["疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：10:00-10:03"],
                 },
                 {
                     "label": "第 4 段",
                     "index": 3,
                     "start_seconds": 1800,
                     "end_seconds": 2400,
-                    "issues": ["疑似連續重複轉錄；同一句連續重複 31 次；重複時間：10:00-10:03"],
+                    "issues": ["疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：10:00-10:03"],
                 },
             ],
         )
         self.assertEqual(listed["quality_review_segment_count"], 2)
         expected_summary = (
             "第 2 段 10:00-20:00、第 4 段 30:00-40:00："
-            "疑似連續重複轉錄；同一句連續重複 31 次；重複時間：10:00-10:03"
+            "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：10:00-10:03"
         )
         self.assertEqual(listed["quality_review_segment_summary"], expected_summary)
         self.assertEqual(listed["quality_warning_text"], quality_report["warnings"][0])
@@ -5682,8 +5691,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(report["review_segments"][0]["end_seconds"], 2400)
         self.assertEqual(report["review_segments"][1]["start_seconds"], 3000)
         self.assertEqual(report["review_segments"][1]["end_seconds"], 3600)
-        self.assertTrue(any("疑似連續重複轉錄" in issue for issue in report["review_segments"][0]["issues"]))
+        self.assertTrue(any("因為我是結所以我領車" in issue for issue in report["review_segments"][0]["issues"]))
         self.assertTrue(any("51:00-51:03" in issue for issue in report["review_segments"][1]["issues"]))
+        self.assertTrue(any("那這個分數就歸零" in issue for issue in report["review_segments"][1]["issues"]))
         self.assertFalse(any("品質警示提及此分段" in issue for issue in report["review_segments"][0]["issues"]))
 
     def test_meeting_detail_infers_review_segments_from_warning_text(self):

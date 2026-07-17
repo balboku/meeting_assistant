@@ -56,7 +56,16 @@ def _warning_issue_text(text: str) -> str:
         parts = ["疑似連續重複轉錄"]
         repeat_match = re.search(r"同一句連續重複\s*\d+\s*次", cleaned)
         if repeat_match:
-            parts.append(repeat_match.group(0))
+            repeat_text = repeat_match.group(0)
+            phrase_match = re.search(
+                r"同一句連續重複\s*\d+\s*次[：:]\s*(?P<phrase>[^；;，,。)\]）]{1,60})",
+                cleaned,
+            )
+            if phrase_match:
+                phrase = phrase_match.group("phrase").strip()
+                if phrase:
+                    repeat_text = f"{repeat_text}：{phrase}"
+            parts.append(repeat_text)
         if time_text:
             parts.append(time_text)
         return "；".join(parts)
