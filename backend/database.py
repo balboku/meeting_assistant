@@ -1560,16 +1560,6 @@ def apply_quality_preview_fields(
             if not isinstance(review_segment_detail_by_label.get(label, {}).get("index"), int)
             or review_segment_detail_by_label[label]["index"] in known_segment_indices
         ]
-    record["quality_warning_count"] = warning_count
-    record["quality_warning_preview"] = warning_preview
-    warning_text_items = [
-        str(item).strip()
-        for item in [quality_warning_text, *review_segment_issue_previews, *segment_issue_previews]
-        if str(item).strip()
-    ]
-    if not warning_text_items and warning_preview:
-        warning_text_items.append(str(warning_preview).strip())
-    record["quality_warning_text"] = "\n".join(dict.fromkeys(warning_text_items)) or None
     sorted_review_segment_labels = sorted(review_segment_labels, key=review_segment_label_sort_key)
     record["quality_review_segments"] = sorted_review_segment_labels
     record["quality_review_segment_details"] = [
@@ -1580,6 +1570,24 @@ def apply_quality_preview_fields(
     record["quality_review_segment_summary"] = _quality_review_segment_summary(
         record["quality_review_segment_details"]
     )
+    record["quality_warning_count"] = warning_count
+    record["quality_warning_preview"] = warning_preview
+    warning_text_items = [
+        str(item).strip()
+        for item in [quality_warning_text, *review_segment_issue_previews, *segment_issue_previews]
+        if str(item).strip()
+    ]
+    if not warning_text_items and warning_preview:
+        warning_text_items.append(str(warning_preview).strip())
+    combined_warning_text = "\n".join(dict.fromkeys(warning_text_items))
+    review_summary = str(record.get("quality_review_segment_summary") or "").strip()
+    has_segment_label_in_warning = any(
+        label and label in combined_warning_text
+        for label in sorted_review_segment_labels
+    )
+    if review_summary and not has_segment_label_in_warning:
+        warning_text_items.append(f"需複核分段：{review_summary}")
+    record["quality_warning_text"] = "\n".join(dict.fromkeys(warning_text_items)) or None
     record["quality_review_segment_count"] = len(sorted_review_segment_labels)
     if not known_segment_indices and record["quality_review_segment_details"]:
         known_segment_indices = _markdown_transcript_segment_indices(str(record.get("output_path") or ""))

@@ -3369,7 +3369,17 @@ class SearchRegressionTests(unittest.TestCase):
                 },
             ],
         )
+        self.assertIn("逐字稿品質警示：疑似連續重複轉錄", listed["quality_warning_text"])
+        self.assertIn(
+            "需複核分段：第 4 段 30:00-40:00：疑似連續重複轉錄：同一句連續重複 4 次（31:00-31:03）",
+            listed["quality_warning_text"],
+        )
+        self.assertIn(
+            "第 6 段 50:00-60:00：疑似連續重複轉錄：同一句連續重複 4 次（51:00-51:03）",
+            listed["quality_warning_text"],
+        )
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
+        self.assertEqual(searched["quality_warning_text"], listed["quality_warning_text"])
 
     def test_list_and_search_infer_repeat_segments_from_generic_warning(self):
         database, tmp_path = self._isolated_database()
