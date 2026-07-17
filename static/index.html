@@ -574,8 +574,20 @@
     .quality-summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .quality-score { color: var(--green); font-size: 16px; font-weight: 700; }
     .quality-warning {
-      display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+      display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px;
       color: var(--yellow); font-size: 13px; line-height: 1.6;
+    }
+    .quality-warning-summary {
+      flex: 1 1 100%;
+      min-width: 0;
+      color: var(--text);
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+    .quality-warning-body {
+      flex: 1 1 420px;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .quality-warning-actions { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .quality-warning-jump {
@@ -3293,6 +3305,33 @@ function qualityWarningSegmentIndices(warning = '', segments = [], reviewSegment
   return qualityWarningSegmentTargets(warning, segments, reviewSegments).map(target => target.index);
 }
 
+function reviewSegmentIssueSummary(reviewSegments = [], limit = 5) {
+  const grouped = new Map();
+  (reviewSegments || []).slice(0, limit).forEach(segment => {
+    const index = Number(segment?.index);
+    const fallbackLabel = Number.isInteger(index) && index >= 0 ? `第 ${index + 1} 段` : '分段';
+    const label = String(segment?.label || fallbackLabel).trim() || fallbackLabel;
+    const hasTimeRange = segment?.start_seconds !== undefined || segment?.end_seconds !== undefined;
+    const startSeconds = segment?.start_seconds !== undefined ? segment.start_seconds : segment?.end_seconds;
+    const endSeconds = segment?.end_seconds !== undefined ? segment.end_seconds : segment?.start_seconds;
+    const timeText = hasTimeRange
+      ? ` ${clockText(startSeconds)}-${clockText(endSeconds)}`
+      : '';
+    const issues = (segment?.issues || [])
+      .map(issue => String(issue || '').trim())
+      .filter(Boolean);
+    const issue = issues[0] || '需複核';
+    if (!grouped.has(issue)) grouped.set(issue, []);
+    grouped.get(issue).push(`${label}${timeText}`);
+  });
+  const summaries = Array.from(grouped.entries())
+    .map(([issue, segments]) => `${segments.join('、')}：${issue}`);
+  if ((reviewSegments || []).length > limit) {
+    summaries.push(`另有 ${(reviewSegments || []).length - limit} 段`);
+  }
+  return summaries.join('；');
+}
+
 function focusQualitySegment(segmentIndex, fallbackStartSeconds = null) {
   const index = Number(segmentIndex);
   const button = document.getElementById(`rerun-segment-${index}`);
@@ -3326,6 +3365,13 @@ function focusQualitySegment(segmentIndex, fallbackStartSeconds = null) {
 
 function renderQualityWarning(warning = '', segments = [], reviewSegments = []) {
   const targets = qualityWarningSegmentTargets(warning, segments, reviewSegments);
+  const warningText = String(warning || '').trim();
+  const reviewSummary = warningText.startsWith('逐字稿品質警示')
+    ? reviewSegmentIssueSummary(reviewSegments)
+    : '';
+  const summary = reviewSummary
+    ? `<span class="quality-warning-summary">問題位置：${escapeHtml(reviewSummary)}</span>`
+    : '';
   const actions = targets.length
     ? `<span class="quality-warning-actions">${targets
         .map(target => {
@@ -3337,7 +3383,7 @@ function renderQualityWarning(warning = '', segments = [], reviewSegments = []) 
         })
         .join('')}</span>`
     : '';
-  return `<div class="quality-warning">${escapeHtml(warning)}${actions}</div>`;
+  return `<div class="quality-warning">${summary}<span class="quality-warning-body">${escapeHtml(warningText)}</span>${actions}</div>`;
 }
 
 function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegments = []) {

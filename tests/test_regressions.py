@@ -5999,6 +5999,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality_review_segment_count", html)
         self.assertIn("quality_report", html)
         self.assertIn("quality-warning", html)
+        self.assertIn("quality-warning-summary", html)
+        self.assertIn("quality-warning-body", html)
         self.assertIn("quality-warning-actions", html)
         self.assertIn("quality-warning-jump", html)
         self.assertIn("quality-review-segments", html)
@@ -6021,6 +6023,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("return Number(match[1]) * 60 + Number(match[2]);", html)
         self.assertIn("function qualityWarningSegmentTargets", html)
         self.assertIn("function qualityWarningSegmentIndices", html)
+        self.assertIn("function reviewSegmentIssueSummary", html)
         self.assertIn("function focusQualitySegment", html)
         self.assertIn("function renderQualityWarning", html)
         self.assertIn("function renderQualityReviewSegments", html)
@@ -6072,6 +6075,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("setTimeout(() => segment?.classList.remove('highlight'), 2600);", html)
         self.assertIn("renderQualityWarning(warning, segmentItems, report.review_segments || [])", html)
         self.assertIn("const targets = qualityWarningSegmentTargets(warning, segments, reviewSegments);", html)
+        self.assertIn("const reviewSummary = warningText.startsWith('逐字稿品質警示')", html)
+        self.assertIn("問題位置：${escapeHtml(reviewSummary)}", html)
         self.assertIn("const focusArgs = target.start_seconds !== null ? `${target.index}, ${target.start_seconds}` : `${target.index}`;", html)
         self.assertIn("定位第 ${target.index + 1} 段，並跳到原始檔 ${clockText(target.start_seconds)}", html)
         self.assertIn("定位第 ${index + 1} 段", html)
@@ -6734,6 +6739,75 @@ if (!sandbox.result.includes('需詳情複核')) {{
   process.exit(7);
 }}
 console.log('card_hides_unrerunnable_segments_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_render_quality_warning_summarizes_review_segments(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function renderQualityWarning'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [
+  'const REVIEW_SEGMENT_SECONDS = 600;',
+  grab('escapeHtml'),
+  grab('clockText'),
+  grab('parseClockSeconds'),
+  grab('qualityWarningSegmentTargets'),
+  grab('reviewSegmentIssueSummary'),
+  grab('renderQualityWarning')
+].join('\\n');
+const sandbox = {{}};
+vm.runInNewContext(code + `
+const issue = '疑似連續重複轉錄；同一句連續重複 31 次；重複時間：10:00-10:03';
+result = renderQualityWarning(
+  '逐字稿品質警示：疑似連續重複轉錄，建議重跑或複核相關分段。',
+  [{{ index: 1 }}, {{ index: 3 }}],
+  [
+    {{ index: 1, label: '第 2 段', start_seconds: 600, end_seconds: 1200, issues: [issue] }},
+    {{ index: 3, label: '第 4 段', start_seconds: 1800, end_seconds: 2400, issues: [issue] }}
+  ]
+);
+`, sandbox);
+if (!sandbox.result.includes('quality-warning-summary')) {{
+  console.error(sandbox.result);
+  process.exit(4);
+}}
+if (!sandbox.result.includes('問題位置：第 2 段 10:00-20:00、第 4 段 30:00-40:00：疑似連續重複轉錄')) {{
+  console.error(sandbox.result);
+  process.exit(5);
+}}
+if (!sandbox.result.includes('quality-warning-body')) {{
+  console.error(sandbox.result);
+  process.exit(6);
+}}
+if (!sandbox.result.includes('定位第 2 段') || !sandbox.result.includes('定位第 4 段')) {{
+  console.error(sandbox.result);
+  process.exit(7);
+}}
+console.log('quality_warning_summary_ok');
 """
         try:
             result = subprocess.run(
