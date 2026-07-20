@@ -130,6 +130,13 @@ BASE_URL=http://127.0.0.1:8001 scripts/smoke_e2e.sh
 .venv/bin/python scripts/audit_quality_consistency.py --base-url http://127.0.0.1:8001
 ```
 
+舊紀錄若已能從 Markdown 推回「第 N 段」問題位置，但資料庫中的 `quality_report_json` 仍是舊式模糊警示，可先 dry-run 檢查會回寫哪些紀錄，再用 `--apply` 寫入結構化問題分段：
+
+```bash
+.venv/bin/python scripts/backfill_quality_review_segments.py
+.venv/bin/python scripts/backfill_quality_review_segments.py --apply
+```
+
 離線會議紀錄品質基準不會呼叫 AI，也不會產生費用：
 
 ```bash

@@ -444,7 +444,7 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
         script = verify_script.read_text(encoding="utf-8")
         for command in (
             ".venv/bin/python -m unittest discover -v",
-            ".venv/bin/python -m compileall -q backend gui tests meeting_assistant.py start.py test_regex.py test_gemini.py",
+            ".venv/bin/python -m compileall -q backend gui tests meeting_assistant.py start.py test_regex.py test_gemini.py scripts",
             ".venv/bin/python scripts/security_scan.py",
             ".venv/bin/python scripts/audit_quality_consistency.py",
             ".venv/bin/python -m pip check",
@@ -532,6 +532,8 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
                 "MEETING_OUTPUT_DIR": str(tmp_path / "output"),
                 "MEETING_TEMP_DIR": str(tmp_path / "temp"),
                 "MEETING_BACKUP_DIR": str(tmp_path / "backups"),
+                "PYTHONIOENCODING": "utf-8",
+                "PYTHONUTF8": "1",
             })
             setup_code = f"""
 import json
@@ -613,6 +615,8 @@ database.save_meeting(
                 "MEETING_OUTPUT_DIR": str(tmp_path / "output"),
                 "MEETING_TEMP_DIR": str(tmp_path / "temp"),
                 "MEETING_BACKUP_DIR": str(tmp_path / "backups"),
+                "PYTHONIOENCODING": "utf-8",
+                "PYTHONUTF8": "1",
             })
             setup_code = f"""
 from backend import database
@@ -728,6 +732,129 @@ database.save_meeting(
         self.assertEqual(missing_label[0].field, "quality_review_segments")
         self.assertIn("第 8 段", missing_label[0].expected)
         self.assertEqual(ok, [])
+
+    def test_quality_review_segment_backfill_dry_run_then_apply(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            db_path = tmp_path / "meetings.db"
+            output_path = tmp_path / "legacy-repeat.md"
+            repeated_lines = "\n".join(
+                f"[70:{index:02d}] **[發言者 A]**：因為我是結所以我領車。"
+                for index in range(5)
+            )
+            output_path.write_text(
+                "## 一、討論摘要 (Discussion Summary)\n\n"
+                "### D1. 舊紀錄\n- 摘要：舊式品質警示。\n\n"
+                "## 二、最終決議 (Final Decisions)\n\n"
+                "| # | 關聯討論 | 決議 | 依據 | 狀態 |\n"
+                "|---|---|---|---|---|\n"
+                "| R1 | D1 | 確認需回填問題分段。 | [70:00] | confirmed |\n\n"
+                "## 三、待辦事項 (Action Items)\n\n"
+                "| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+                "|---|---|---|---|---|---|---|\n"
+                "| A1 | D1 | R1 | 複核問題分段。 | 發言者 A | 未提及 | 中 |\n\n"
+                "## 四、完整逐字稿 (Verbatim Transcript)\n\n"
+                "### 【第 8 段｜70:00 – 80:00】\n"
+                f"{repeated_lines}\n",
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env.update({
+                "DB_PATH": str(db_path),
+                "MEETING_OUTPUT_DIR": str(tmp_path / "output"),
+                "MEETING_TEMP_DIR": str(tmp_path / "temp"),
+                "MEETING_BACKUP_DIR": str(tmp_path / "backups"),
+                "PYTHONIOENCODING": "utf-8",
+                "PYTHONUTF8": "1",
+            })
+            setup_code = f"""
+from backend import database
+
+database.init_db()
+database.save_meeting(
+    title='Legacy Repeat Warning',
+    date='2026/07/20',
+    source_audio='legacy-repeat.webm',
+    output_path={json.dumps(str(output_path))},
+    summary='Legacy Repeat Warning',
+    quality_report={{
+        'score': 95,
+        'label': '良好',
+        'warnings': [
+            '逐字稿品質警示：疑似連續重複轉錄（同一句連續重複 5 次：因為我是結所以我領車），建議重跑或複核相關分段。'
+        ],
+        'segments': [],
+        'timestamp_count': 5,
+        'speaker_labels': ['發言者 A'],
+    }},
+)
+"""
+            subprocess.run(
+                [sys.executable, "-c", setup_code],
+                cwd=ROOT,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+            dry_run = subprocess.run(
+                [sys.executable, "scripts/backfill_quality_review_segments.py"],
+                cwd=ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(dry_run.returncode, 0, dry_run.stdout + dry_run.stderr)
+            dry_payload = json.loads(dry_run.stdout)
+            self.assertTrue(dry_payload["dry_run"])
+            self.assertEqual(dry_payload["would_update"], 1)
+            self.assertEqual(dry_payload["updated"], 0)
+            self.assertIn("第 8 段", dry_payload["records"][0]["review_segments"])
+
+            conn = sqlite3.connect(db_path)
+            try:
+                raw_report = conn.execute(
+                    "SELECT quality_report_json FROM meetings WHERE title=?",
+                    ("Legacy Repeat Warning",),
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            self.assertNotIn("review_segments", json.loads(raw_report))
+
+            applied = subprocess.run(
+                [sys.executable, "scripts/backfill_quality_review_segments.py", "--apply"],
+                cwd=ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+            applied_payload = json.loads(applied.stdout)
+            self.assertFalse(applied_payload["dry_run"])
+            self.assertEqual(applied_payload["updated"], 1)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                raw_report = conn.execute(
+                    "SELECT quality_report_json, quality_score, quality_label FROM meetings WHERE title=?",
+                    ("Legacy Repeat Warning",),
+                ).fetchone()
+            finally:
+                conn.close()
+            report = json.loads(raw_report[0])
+            self.assertEqual(raw_report[1], 95)
+            self.assertEqual(raw_report[2], "良好")
+            self.assertEqual(report["review_segments"][0]["index"], 7)
+            self.assertIn("同一句連續重複 5 次", report["review_segments"][0]["issues"][0])
+            self.assertIn("問題位置：第 8 段", report["warnings"][0])
 
     def test_quality_benchmark_can_scan_generated_markdown_directory(self):
         sample = (
