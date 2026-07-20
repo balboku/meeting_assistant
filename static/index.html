@@ -4155,7 +4155,10 @@ function renderQualityWarning(warning = '', segments = [], reviewSegments = []) 
           const title = target.start_seconds !== null
             ? `定位第 ${target.index + 1} 段，並跳到原始檔 ${clockText(target.start_seconds)}`
             : `定位第 ${target.index + 1} 段`;
-          return `<button type="button" class="quality-warning-jump" aria-describedby="detail-status" title="${escapeHtml(title)}" onclick="focusQualitySegment(${focusArgs})">定位第 ${target.index + 1} 段</button>`;
+          const label = target.start_seconds !== null
+            ? `定位第 ${target.index + 1} 段 ${clockText(target.start_seconds)}`
+            : `定位第 ${target.index + 1} 段`;
+          return `<button type="button" class="quality-warning-jump" aria-describedby="detail-status" title="${escapeHtml(title)}" onclick="focusQualitySegment(${focusArgs})">${escapeHtml(label)}</button>`;
         })
         .join('')}</span>`
     : '';

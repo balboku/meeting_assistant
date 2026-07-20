@@ -8485,6 +8485,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("問題位置：${escapeHtml(visibleReviewSummary)}", html)
         self.assertIn("const focusArgs = target.start_seconds !== null ? `${target.index}, ${target.start_seconds}` : `${target.index}`;", html)
         self.assertIn("定位第 ${target.index + 1} 段，並跳到原始檔 ${clockText(target.start_seconds)}", html)
+        self.assertIn("const label = target.start_seconds !== null", html)
+        self.assertIn("定位第 ${target.index + 1} 段 ${clockText(target.start_seconds)}", html)
         self.assertIn("定位第 ${index + 1} 段", html)
         self.assertIn("onclick=\"focusQualitySegment(${focusArgs})\"", html)
         self.assertIn("定位第 ${target.index + 1} 段", html)
@@ -9843,6 +9845,10 @@ if (!sandbox.result.includes('定位第 2 段') || !sandbox.result.includes('定
   console.error(sandbox.result);
   process.exit(7);
 }}
+if (!sandbox.result.includes('>定位第 2 段 10:12</button>')) {{
+  console.error(sandbox.result);
+  process.exit(25);
+}}
 if (!sandbox.result.includes('focusQualitySegment(1, 612)')) {{
   console.error(sandbox.result);
   process.exit(9);
@@ -9858,6 +9864,10 @@ if (!sandbox.partial.includes('focusQualitySegment(1, 612)')) {{
 if (!sandbox.partial.includes('focusQualitySegment(5, 3062)')) {{
   console.error(sandbox.partial);
   process.exit(11);
+}}
+if (!sandbox.partial.includes('>定位第 6 段 51:02</button>')) {{
+  console.error(sandbox.partial);
+  process.exit(26);
 }}
 if (!sandbox.legacyPrefix.includes('quality-warning-summary') || !sandbox.legacyPrefix.includes('focusQualitySegment(1, 612)')) {{
   console.error(sandbox.legacyPrefix);
