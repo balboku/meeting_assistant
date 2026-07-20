@@ -196,12 +196,84 @@ def _actionability_problems(record: dict[str, Any]) -> list[ConsistencyProblem]:
     ]
 
 
+def _review_location_labels(record: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    for detail in record.get("quality_review_segment_details") or []:
+        if not isinstance(detail, dict):
+            continue
+        label = str(detail.get("label") or "").strip()
+        if not label:
+            try:
+                index = int(detail.get("index"))
+            except (TypeError, ValueError):
+                index = -1
+            if index >= 0:
+                label = f"第 {index + 1} 段"
+        if label and label not in labels:
+            labels.append(label)
+    for label in record.get("quality_review_segments") or []:
+        label_text = str(label or "").strip()
+        if label_text and label_text not in labels:
+            labels.append(label_text)
+    for index_value in record.get("quality_review_rerunnable_segments") or []:
+        try:
+            index = int(index_value)
+        except (TypeError, ValueError):
+            continue
+        if index < 0:
+            continue
+        label = f"第 {index + 1} 段"
+        if label not in labels:
+            labels.append(label)
+    return labels
+
+
+def _markdown_export_problems(record: dict[str, Any], markdown_text: str) -> list[ConsistencyProblem]:
+    labels = _review_location_labels(record)
+    if not labels:
+        return []
+    markdown = str(markdown_text or "")
+    meeting_id = record.get("id")
+    try:
+        normalized_id = int(meeting_id)
+    except (TypeError, ValueError):
+        normalized_id = None
+    meeting_title = str(record.get("title") or "").strip() or None
+    problems: list[ConsistencyProblem] = []
+    if "逐字稿品質複核提示" not in markdown:
+        problems.append(
+            ConsistencyProblem(
+                meeting_id=normalized_id,
+                meeting_title=meeting_title,
+                surface="markdown-export",
+                field="quality_review_note",
+                expected="Markdown 下載內容需包含逐字稿品質複核提示",
+                actual=markdown[:240],
+            )
+        )
+        return problems
+    present_labels = [label for label in labels if label in markdown]
+    if not present_labels:
+        problems.append(
+            ConsistencyProblem(
+                meeting_id=normalized_id,
+                meeting_title=meeting_title,
+                surface="markdown-export",
+                field="quality_review_segments",
+                expected=labels,
+                actual="Markdown 品質複核提示未列出任何問題分段",
+            )
+        )
+    return problems
+
+
 async def _audit(client: Any, limit: int) -> dict[str, Any]:
     list_response = await client.get("/meetings", params={"limit": limit})
     list_response.raise_for_status()
     listed = _records(list_response.json())
     problems: list[ConsistencyProblem] = []
     search_checked = 0
+    markdown_checked = 0
 
     for record in listed:
         meeting_id = record.get("id")
@@ -213,6 +285,11 @@ async def _audit(client: Any, limit: int) -> dict[str, Any]:
         problems.extend(
             _compare_fields(int(meeting_id), meeting_title, "list-detail", record, detail)
         )
+        if _review_location_labels(detail):
+            markdown_response = await client.get(f"/meetings/{meeting_id}/markdown")
+            markdown_response.raise_for_status()
+            markdown_checked += 1
+            problems.extend(_markdown_export_problems(detail, markdown_response.text))
 
         query = _meeting_query(record)
         search_response = await client.get(
@@ -246,6 +323,7 @@ async def _audit(client: Any, limit: int) -> dict[str, Any]:
         "passed": not problems,
         "records": len(listed),
         "search_checked": search_checked,
+        "markdown_checked": markdown_checked,
         "problem_count": len(problems),
         "problems": [asdict(problem) for problem in problems],
     }

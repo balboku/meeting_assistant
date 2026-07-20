@@ -703,6 +703,32 @@ database.save_meeting(
         record["quality_review_segment_count"] = 1
         self.assertEqual(_actionability_problems(record), [])
 
+    def test_quality_consistency_audit_requires_markdown_review_note(self):
+        from scripts.audit_quality_consistency import _markdown_export_problems
+
+        record = {
+            "id": 88,
+            "title": "Markdown Missing Review Note",
+            "quality_review_segment_count": 1,
+            "quality_review_segment_details": [
+                {"index": 7, "label": "第 8 段", "issues": ["疑似連續重複轉錄"]},
+            ],
+            "quality_review_rerunnable_segments": [7],
+        }
+
+        missing_note = _markdown_export_problems(record, "## 一、討論摘要\n摘要")
+        missing_label = _markdown_export_problems(record, "> 逐字稿品質複核提示：需複核問題分段。")
+        ok = _markdown_export_problems(record, "> 逐字稿品質複核提示：第 8 段：需複核問題分段。")
+
+        self.assertEqual(len(missing_note), 1)
+        self.assertEqual(missing_note[0].surface, "markdown-export")
+        self.assertEqual(missing_note[0].field, "quality_review_note")
+        self.assertEqual(missing_note[0].meeting_title, "Markdown Missing Review Note")
+        self.assertEqual(len(missing_label), 1)
+        self.assertEqual(missing_label[0].field, "quality_review_segments")
+        self.assertIn("第 8 段", missing_label[0].expected)
+        self.assertEqual(ok, [])
+
     def test_quality_benchmark_can_scan_generated_markdown_directory(self):
         sample = (
             "## 一、討論摘要 (Discussion Summary)\n\n"
