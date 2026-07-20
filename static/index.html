@@ -2026,6 +2026,9 @@ const FALLBACK_UPLOAD_ACCEPT = FALLBACK_UPLOAD_EXTENSIONS.join(',');
 const VIDEO_FILE_EXTENSIONS = new Set(['.webm', '.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);
 const BROWSER_VIDEO_PREVIEW_EXTENSIONS = new Set(['.webm', '.mp4']);
 const AUDIO_FILE_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.flac', '.wma']);
+const SOURCE_VIDEO_BLANK_LUMA_THRESHOLD = 12;
+const SOURCE_VIDEO_BRIGHT_PIXEL_THRESHOLD = 28;
+const SOURCE_VIDEO_MAX_BRIGHT_RATIO = 0.01;
 const MODAL_FOCUS_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 const REVIEW_SEGMENT_SECONDS = 600;
 let modalReturnFocusTarget = null;
@@ -4658,6 +4661,50 @@ function sourceMediaHasAudioFallbackAction(statusEl) {
   return Boolean(container?.querySelector('button[data-source-mode="audio"]'));
 }
 
+function sourceVideoBlankFrameInfo(video) {
+  if (!video || video.tagName !== 'VIDEO') return null;
+  if (Number(video.readyState || 0) < 2 || !video.videoWidth || !video.videoHeight) return null;
+  if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
+  const canvas = document.createElement('canvas');
+  const width = Math.max(1, Math.min(64, Number(video.videoWidth) || 0));
+  const height = Math.max(1, Math.min(36, Number(video.videoHeight) || 0));
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext?.('2d', { willReadFrequently: true }) || canvas.getContext?.('2d');
+  if (!ctx) return null;
+  try {
+    ctx.drawImage(video, 0, 0, width, height);
+    const pixels = ctx.getImageData(0, 0, width, height).data;
+    let lumaTotal = 0;
+    let visiblePixels = 0;
+    let brightPixels = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const alpha = pixels[index + 3];
+      if (alpha === 0) continue;
+      const red = pixels[index];
+      const green = pixels[index + 1];
+      const blue = pixels[index + 2];
+      const luma = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue);
+      lumaTotal += luma;
+      visiblePixels += 1;
+      if (Math.max(red, green, blue) >= SOURCE_VIDEO_BRIGHT_PIXEL_THRESHOLD) {
+        brightPixels += 1;
+      }
+    }
+    if (!visiblePixels) return null;
+    const averageLuma = lumaTotal / visiblePixels;
+    const brightRatio = brightPixels / visiblePixels;
+    return {
+      averageLuma,
+      brightRatio,
+      blank: averageLuma <= SOURCE_VIDEO_BLANK_LUMA_THRESHOLD && brightRatio <= SOURCE_VIDEO_MAX_BRIGHT_RATIO,
+    };
+  } catch (err) {
+    console.debug('Unable to inspect source video preview frame.', err);
+    return null;
+  }
+}
+
 function updateSourceMediaPlayerStatus(player, statusEl) {
   if (!player || !statusEl) return;
   const isVideo = player.tagName === 'VIDEO';
@@ -4673,6 +4720,20 @@ function updateSourceMediaPlayerStatus(player, statusEl) {
   if (Number(player.readyState || 0) < 1) {
     setSourceMediaPlayerStatus(statusEl, `正在載入${label}預覽...`, 'loading', true);
     return;
+  }
+  if (isVideo && player.readyState >= 2) {
+    const blankFrame = sourceVideoBlankFrameInfo(player);
+    if (blankFrame?.blank) {
+      const fallbackHint = sourceMediaHasAudioFallbackAction(statusEl)
+        ? '可切到「音訊預覽」確認聲音，並用「新分頁」或「下載」檢查原始檔。'
+        : '請用「新分頁」或「下載」檢查原始檔，並確認錄製時是否選到正確螢幕、視窗或攝影機。';
+      setSourceMediaPlayerStatus(
+        statusEl,
+        `目前影片預覽畫面幾乎全黑；若這不是預期畫面，可能錄到空白來源或選錯錄製畫面。${fallbackHint}`,
+        'warning'
+      );
+      return;
+    }
   }
   if (isVideo && player.readyState >= 1 && (!player.videoWidth || !player.videoHeight)) {
     const fallbackHint = sourceMediaHasAudioFallbackAction(statusEl)
@@ -4692,11 +4753,14 @@ function bindSourceMediaPlayerStatus(player, statusEl) {
   if (!player || !statusEl || player.dataset.statusBound === '1') return;
   player.dataset.statusBound = '1';
   const sync = () => updateSourceMediaPlayerStatus(player, statusEl);
-  ['loadedmetadata', 'canplay', 'error', 'stalled', 'emptied'].forEach(eventName => {
+  ['loadedmetadata', 'loadeddata', 'canplay', 'seeked', 'error', 'stalled', 'emptied'].forEach(eventName => {
     player.addEventListener(eventName, sync);
   });
   player.addEventListener('loadedmetadata', () => applyPendingSourceMediaSeek(player));
-  player.addEventListener('timeupdate', () => syncActiveTimecode(player.currentTime));
+  player.addEventListener('timeupdate', () => {
+    syncActiveTimecode(player.currentTime);
+    updateSourceMediaPlayerStatus(player, statusEl);
+  });
   sync();
 }
 

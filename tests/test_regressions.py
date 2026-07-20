@@ -8002,11 +8002,13 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function primeSourceVideoPreview", html)
         self.assertIn("function setSourceMediaPlayerStatus", html)
         self.assertIn("function sourceMediaHasAudioFallbackAction", html)
+        self.assertIn("function sourceVideoBlankFrameInfo", html)
         self.assertIn("function updateSourceMediaPlayerStatus", html)
         self.assertIn("function bindSourceMediaPlayerStatus", html)
         self.assertIn("function enhanceSourceMediaPlayer", html)
         self.assertIn("player.addEventListener('loadedmetadata', () => applyPendingSourceMediaSeek(player));", html)
-        self.assertIn("player.addEventListener('timeupdate', () => syncActiveTimecode(player.currentTime));", html)
+        self.assertIn("player.addEventListener('timeupdate', () => {", html)
+        self.assertIn("updateSourceMediaPlayerStatus(player, statusEl);", html)
         self.assertIn('data-source-mode="audio" onclick="switchSourceMediaPlayer(\'audio\')"', html)
         self.assertIn('data-source-mode="video" onclick="switchSourceMediaPlayer(\'video\')"', html)
         self.assertIn("statusEl.setAttribute('aria-busy', String(Boolean(busy)));", html)
@@ -8019,6 +8021,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("!player.videoWidth || !player.videoHeight", html)
         self.assertIn("沒有偵測到可顯示的畫面", html)
         self.assertIn("sourceMediaHasAudioFallbackAction(statusEl)", html)
+        self.assertIn("目前影片預覽畫面幾乎全黑", html)
+        self.assertIn("SOURCE_VIDEO_BLANK_LUMA_THRESHOLD", html)
         self.assertIn("button[data-source-mode=\"audio\"]", html)
         self.assertNotIn("button[aria-label=\"切換為音訊預覽\"], button[data-source-mode=\"audio\"]", html)
         self.assertIn("可先按「音訊預覽」確認聲音", html)
@@ -8159,6 +8163,113 @@ if (!sandbox.player.includes('SHA256 abcdef012345')) {{
   process.exit(11);
 }}
 console.log('source_video_entry_points_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_source_media_player_warns_when_video_preview_is_black(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function sourceVideoBlankFrameInfo'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [
+  'const SOURCE_VIDEO_BLANK_LUMA_THRESHOLD = 12;',
+  'const SOURCE_VIDEO_BRIGHT_PIXEL_THRESHOLD = 28;',
+  'const SOURCE_VIDEO_MAX_BRIGHT_RATIO = 0.01;',
+  grab('setSourceMediaPlayerStatus'),
+  grab('sourceMediaHasAudioFallbackAction'),
+  grab('sourceVideoBlankFrameInfo'),
+  grab('updateSourceMediaPlayerStatus')
+].join('\\n');
+const sandbox = {{
+  console,
+  pixelData: new Uint8ClampedArray([0, 0, 0, 255, 3, 3, 3, 255, 1, 1, 1, 255, 0, 0, 0, 255]),
+  document: {{
+    createElement() {{
+      return {{
+        getContext() {{
+          return {{
+            drawImage() {{}},
+            getImageData() {{
+              return {{ data: sandbox.pixelData }};
+            }}
+          }};
+        }}
+      }};
+    }}
+  }}
+}};
+vm.runInNewContext(code + `
+function statusElement(hasAudioFallback = true) {{
+  return {{
+    textContent: '',
+    classValues: {{}},
+    classList: {{ toggle(name, value) {{ this.classValues = this.classValues || {{}}; status.classValues[name] = Boolean(value); }} }},
+    setAttribute(name, value) {{ this[name] = value; }},
+    closest() {{ return {{ querySelector(selector) {{ return hasAudioFallback && selector === 'button[data-source-mode="audio"]' ? {{}} : null; }} }}; }}
+  }};
+}}
+const player = {{
+  tagName: 'VIDEO',
+  readyState: 2,
+  videoWidth: 1280,
+  videoHeight: 720,
+  error: null,
+  dataset: {{}}
+}};
+var status = statusElement(true);
+blankInfo = sourceVideoBlankFrameInfo(player);
+updateSourceMediaPlayerStatus(player, status);
+blackMessage = status.textContent;
+globalThis.pixelData = new Uint8ClampedArray([255, 255, 255, 255, 120, 90, 60, 255, 80, 80, 80, 255, 40, 40, 40, 255]);
+status = statusElement(false);
+brightInfo = sourceVideoBlankFrameInfo(player);
+updateSourceMediaPlayerStatus(player, status);
+brightMessage = status.textContent;
+`, sandbox);
+if (!sandbox.blankInfo?.blank) {{
+  console.error(sandbox.blankInfo);
+  process.exit(4);
+}}
+if (!sandbox.blackMessage.includes('影片預覽畫面幾乎全黑')) {{
+  console.error(sandbox.blackMessage);
+  process.exit(5);
+}}
+if (!sandbox.blackMessage.includes('音訊預覽')) {{
+  console.error(sandbox.blackMessage);
+  process.exit(6);
+}}
+if (sandbox.brightInfo?.blank) {{
+  console.error(sandbox.brightInfo);
+  process.exit(7);
+}}
+if (sandbox.brightMessage) {{
+  console.error(sandbox.brightMessage);
+  process.exit(8);
+}}
+console.log('source_video_black_preview_warning_ok');
 """
         try:
             result = subprocess.run(
