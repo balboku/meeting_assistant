@@ -3372,7 +3372,7 @@ function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegment
     if (startSeconds !== null) addTimeRangeTarget(startSeconds, endSeconds);
   }
   const isTranscriptWarning = text.startsWith('逐字稿品質警示');
-  if (!targets.length && isTranscriptWarning) {
+  if (isTranscriptWarning) {
     (reviewSegments || []).forEach(segment => addTarget(Number(segment?.index), segment));
   }
   return targets.sort((a, b) => a.index - b.index);

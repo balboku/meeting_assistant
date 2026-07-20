@@ -6215,7 +6215,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function renderQualityReviewSegments", html)
         self.assertIn("const reviewSegmentByIndex = new Map((reviewSegments || [])", html)
         self.assertIn("const isTranscriptWarning = text.startsWith('逐字稿品質警示');", html)
-        self.assertIn("if (!targets.length && isTranscriptWarning)", html)
+        self.assertIn("if (isTranscriptWarning)", html)
         self.assertIn("(reviewSegments || []).forEach(segment => addTarget(Number(segment?.index), segment));", html)
         self.assertIn("return qualityWarningSegmentTargets(warning, segments, reviewSegments).map(target => target.index);", html)
         self.assertIn("const segmentTimeRangeMatcher = /(\\d{1,3}:[0-5]\\d)\\s*(?:-|–|—|~|至|到)\\s*(\\d{1,3}:[0-5]\\d)/;", html)
@@ -7061,6 +7061,15 @@ result = renderQualityWarning(
     {{ index: 3, label: '第 4 段', start_seconds: 1800, end_seconds: 2400, issues: [genericIssue, issue] }}
   ]
 );
+partial = renderQualityWarning(
+  '逐字稿品質警示：疑似連續重複轉錄；問題位置：第 2 段 10:00-20:00：疑似連續重複轉錄。另有 2 段。',
+  [{{ index: 1 }}, {{ index: 3 }}, {{ index: 5 }}],
+  [
+    {{ index: 1, label: '第 2 段', start_seconds: 600, end_seconds: 1200, issues: [issue] }},
+    {{ index: 3, label: '第 4 段', start_seconds: 1800, end_seconds: 2400, issues: ['疑似連續重複轉錄；重複時間：31:02-31:05'] }},
+    {{ index: 5, label: '第 6 段', start_seconds: 3000, end_seconds: 3600, issues: ['疑似連續重複轉錄；重複時間：51:02-51:05'] }}
+  ]
+);
 `, sandbox);
 if (!sandbox.result.includes('quality-warning-summary')) {{
   console.error(sandbox.result);
@@ -7081,6 +7090,14 @@ if (!sandbox.result.includes('定位第 2 段') || !sandbox.result.includes('定
 if (!sandbox.result.includes('focusQualitySegment(1, 612)')) {{
   console.error(sandbox.result);
   process.exit(9);
+}}
+if (!sandbox.partial.includes('定位第 2 段') || !sandbox.partial.includes('定位第 4 段') || !sandbox.partial.includes('定位第 6 段')) {{
+  console.error(sandbox.partial);
+  process.exit(10);
+}}
+if (!sandbox.partial.includes('focusQualitySegment(5, 3062)')) {{
+  console.error(sandbox.partial);
+  process.exit(11);
 }}
 if (sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
   console.error(sandbox.result);
