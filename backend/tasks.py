@@ -198,31 +198,78 @@ def _normalize_domain_terms(text: str) -> str:
     return text
 
 
-def _transcript_quality_notice(transcript: str) -> str:
-    if not transcript:
+def _transcript_repeat_quality_notice(transcript: str) -> str:
+    repeated_segments = _repeated_transcript_turn_review_segments(transcript)
+    if not repeated_segments:
         return ""
+
+    descriptions: list[str] = []
+    for segment in repeated_segments[:5]:
+        try:
+            index = int(segment.get("index", 0))
+        except (TypeError, ValueError, AttributeError):
+            index = 0
+        issue = str((segment.get("issues") or ["疑似連續重複轉錄"])[0]).strip()
+        descriptions.append(
+            f"第 {index + 1} 段 {_segment_time_range_text(segment)}"
+            f"{f'：{issue}' if issue else ''}"
+        )
+    if len(repeated_segments) > 5:
+        descriptions.append(f"另有 {len(repeated_segments) - 5} 段")
+
+    return (
+        f"逐字稿品質警示：問題位置：{'；'.join(descriptions)}。"
+        "建議重跑上述分段或複核相關內容。"
+    )
+
+
+def _transcript_quality_notices(transcript: str) -> list[str]:
+    if not transcript:
+        return []
+    notices: list[str] = []
+    repeated_notice = _transcript_repeat_quality_notice(transcript)
+    if repeated_notice:
+        notices.append(repeated_notice)
     quality_markers = ("系統提示：", "已自動過濾", "雜訊", "音訊不清晰")
     if any(marker in transcript for marker in quality_markers):
-        return (
+        notices.append(
             "逐字稿品質註記：音訊中有片段被標示為雜訊、聽不清或已自動過濾；"
             "該時間點附近內容可能缺漏，重要結論請回查原始媒體檔。"
         )
-    return ""
+    return notices
+
+
+def _transcript_quality_notice(transcript: str) -> str:
+    return "\n> ⚠️ ".join(_transcript_quality_notices(transcript))
+
+
+def _meeting_content_already_has_quality_notice(meeting_content: str, notice: str) -> bool:
+    content = meeting_content or ""
+    if "逐字稿品質警示：問題位置" in notice:
+        return "逐字稿品質警示：問題位置" in content
+    if "逐字稿品質註記" in notice:
+        return "逐字稿品質註記" in content
+    return notice in content
 
 
 def _prepend_transcript_quality_notice(meeting_content: str, transcript: str) -> str:
-    notice = _transcript_quality_notice(transcript)
-    if not notice or "逐字稿品質註記" in meeting_content:
+    notices = [
+        notice
+        for notice in _transcript_quality_notices(transcript)
+        if not _meeting_content_already_has_quality_notice(meeting_content, notice)
+    ]
+    if not notices:
         return meeting_content
+    notice_block = "\n".join(f"> ⚠️ {notice}" for notice in notices)
 
     match = re.search(r"##\s*📋\s*一、[^\n]*\n", meeting_content)
     if not match:
-        return f"> ⚠️ {notice}\n\n{meeting_content}"
+        return f"{notice_block}\n\n{meeting_content}"
 
     insert_at = match.end()
     return (
         meeting_content[:insert_at]
-        + f"\n> ⚠️ {notice}\n"
+        + f"\n{notice_block}\n"
         + meeting_content[insert_at:]
     )
 

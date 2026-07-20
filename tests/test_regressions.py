@@ -1326,6 +1326,27 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertIn("逐字稿品質註記", with_notice)
         self.assertIn("可能缺漏", with_notice)
 
+    def test_transcript_quality_notice_identifies_repeated_segment_location(self):
+        from backend.tasks import _prepend_transcript_quality_notice
+
+        content = "## 📋 一、討論摘要 (Discussion Summary)\n摘要\n\n## ✅ 二、最終決議 (Final Decisions)\n決議"
+        repeated_turns = "\n".join(
+            f"[70:{index:02d}] **[發言者 A]**：因為我是結，所以我領車。"
+            for index in range(31)
+        )
+        transcript = (
+            "### 【第 8 段｜70:01 – 80:01】\n"
+            f"{repeated_turns}\n"
+            "[73:01] **[發言者 B]**：下一句正常內容。\n"
+        )
+
+        with_notice = _prepend_transcript_quality_notice(content, transcript)
+
+        self.assertIn("逐字稿品質警示：問題位置：第 8 段 70:01-80:01", with_notice)
+        self.assertIn("同一句連續重複 31 次：因為我是結所以我領車", with_notice)
+        self.assertIn("重複時間：70:00-70:30", with_notice)
+        self.assertIn("建議重跑上述分段或複核相關內容", with_notice)
+
     def test_replace_transcript_section_restores_verbatim_transcript(self):
         from backend.tasks import _extract_post_transcript_sections, _extract_transcript_section_body, _replace_transcript_section
 
@@ -7358,10 +7379,12 @@ console.log('recording_black_preview_warning_ok');
     def test_frontend_smoke_script_checks_static_ui_and_upload_guard(self):
         smoke_script = ROOT / "scripts" / "smoke_e2e.sh"
         windows_smoke_script = ROOT / "scripts" / "smoke_e2e.ps1"
+        windows_smoke_with_server_script = ROOT / "scripts" / "smoke_with_server.ps1"
 
         self.assertTrue(smoke_script.is_file())
         self.assertTrue(os.access(smoke_script, os.X_OK))
         self.assertTrue(windows_smoke_script.is_file())
+        self.assertTrue(windows_smoke_with_server_script.is_file())
 
         script = smoke_script.read_text(encoding="utf-8")
         self.assertIn("BASE_URL", script)
@@ -7383,6 +7406,15 @@ console.log('recording_black_preview_warning_ok');
         self.assertIn("Add-Type -AssemblyName System.Net.Http", ps1)
         self.assertIn("System.Net.Http.MultipartFormDataContent", ps1)
         self.assertIn("-UseBasicParsing", ps1)
+
+        ps1_with_server = windows_smoke_with_server_script.read_text(encoding="utf-8")
+        self.assertIn("backend.main:app", ps1_with_server)
+        self.assertIn("uvicorn", ps1_with_server)
+        self.assertIn("Test-SmokeServerReady", ps1_with_server)
+        self.assertIn("smoke_e2e.ps1", ps1_with_server)
+        self.assertIn("-WindowStyle Hidden", ps1_with_server)
+        self.assertIn("Stop-Process -Id $ServerProcess.Id -Force", ps1_with_server)
+        self.assertIn("-UseBasicParsing", ps1_with_server)
 
     def test_desktop_gui_client_uses_primary_media_upload_endpoint(self):
         client_source = (ROOT / "gui" / "api_client.py").read_text(encoding="utf-8")
