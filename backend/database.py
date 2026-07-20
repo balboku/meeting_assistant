@@ -908,12 +908,14 @@ def _warning_phrase_review_segments_from_transcript(
             current_segment = heading_segment
             continue
         timestamp_match = _TRANSCRIPT_TIMESTAMP_PATTERN.search(raw_line)
-        if not timestamp_match:
+        if not timestamp_match and current_segment is None:
             continue
-        line_seconds = (
-            int(timestamp_match.group("minutes")) * 60
-            + int(timestamp_match.group("seconds"))
-        )
+        line_seconds = None
+        if timestamp_match:
+            line_seconds = (
+                int(timestamp_match.group("minutes")) * 60
+                + int(timestamp_match.group("seconds"))
+            )
         line_text = _transcript_lookup_line_text(raw_line)
         if not line_text:
             continue
@@ -921,12 +923,15 @@ def _warning_phrase_review_segments_from_transcript(
             phrase = str(phrase_info["normalized"])
             if phrase not in line_text and line_text not in phrase:
                 continue
-            fallback_index = max(0, line_seconds // segment_seconds)
-            segment = current_segment or {
-                "index": fallback_index,
-                "start_seconds": fallback_index * segment_seconds,
-                "end_seconds": (fallback_index + 1) * segment_seconds,
-            }
+            if line_seconds is not None:
+                fallback_index = max(0, line_seconds // segment_seconds)
+                segment = current_segment or {
+                    "index": fallback_index,
+                    "start_seconds": fallback_index * segment_seconds,
+                    "end_seconds": (fallback_index + 1) * segment_seconds,
+                }
+            else:
+                segment = current_segment
             index = int(segment["index"])
             key = (index, phrase)
             detail = details_by_key.setdefault(
@@ -941,19 +946,27 @@ def _warning_phrase_review_segments_from_transcript(
                     "phrase_info": phrase_info,
                 },
             )
-            detail["first_match_seconds"] = min(int(detail["first_match_seconds"]), line_seconds)
-            detail["last_match_seconds"] = max(int(detail["last_match_seconds"]), line_seconds)
+            if line_seconds is not None:
+                first_match = detail.get("first_match_seconds")
+                last_match = detail.get("last_match_seconds")
+                detail["first_match_seconds"] = (
+                    line_seconds if first_match is None else min(int(first_match), line_seconds)
+                )
+                detail["last_match_seconds"] = (
+                    line_seconds if last_match is None else max(int(last_match), line_seconds)
+                )
 
     details_by_index: dict[int, dict[str, Any]] = {}
     for detail in details_by_key.values():
         phrase_info = detail.pop("phrase_info")
-        start_time = int(detail.pop("first_match_seconds"))
-        end_time = int(detail.pop("last_match_seconds"))
+        start_time = detail.pop("first_match_seconds", None)
+        end_time = detail.pop("last_match_seconds", None)
         issue = (
             "疑似連續重複轉錄；"
-            f"同一句連續重複 {phrase_info['count']} 次：{phrase_info['phrase']}；"
-            f"重複時間：{_format_clock(start_time)}-{_format_clock(end_time)}"
+            f"同一句連續重複 {phrase_info['count']} 次：{phrase_info['phrase']}"
         )
+        if start_time is not None and end_time is not None:
+            issue += f"；重複時間：{_format_clock(int(start_time))}-{_format_clock(int(end_time))}"
         index = int(detail["index"])
         merged = details_by_index.setdefault(
             index,

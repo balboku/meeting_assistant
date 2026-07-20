@@ -5128,6 +5128,54 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(searched["quality_review_rerunnable_segments"], [2])
         self.assertEqual(searched["quality_warning_preview"], expected_preview)
 
+    def test_list_and_search_locate_repeat_warning_by_phrase_without_line_timestamps(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "phrase-located-no-timestamps.md"
+        output_path.write_text(
+            "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+            "## 二、最終決議 (Final Decisions)\n決議\n"
+            "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "### 【第 4 段｜30:00 – 40:00】\n"
+            "**[發言者 A]**：因為我是結，所以我領車，這一句沒有時間戳。\n"
+            "**[發言者 B]**：後續正常討論。\n",
+            encoding="utf-8",
+        )
+        quality_report = {
+            "warnings": [
+                "逐字稿品質警示：疑似連續重複轉錄"
+                "（同一句連續重複 31 次：因為我是結所以我領車），"
+                "建議重跑或複核相關分段。"
+            ],
+            "segments": [],
+            "review_segments": [],
+        }
+        meeting_id = database.save_meeting(
+            title="Phrase Located Without Timestamps",
+            date="2026/07/20",
+            source_audio="phrase-located-no-timestamps.webm",
+            output_path=str(output_path),
+            summary="phrase-located-no-timestamps-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Phrase Located Without Timestamps")[0]
+
+        expected_preview = (
+            "逐字稿品質警示：問題位置：第 4 段 30:00-40:00："
+            "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車"
+        )
+        self.assertEqual(listed["quality_review_segments"], ["第 4 段"])
+        self.assertEqual(listed["quality_review_segment_count"], 1)
+        self.assertEqual(listed["quality_review_rerunnable_segments"], [3])
+        self.assertEqual(listed["quality_warning_preview"], expected_preview)
+        self.assertNotIn("重複時間", listed["quality_warning_preview"])
+        self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
+        self.assertEqual(searched["quality_review_rerunnable_segments"], [3])
+        self.assertEqual(searched["quality_warning_preview"], expected_preview)
+
     def test_list_and_search_trust_plain_repeat_segment_headings_when_report_segments_are_incomplete(self):
         database, tmp_path = self._isolated_database()
         output_path = tmp_path / "plain-heading-repeat-warning.md"
