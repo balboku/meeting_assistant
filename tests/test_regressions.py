@@ -3148,7 +3148,7 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(listed["quality_warning_count"], 1)
         self.assertEqual(
             listed["quality_warning_preview"],
-            "第 2 段：疑似連續重複轉錄；同一句連續重複 31 次",
+            "逐字稿品質警示：問題位置：第 2 段：疑似連續重複轉錄；同一句連續重複 31 次",
         )
         self.assertEqual(listed["quality_review_segments"], ["第 2 段"])
         self.assertEqual(
@@ -3165,6 +3165,12 @@ class SearchRegressionTests(unittest.TestCase):
             listed["quality_review_segment_summary"],
             "第 2 段：疑似連續重複轉錄；同一句連續重複 31 次",
         )
+        self.assertEqual(
+            listed["quality_warning_text"].splitlines()[0],
+            "逐字稿品質警示：問題位置：第 2 段：疑似連續重複轉錄；同一句連續重複 31 次。"
+            "建議重跑上述分段或複核相關內容。",
+        )
+        self.assertIn("第 2 段：疑似連續重複轉錄；同一句連續重複 31 次", listed["quality_warning_text"])
         self.assertEqual(listed["quality_review_segment_count"], 1)
         self.assertEqual(searched["quality_warning_count"], listed["quality_warning_count"])
         self.assertEqual(searched["quality_warning_preview"], listed["quality_warning_preview"])
@@ -3413,7 +3419,12 @@ class SearchRegressionTests(unittest.TestCase):
         searched = database.search_meetings("segment-only-keyword", needs_review=True)
 
         self.assertEqual(listed["quality_warning_count"], 0)
-        self.assertEqual(listed["quality_warning_text"], "第 1 段：曾觸發轉錄補救")
+        self.assertEqual(
+            listed["quality_warning_text"].splitlines()[0],
+            "逐字稿品質警示：問題位置：第 1 段 00:00-10:00：曾觸發轉錄補救。"
+            "建議重跑上述分段或複核相關內容。",
+        )
+        self.assertIn("第 1 段：曾觸發轉錄補救", listed["quality_warning_text"])
         self.assertEqual(listed["quality_review_segment_count"], 1)
         self.assertEqual(listed["quality_review_segments"], ["第 1 段"])
         self.assertEqual(listed["quality_review_rerunnable_segments"], [])
@@ -3508,13 +3519,20 @@ class SearchRegressionTests(unittest.TestCase):
             "第 2 段 10:00-20:00、第 4 段 30:00-40:00："
             "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：10:00-10:03"
         )
+        expected_location_warning = (
+            f"逐字稿品質警示：問題位置：{expected_summary}。"
+            "建議重跑上述分段或複核相關內容。"
+        )
         self.assertEqual(listed["quality_review_segment_summary"], expected_summary)
-        self.assertEqual(listed["quality_warning_text"], quality_report["warnings"][0])
+        self.assertEqual(listed["quality_warning_preview"], f"逐字稿品質警示：問題位置：{expected_summary}")
+        self.assertEqual(listed["quality_warning_text"].splitlines()[0], expected_location_warning)
+        self.assertIn(quality_report["warnings"][0], listed["quality_warning_text"])
         self.assertEqual(searched["quality_review_segments"], ["第 2 段", "第 4 段"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
         self.assertEqual(searched["quality_review_segment_count"], 2)
         self.assertEqual(searched["quality_review_segment_summary"], expected_summary)
         self.assertEqual(searched["quality_warning_text"], listed["quality_warning_text"])
+        self.assertEqual(searched["quality_warning_preview"], listed["quality_warning_preview"])
 
     def test_list_and_search_parse_full_transcript_repetition_warning_segments(self):
         database, tmp_path = self._isolated_database()
@@ -3556,7 +3574,16 @@ class SearchRegressionTests(unittest.TestCase):
             ],
         )
         self.assertEqual(listed["quality_review_segment_count"], 1)
-        self.assertEqual(listed["quality_warning_preview"], quality_report["warnings"][0])
+        self.assertEqual(
+            listed["quality_warning_preview"],
+            "逐字稿品質警示：問題位置：第 2 段 10:00-20:00：分段疑似重複轉錄幻覺",
+        )
+        self.assertEqual(
+            listed["quality_warning_text"].splitlines()[0],
+            "逐字稿品質警示：問題位置：第 2 段 10:00-20:00：分段疑似重複轉錄幻覺。"
+            "建議重跑上述分段或複核相關內容。",
+        )
+        self.assertIn(quality_report["warnings"][0], listed["quality_warning_text"])
         self.assertEqual(searched["quality_review_segments"], ["第 2 段"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
 

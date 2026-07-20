@@ -307,8 +307,10 @@ def _should_promote_review_summary_to_preview(warning_preview: Optional[str], re
     review = str(review_summary or "").strip()
     if not warning or not review:
         return False
-    if review_segment_details_from_text(warning):
+    if _has_standard_review_location_warning(warning):
         return False
+    if review_segment_details_from_text(warning):
+        return True
     if _has_transcript_review_signal(warning):
         return True
     if _is_recording_warning_preview(warning) and _has_transcript_review_signal(review):
@@ -323,6 +325,10 @@ def _review_summary_location_warning(review_summary: str) -> str:
         f"逐字稿品質警示：問題位置：{review_summary}。"
         "建議重跑上述分段或複核相關內容。"
     )
+
+
+def _has_standard_review_location_warning(text: str) -> bool:
+    return "問題位置：" in str(text or "") or "需複核分段：" in str(text or "")
 
 
 _TRANSCRIPT_SEGMENT_HEADING_PATTERN = re.compile(
@@ -1921,11 +1927,7 @@ def apply_quality_preview_fields(
     if not warning_text_items and warning_preview:
         warning_text_items.append(str(warning_preview).strip())
     combined_warning_text = "\n".join(dict.fromkeys(warning_text_items))
-    has_segment_label_in_warning = any(
-        label and label in combined_warning_text
-        for label in sorted_review_segment_labels
-    )
-    if review_summary and not has_segment_label_in_warning:
+    if review_summary and not _has_standard_review_location_warning(combined_warning_text):
         warning_text_items.insert(0, _review_summary_location_warning(review_summary))
         warning_text_items.append(f"逐字稿品質警示：需複核分段：{review_summary}")
     record["quality_warning_text"] = "\n".join(dict.fromkeys(warning_text_items)) or None
