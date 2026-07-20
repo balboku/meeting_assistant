@@ -46,6 +46,13 @@ TRANSCRIPT_REVIEW_SIGNAL_PATTERN = (
 )
 
 
+def _quality_warning_text(record: dict[str, Any]) -> str:
+    return "\n".join(
+        str(record.get(field) or "")
+        for field in ("quality_warning_preview", "quality_warning_text")
+    )
+
+
 @dataclass
 class ConsistencyProblem:
     meeting_id: int | None
@@ -101,11 +108,34 @@ def _compare_fields(
 
 
 def _has_transcript_review_signal(record: dict[str, Any]) -> bool:
-    warning_text = "\n".join(
-        str(record.get(field) or "")
-        for field in ("quality_warning_preview", "quality_warning_text")
+    return any(token in _quality_warning_text(record) for token in TRANSCRIPT_REVIEW_SIGNAL_PATTERN)
+
+
+def _has_specific_repeat_warning(record: dict[str, Any]) -> bool:
+    warning_text = _quality_warning_text(record)
+    return (
+        "疑似連續重複轉錄" in warning_text
+        and (
+            "同一句連續重複" in warning_text
+            or "重複時間" in warning_text
+        )
     )
-    return any(token in warning_text for token in TRANSCRIPT_REVIEW_SIGNAL_PATTERN)
+
+
+def _has_structured_review_location(record: dict[str, Any]) -> bool:
+    try:
+        if int(record.get("quality_review_segment_count") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return any(
+        isinstance(record.get(field), list) and bool(record.get(field))
+        for field in (
+            "quality_review_segments",
+            "quality_review_segment_details",
+            "quality_review_rerunnable_segments",
+        )
+    )
 
 
 def _has_actionable_review_location(record: dict[str, Any]) -> bool:
@@ -123,10 +153,7 @@ def _has_actionable_review_location(record: dict[str, Any]) -> bool:
             return True
         if isinstance(value, str) and value.strip():
             return True
-    warning_text = "\n".join(
-        str(record.get(field) or "")
-        for field in ("quality_warning_preview", "quality_warning_text")
-    )
+    warning_text = _quality_warning_text(record)
     has_location_marker = "問題位置" in warning_text or "需複核分段" in warning_text
     return has_location_marker and "第" in warning_text and "段" in warning_text
 
@@ -135,6 +162,22 @@ def _actionability_problems(record: dict[str, Any]) -> list[ConsistencyProblem]:
     if not _has_transcript_review_signal(record):
         return []
     if _has_actionable_review_location(record):
+        if _has_specific_repeat_warning(record) and not _has_structured_review_location(record):
+            meeting_id = record.get("id")
+            try:
+                normalized_id = int(meeting_id)
+            except (TypeError, ValueError):
+                normalized_id = None
+            return [
+                ConsistencyProblem(
+                    meeting_id=normalized_id,
+                    meeting_title=str(record.get("title") or "").strip() or None,
+                    surface="detail-actionability",
+                    field="quality_repeat_location",
+                    expected="連續重複轉錄警示需有結構化 quality_review_segment_details",
+                    actual=record.get("quality_warning_text") or record.get("quality_warning_preview"),
+                )
+            ]
         return []
     meeting_id = record.get("id")
     try:

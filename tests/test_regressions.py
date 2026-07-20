@@ -637,6 +637,38 @@ database.save_meeting(
         self.assertEqual(payload["problems"][0]["meeting_title"], "Unlocated Transcript Warning")
         self.assertIn("同一句連續重複 31 次", payload["problems"][0]["actual"])
 
+    def test_quality_consistency_audit_requires_structured_repeat_location(self):
+        from scripts.audit_quality_consistency import _actionability_problems
+
+        record = {
+            "id": 77,
+            "title": "Text Only Repeat Location",
+            "quality_warning_preview": (
+                "逐字稿品質警示：問題位置：第 2 段 10:00-20:00："
+                "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車"
+            ),
+            "quality_warning_text": (
+                "逐字稿品質警示：問題位置：第 2 段 10:00-20:00："
+                "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車。"
+                "建議重跑上述分段或複核相關內容。"
+            ),
+            "quality_review_segments": [],
+            "quality_review_segment_details": [],
+            "quality_review_segment_count": 0,
+            "quality_review_rerunnable_segments": [],
+        }
+
+        problems = _actionability_problems(record)
+
+        self.assertEqual(len(problems), 1)
+        self.assertEqual(problems[0].field, "quality_repeat_location")
+        self.assertEqual(problems[0].meeting_title, "Text Only Repeat Location")
+
+        record["quality_review_segment_details"] = [{"index": 1, "label": "第 2 段"}]
+        record["quality_review_segments"] = ["第 2 段"]
+        record["quality_review_segment_count"] = 1
+        self.assertEqual(_actionability_problems(record), [])
+
     def test_quality_benchmark_can_scan_generated_markdown_directory(self):
         sample = (
             "## 一、討論摘要 (Discussion Summary)\n\n"
