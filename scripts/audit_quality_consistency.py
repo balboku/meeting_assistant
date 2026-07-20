@@ -35,6 +35,17 @@ QUALITY_FIELDS = (
 )
 
 
+TRANSCRIPT_REVIEW_SIGNAL_PATTERN = (
+    "疑似連續重複轉錄",
+    "同一句連續重複",
+    "重複轉錄",
+    "曾觸發轉錄補救",
+    "重複時間",
+    "非最後分段",
+    "分段含",
+)
+
+
 @dataclass
 class ConsistencyProblem:
     meeting_id: int | None
@@ -86,6 +97,58 @@ def _compare_fields(
     return problems
 
 
+def _has_transcript_review_signal(record: dict[str, Any]) -> bool:
+    warning_text = "\n".join(
+        str(record.get(field) or "")
+        for field in ("quality_warning_preview", "quality_warning_text")
+    )
+    return any(token in warning_text for token in TRANSCRIPT_REVIEW_SIGNAL_PATTERN)
+
+
+def _has_actionable_review_location(record: dict[str, Any]) -> bool:
+    review_segment_count = int(record.get("quality_review_segment_count") or 0)
+    if review_segment_count > 0:
+        return True
+    for field in (
+        "quality_review_segment_summary",
+        "quality_review_segments",
+        "quality_review_segment_details",
+        "quality_review_rerunnable_segments",
+    ):
+        value = record.get(field)
+        if isinstance(value, list) and value:
+            return True
+        if isinstance(value, str) and value.strip():
+            return True
+    warning_text = "\n".join(
+        str(record.get(field) or "")
+        for field in ("quality_warning_preview", "quality_warning_text")
+    )
+    has_location_marker = "問題位置" in warning_text or "需複核分段" in warning_text
+    return has_location_marker and "第" in warning_text and "段" in warning_text
+
+
+def _actionability_problems(record: dict[str, Any]) -> list[ConsistencyProblem]:
+    if not _has_transcript_review_signal(record):
+        return []
+    if _has_actionable_review_location(record):
+        return []
+    meeting_id = record.get("id")
+    try:
+        normalized_id = int(meeting_id)
+    except (TypeError, ValueError):
+        normalized_id = None
+    return [
+        ConsistencyProblem(
+            meeting_id=normalized_id,
+            surface="detail-actionability",
+            field="quality_actionability",
+            expected="逐字稿品質警示需包含問題位置或 quality_review_segment_details",
+            actual=record.get("quality_warning_text") or record.get("quality_warning_preview"),
+        )
+    ]
+
+
 async def _audit(client: Any, limit: int) -> dict[str, Any]:
     list_response = await client.get("/meetings", params={"limit": limit})
     list_response.raise_for_status()
@@ -98,6 +161,7 @@ async def _audit(client: Any, limit: int) -> dict[str, Any]:
         detail_response = await client.get(f"/meetings/{meeting_id}")
         detail_response.raise_for_status()
         detail = detail_response.json()
+        problems.extend(_actionability_problems(detail))
         problems.extend(
             _compare_fields(int(meeting_id), "list-detail", record, detail)
         )

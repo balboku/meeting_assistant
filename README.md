@@ -123,7 +123,7 @@ scripts/verify.sh
 BASE_URL=http://127.0.0.1:8001 scripts/smoke_e2e.sh
 ```
 
-品質警示欄位若懷疑清單、搜尋與詳情顯示不一致，可跑一致性稽核。未帶 `--base-url` 時會直接用目前專案的 SQLite 與 FastAPI app 檢查，不需要先啟動後端：
+品質警示欄位若懷疑清單、搜尋與詳情顯示不一致，可跑一致性稽核；它也會檢查逐字稿品質警示是否帶有可行動的問題分段或位置。未帶 `--base-url` 時會直接用目前專案的 SQLite 與 FastAPI app 檢查，不需要先啟動後端：
 
 ```bash
 .venv/bin/python scripts/audit_quality_consistency.py

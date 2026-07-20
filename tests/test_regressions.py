@@ -553,6 +553,89 @@ database.save_meeting(
         self.assertEqual(payload["search_checked"], 1)
         self.assertEqual(payload["problem_count"], 0)
 
+    def test_quality_consistency_audit_flags_unlocated_transcript_warning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            db_path = tmp_path / "meetings.db"
+            output_path = tmp_path / "unlocated-warning.md"
+            output_path.write_text(
+                "## 一、討論摘要 (Discussion Summary)\n\n"
+                "### D1. 模糊警示\n- 摘要：這筆資料故意沒有可定位分段。\n\n"
+                "## 二、最終決議 (Final Decisions)\n\n"
+                "| # | 關聯討論 | 決議 | 依據 | 狀態 |\n"
+                "|---|---|---|---|---|\n"
+                "| R1 | D1 | 需修正品質警示。 | [00:00] | pending |\n\n"
+                "## 三、待辦事項 (Action Items)\n\n"
+                "| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+                "|---|---|---|---|---|---|---|\n"
+                "| A1 | D1 | R1 | 補上問題位置。 | 發言者 A | 未提及 | 高 |\n\n"
+                "## 四、完整逐字稿 (Verbatim Transcript)\n\n"
+                "[00:00] **[發言者 A]**：沒有重複內容可自動反推位置。\n",
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env.update({
+                "DB_PATH": str(db_path),
+                "MEETING_OUTPUT_DIR": str(tmp_path / "output"),
+                "MEETING_TEMP_DIR": str(tmp_path / "temp"),
+                "MEETING_BACKUP_DIR": str(tmp_path / "backups"),
+            })
+            setup_code = f"""
+from backend import database
+
+database.init_db()
+database.save_meeting(
+    title='Unlocated Transcript Warning',
+    date='2026/07/20',
+    source_audio='unlocated-warning.webm',
+    output_path={json.dumps(str(output_path))},
+    summary='Unlocated Transcript Warning',
+    quality_report={{
+        'score': 80,
+        'label': '需複核',
+        'warnings': [
+            '逐字稿品質警示：疑似連續重複轉錄（同一句連續重複 31 次：因為我是結所以我領車），建議重跑或複核相關分段。'
+        ],
+        'segments': [],
+        'review_segments': [],
+        'timestamp_count': 1,
+        'speaker_labels': ['發言者 A'],
+    }},
+)
+"""
+            subprocess.run(
+                [sys.executable, "-c", setup_code],
+                cwd=ROOT,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/audit_quality_consistency.py",
+                    "--limit",
+                    "10",
+                ],
+                cwd=ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["passed"])
+        self.assertEqual(payload["records"], 1)
+        self.assertEqual(payload["search_checked"], 1)
+        self.assertEqual(payload["problem_count"], 1)
+        self.assertEqual(payload["problems"][0]["field"], "quality_actionability")
+        self.assertIn("同一句連續重複 31 次", payload["problems"][0]["actual"])
+
     def test_quality_benchmark_can_scan_generated_markdown_directory(self):
         sample = (
             "## 一、討論摘要 (Discussion Summary)\n\n"
