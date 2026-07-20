@@ -3396,6 +3396,8 @@ function renderCardSourceMedia(record) {
 }
 
 function sourceMediaDuplicateKey(record) {
+  const digest = String(record?.source_media_sha256 || '').trim().toLowerCase();
+  if (digest && digest !== 'unavailable') return `sha256:${digest}`;
   const rawSource = String(record?.source_audio || '').trim();
   if (!rawSource) return '';
   const cleanSource = rawSource.split(/[?#]/)[0].replace(/\\/g, '/');

@@ -777,6 +777,28 @@ def _source_media_type_from_metadata(record: dict[str, Any], quality_report: Any
     return None
 
 
+def _source_media_recording_metadata(quality_report: Any) -> dict[str, Any]:
+    recording = quality_report.get("recording") if isinstance(quality_report, dict) else {}
+    if not isinstance(recording, dict):
+        recording = {}
+
+    profile = str(recording.get("profile") or "").strip() or None
+    sha256 = str(recording.get("source_audio_sha256") or "").strip() or None
+    if sha256 == "unavailable":
+        sha256 = None
+    raw_size = recording.get("source_audio_size_bytes")
+    try:
+        size_bytes = int(raw_size) if raw_size not in (None, "") else None
+    except (TypeError, ValueError):
+        size_bytes = None
+
+    return {
+        "recording_profile": profile,
+        "source_media_size_bytes": size_bytes,
+        "source_media_sha256": sha256,
+    }
+
+
 def _legacy_markdown_quality_warnings(output_path: str) -> list[str]:
     path = Path(output_path or "")
     if not path.is_file():
@@ -1986,6 +2008,7 @@ def apply_quality_preview_fields(
         except (TypeError, json.JSONDecodeError):
             quality_report = None
     record["source_media_type"] = _source_media_type_from_metadata(record, quality_report)
+    record.update(_source_media_recording_metadata(quality_report))
     if isinstance(quality_report, dict):
         warnings = quality_report.get("warnings") or []
         if isinstance(warnings, list):

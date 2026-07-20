@@ -4029,7 +4029,13 @@ class SearchRegressionTests(unittest.TestCase):
             source_audio="recorded-screen.webm",
             output_path=str(video_output),
             summary="video meeting",
-            quality_report={"recording": {"profile": "video_balanced"}},
+            quality_report={
+                "recording": {
+                    "profile": "video_balanced",
+                    "source_audio_size_bytes": 12345,
+                    "source_audio_sha256": "a" * 64,
+                },
+            },
         )
         audio_id = database.save_meeting(
             title="Audio Meeting",
@@ -4037,7 +4043,13 @@ class SearchRegressionTests(unittest.TestCase):
             source_audio="recorded-audio.webm",
             output_path=str(audio_output),
             summary="audio meeting",
-            quality_report={"recording": {"profile": "audio_standard"}},
+            quality_report={
+                "recording": {
+                    "profile": "audio_standard",
+                    "source_audio_size_bytes": 6789,
+                    "source_audio_sha256": "b" * 64,
+                },
+            },
         )
         mp4_id = database.save_meeting(
             title="Uploaded MP4",
@@ -4057,11 +4069,19 @@ class SearchRegressionTests(unittest.TestCase):
         listed_by_id = {row["id"]: row for row in database.list_meetings(limit=10)}
 
         self.assertEqual(listed_by_id[video_id]["source_media_type"], "video")
+        self.assertEqual(listed_by_id[video_id]["recording_profile"], "video_balanced")
+        self.assertEqual(listed_by_id[video_id]["source_media_size_bytes"], 12345)
+        self.assertEqual(listed_by_id[video_id]["source_media_sha256"], "a" * 64)
         self.assertEqual(listed_by_id[audio_id]["source_media_type"], "audio")
+        self.assertEqual(listed_by_id[audio_id]["recording_profile"], "audio_standard")
+        self.assertEqual(listed_by_id[audio_id]["source_media_size_bytes"], 6789)
+        self.assertEqual(listed_by_id[audio_id]["source_media_sha256"], "b" * 64)
         self.assertEqual(listed_by_id[mp4_id]["source_media_type"], "video")
         self.assertIsNone(listed_by_id[legacy_webm_id]["source_media_type"])
         self.assertEqual(database.search_meetings("Video Meeting")[0]["source_media_type"], "video")
+        self.assertEqual(database.search_meetings("Video Meeting")[0]["source_media_sha256"], "a" * 64)
         self.assertEqual(database.search_meetings("Audio Meeting")[0]["source_media_type"], "audio")
+        self.assertEqual(database.search_meetings("Audio Meeting")[0]["source_media_size_bytes"], 6789)
 
         import backend.main as main
 
@@ -4077,10 +4097,17 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(list_response.status_code, 200)
         api_by_id = {row["id"]: row for row in list_response.json()["records"]}
         self.assertEqual(api_by_id[video_id]["source_media_type"], "video")
+        self.assertEqual(api_by_id[video_id]["recording_profile"], "video_balanced")
+        self.assertEqual(api_by_id[video_id]["source_media_size_bytes"], 12345)
+        self.assertEqual(api_by_id[video_id]["source_media_sha256"], "a" * 64)
         self.assertEqual(api_by_id[audio_id]["source_media_type"], "audio")
+        self.assertEqual(api_by_id[audio_id]["recording_profile"], "audio_standard")
+        self.assertEqual(api_by_id[audio_id]["source_media_size_bytes"], 6789)
+        self.assertEqual(api_by_id[audio_id]["source_media_sha256"], "b" * 64)
         self.assertEqual(api_by_id[legacy_webm_id]["source_media_type"], "video")
         self.assertEqual(search_response.status_code, 200)
         self.assertEqual(search_response.json()[0]["source_media_type"], "video")
+        self.assertEqual(search_response.json()[0]["source_media_sha256"], "a" * 64)
         self.assertEqual(legacy_search_response.status_code, 200)
         self.assertEqual(legacy_search_response.json()[0]["source_media_type"], "video")
 
@@ -8058,17 +8085,22 @@ const code = [
 const sandbox = {{}};
 vm.runInNewContext(code + `
 const records = [
-  {{ id: 1, source_audio: 'C:/media/same.WEBM' }},
-  {{ id: 2, source_audio: 'same.webm?download=1' }},
-  {{ id: 3, source_audio: 'other.mp3' }},
-  {{ id: 4, source_audio: '' }}
+  {{ id: 1, source_audio: 'C:/media/first.WEBM', source_media_sha256: 'ABC123' }},
+  {{ id: 2, source_audio: 'second.webm?download=1', source_media_sha256: 'abc123' }},
+  {{ id: 3, source_audio: 'first.webm', source_media_sha256: 'DIFFERENT' }},
+  {{ id: 4, source_audio: 'other.mp3' }},
+  {{ id: 5, source_audio: 'legacy.wav' }},
+  {{ id: 6, source_audio: 'C:/archive/legacy.wav?download=1' }},
+  {{ id: 7, source_audio: '' }}
 ];
 counts = sourceMediaDuplicateCounts(records);
 duplicateChip = renderSourceDuplicateChip(records[0], counts);
-singleChip = renderSourceDuplicateChip(records[2], counts);
-blankChip = renderSourceDuplicateChip(records[3], counts);
+sameNameDifferentHashChip = renderSourceDuplicateChip(records[2], counts);
+singleChip = renderSourceDuplicateChip(records[3], counts);
+legacyDuplicateChip = renderSourceDuplicateChip(records[4], counts);
+blankChip = renderSourceDuplicateChip(records[6], counts);
 `, sandbox);
-if (sandbox.counts.get('same.webm') !== 2) {{
+if (sandbox.counts.get('sha256:abc123') !== 2) {{
   console.error([...sandbox.counts.entries()]);
   process.exit(4);
 }}
@@ -8080,9 +8112,13 @@ if (!sandbox.duplicateChip.includes('目前清單有 2 份會議紀錄使用同�
   console.error(sandbox.duplicateChip);
   process.exit(6);
 }}
-if (sandbox.singleChip || sandbox.blankChip) {{
-  console.error({{ singleChip: sandbox.singleChip, blankChip: sandbox.blankChip }});
+if (sandbox.sameNameDifferentHashChip || sandbox.singleChip || sandbox.blankChip) {{
+  console.error({{ sameNameDifferentHashChip: sandbox.sameNameDifferentHashChip, singleChip: sandbox.singleChip, blankChip: sandbox.blankChip }});
   process.exit(7);
+}}
+if (!sandbox.legacyDuplicateChip.includes('同原始檔 2 份')) {{
+  console.error(sandbox.legacyDuplicateChip);
+  process.exit(8);
 }}
 console.log('source_duplicate_chip_ok');
 """
