@@ -4135,13 +4135,16 @@ function focusQualitySegment(segmentIndex, fallbackStartSeconds = null) {
 function renderQualityWarning(warning = '', segments = [], reviewSegments = []) {
   const targets = qualityWarningSegmentTargets(warning, segments, reviewSegments);
   const warningText = String(warning || '').trim();
-  const reviewSummary = isTranscriptQualityWarning(warningText)
+  const fullReviewSummary = isTranscriptQualityWarning(warningText)
     ? (reviewSegmentIssueSummary(reviewSegments) || reviewSummaryFromWarningText(warningText))
     : '';
-  const summary = reviewSummary
-    ? `<span class="quality-warning-summary">問題位置：${escapeHtml(reviewSummary)}</span>`
+  const visibleReviewSummary = fullReviewSummary && (reviewSegments || []).length
+    ? (reviewSegmentIssueSummary(reviewSegments, 5, { concise: true }) || fullReviewSummary)
+    : fullReviewSummary;
+  const summary = visibleReviewSummary
+    ? `<span class="quality-warning-summary" title="${escapeHtml(fullReviewSummary || visibleReviewSummary)}">問題位置：${escapeHtml(visibleReviewSummary)}</span>`
     : '';
-  const bodyText = compactQualityWarningBody(warningText, reviewSummary);
+  const bodyText = compactQualityWarningBody(warningText, fullReviewSummary);
   const body = bodyText
     ? `<span class="quality-warning-body">${escapeHtml(bodyText)}</span>`
     : '';

@@ -8417,7 +8417,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function renderQualityWarning", html)
         self.assertIn("function reviewSummaryFromWarningText", html)
         self.assertIn("function compactQualityWarningBody", html)
-        self.assertIn("const bodyText = compactQualityWarningBody(warningText, reviewSummary);", html)
+        self.assertIn("const bodyText = compactQualityWarningBody(warningText, fullReviewSummary);", html)
+        self.assertIn("const visibleReviewSummary = fullReviewSummary && (reviewSegments || []).length", html)
         self.assertIn("report.warnings = mergeQualityReportWarnings(report.warnings, fallback.warnings);", html)
         self.assertIn("function renderQualityReviewSegments", html)
         self.assertIn("const reviewSegmentByIndex = new Map((reviewSegments || [])", html)
@@ -8479,8 +8480,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("setTimeout(() => segment?.classList.remove('highlight'), 2600);", html)
         self.assertIn("renderQualityWarning(warning, segmentItems, report.review_segments || [])", html)
         self.assertIn("const targets = qualityWarningSegmentTargets(warning, segments, reviewSegments);", html)
-        self.assertIn("const reviewSummary = isTranscriptQualityWarning(warningText)", html)
-        self.assertIn("問題位置：${escapeHtml(reviewSummary)}", html)
+        self.assertIn("const fullReviewSummary = isTranscriptQualityWarning(warningText)", html)
+        self.assertIn("const visibleReviewSummary = fullReviewSummary && (reviewSegments || []).length", html)
+        self.assertIn("問題位置：${escapeHtml(visibleReviewSummary)}", html)
         self.assertIn("const focusArgs = target.start_seconds !== null ? `${target.index}, ${target.start_seconds}` : `${target.index}`;", html)
         self.assertIn("定位第 ${target.index + 1} 段，並跳到原始檔 ${clockText(target.start_seconds)}", html)
         self.assertIn("定位第 ${index + 1} 段", html)
@@ -9799,6 +9801,13 @@ segmentOnlyLocation = renderQualityWarning(
   [],
   []
 );
+locatedFull = renderQualityWarning(
+  '逐字稿品質警示：問題位置：第 2 段 10:00-20:00：疑似連續重複轉錄；同一句連續重複 31 次；重複時間：10:12-10:15。建議重跑上述分段或複核相關內容。',
+  [{{ index: 1 }}],
+  [
+    {{ index: 1, label: '第 2 段', start_seconds: 600, end_seconds: 1200, issues: [issue] }}
+  ]
+);
 `, sandbox);
 if (!sandbox.result.includes('quality-warning-summary')) {{
   console.error(sandbox.result);
@@ -9808,9 +9817,19 @@ if (!sandbox.result.includes('問題位置：第 2 段 10:00-20:00、第 4 段 3
   console.error(sandbox.result);
   process.exit(5);
 }}
+const summaryMatch = sandbox.result.match(/<span class="quality-warning-summary"[^>]*>([^<]+)<\\/span>/);
+const visibleSummary = summaryMatch ? summaryMatch[1] : '';
+if (visibleSummary.includes('重複時間：') || visibleSummary.includes('非最後分段含自動過濾')) {{
+  console.error(sandbox.result);
+  process.exit(23);
+}}
 if (!sandbox.result.includes('（另 1 項）')) {{
   console.error(sandbox.result);
   process.exit(21);
+}}
+if (!sandbox.result.includes('title="第 2 段 10:00-20:00、第 4 段 30:00-40:00：疑似連續重複轉錄；同一句連續重複 31 次；重複時間：10:12-10:15（另 1 項）"')) {{
+  console.error(sandbox.result);
+  process.exit(24);
 }}
 if (sandbox.result.includes('非最後分段含自動過濾/截斷提示')) {{
   console.error(sandbox.result);
@@ -9859,6 +9878,18 @@ if (sandbox.warningOnlyPrecise.includes('逐字稿品質警示：疑似連續重
 if (!sandbox.warningOnlyPrecise.includes('quality-warning-body') || !sandbox.warningOnlyPrecise.includes('建議重跑上述分段或複核相關內容。')) {{
   console.error(sandbox.warningOnlyPrecise);
   process.exit(17);
+}}
+if (!sandbox.locatedFull.includes('問題位置：第 2 段 10:00-20:00：疑似連續重複轉錄；同一句連續重複 31 次（10:12-10:15）')) {{
+  console.error(sandbox.locatedFull);
+  process.exit(27);
+}}
+if (sandbox.locatedFull.includes('quality-warning-body">逐字稿品質警示：問題位置')) {{
+  console.error(sandbox.locatedFull);
+  process.exit(28);
+}}
+if (!sandbox.locatedFull.includes('quality-warning-body">建議重跑上述分段或複核相關內容。')) {{
+  console.error(sandbox.locatedFull);
+  process.exit(29);
 }}
 if (!sandbox.segmentOnlyLocation.includes('focusQualitySegment(4)')) {{
   console.error(sandbox.segmentOnlyLocation);
