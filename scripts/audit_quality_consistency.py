@@ -49,6 +49,7 @@ TRANSCRIPT_REVIEW_SIGNAL_PATTERN = (
 @dataclass
 class ConsistencyProblem:
     meeting_id: int | None
+    meeting_title: str | None
     surface: str
     field: str
     expected: Any
@@ -78,6 +79,7 @@ def _meeting_query(record: dict[str, Any]) -> str:
 
 def _compare_fields(
     meeting_id: int | None,
+    meeting_title: str | None,
     surface: str,
     expected: dict[str, Any],
     actual: dict[str, Any],
@@ -88,6 +90,7 @@ def _compare_fields(
             problems.append(
                 ConsistencyProblem(
                     meeting_id=meeting_id,
+                    meeting_title=meeting_title,
                     surface=surface,
                     field=field,
                     expected=expected.get(field),
@@ -141,6 +144,7 @@ def _actionability_problems(record: dict[str, Any]) -> list[ConsistencyProblem]:
     return [
         ConsistencyProblem(
             meeting_id=normalized_id,
+            meeting_title=str(record.get("title") or "").strip() or None,
             surface="detail-actionability",
             field="quality_actionability",
             expected="逐字稿品質警示需包含問題位置或 quality_review_segment_details",
@@ -158,12 +162,13 @@ async def _audit(client: Any, limit: int) -> dict[str, Any]:
 
     for record in listed:
         meeting_id = record.get("id")
+        meeting_title = str(record.get("title") or "").strip() or None
         detail_response = await client.get(f"/meetings/{meeting_id}")
         detail_response.raise_for_status()
         detail = detail_response.json()
         problems.extend(_actionability_problems(detail))
         problems.extend(
-            _compare_fields(int(meeting_id), "list-detail", record, detail)
+            _compare_fields(int(meeting_id), meeting_title, "list-detail", record, detail)
         )
 
         query = _meeting_query(record)
@@ -181,6 +186,7 @@ async def _audit(client: Any, limit: int) -> dict[str, Any]:
             problems.append(
                 ConsistencyProblem(
                     meeting_id=int(meeting_id) if meeting_id is not None else None,
+                    meeting_title=meeting_title,
                     surface="search-detail",
                     field="missing",
                     expected=query,
@@ -190,7 +196,7 @@ async def _audit(client: Any, limit: int) -> dict[str, Any]:
             continue
         search_checked += 1
         problems.extend(
-            _compare_fields(int(meeting_id), "search-detail", matched, detail)
+            _compare_fields(int(meeting_id), meeting_title, "search-detail", matched, detail)
         )
 
     return {

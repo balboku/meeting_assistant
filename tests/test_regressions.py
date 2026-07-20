@@ -634,6 +634,7 @@ database.save_meeting(
         self.assertEqual(payload["search_checked"], 1)
         self.assertEqual(payload["problem_count"], 1)
         self.assertEqual(payload["problems"][0]["field"], "quality_actionability")
+        self.assertEqual(payload["problems"][0]["meeting_title"], "Unlocated Transcript Warning")
         self.assertIn("同一句連續重複 31 次", payload["problems"][0]["actual"])
 
     def test_quality_benchmark_can_scan_generated_markdown_directory(self):
