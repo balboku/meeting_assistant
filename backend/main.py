@@ -95,6 +95,7 @@ from backend.models import (
 from backend.job_queue import enqueue_audio_job, enqueue_line_audio_job, job_worker
 from backend.auth import auth_config_payload
 from backend.cleanup import (
+    SOURCE_AUDIO_TEMP_PREFIXES,
     cleanup_stale_source_audio_temp_segments,
     cleanup_stale_temp_files_for_jobs,
     cleanup_terminal_jobs,
@@ -466,6 +467,8 @@ def _directory_file_stats(
     for entry in entries:
         if entry.name.startswith("."):
             continue
+        if source_refs is not None and _is_source_media_temp_segment_name(entry.name):
+            continue
         try:
             if not entry.is_file():
                 continue
@@ -579,10 +582,16 @@ def _storage_source_media_type(entry: Path, linked_ref: Optional[dict] = None) -
         return None
 
 
+def _is_source_media_temp_segment_name(filename: str) -> bool:
+    return Path(str(filename or "")).name.startswith(SOURCE_AUDIO_TEMP_PREFIXES)
+
+
 def _source_media_file_by_name(filename: str) -> Path:
     clean_name = Path(str(filename or "")).name
     if not clean_name or clean_name != filename or clean_name.startswith("."):
         raise HTTPException(status_code=400, detail="檔名不合法")
+    if _is_source_media_temp_segment_name(clean_name):
+        raise HTTPException(status_code=400, detail="暫存分段不是可管理的原始檔，會由系統自動清理。")
     if Path(clean_name).suffix.lower() not in SUPPORTED_MEDIA_FORMATS:
         supported = ", ".join(sorted(SUPPORTED_MEDIA_FORMATS))
         raise HTTPException(status_code=415, detail=f"不支援的原始檔格式，支援格式：{supported}")
@@ -621,6 +630,8 @@ def _source_media_inventory(limit: int = 100, offset: int = 0) -> SourceMediaInv
 
     for entry in entries:
         if entry.name.startswith("."):
+            continue
+        if _is_source_media_temp_segment_name(entry.name):
             continue
         try:
             if not entry.is_file():
