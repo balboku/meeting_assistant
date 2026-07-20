@@ -103,7 +103,7 @@ SEGMENT_OVERLAP_SECONDS=2
 
 安全預設：`/line-webhook` 可公開給 LINE 呼叫；Web 介面與管理 API 允許本機與信任本機網段存取。若要透過 ngrok 或其他公開網路管理，請使用 `APP_API_KEY`。
 
-帳號、角色與稽核紀錄的資料表與 helper 已先完成，但 `MEETING_AUTH_ENABLED` 預設為 `0`，目前不會改變既有同網段 / API key 使用方式。啟用前請先建立同仁帳號、角色配置與登入來源。
+帳號、角色與稽核紀錄的資料表與 helper 已先完成，但 `MEETING_AUTH_ENABLED` 預設為 `0`，目前不會改變既有同網段 / API key 使用方式。啟用前請先建立同仁帳號、角色配置與登入來源；啟用後系統只會從 `app_users` 讀取角色，HTTP header 只提供使用者身分，不可用來授權角色。
 
 > 資安提醒：不要提交 `.env`、`meetings.db*`、`temp/`、`output/`、`backups/`、`logs/`、原始錄音、會議記錄或匯出的文件。若金鑰曾暴露，請立即到對應平台輪換 `GEMINI_API_KEY`、`APP_API_KEY`、LINE token 與 ngrok token。
 
@@ -166,8 +166,8 @@ BASE_URL=http://127.0.0.1:8001 scripts/smoke_e2e.sh
 | `SEGMENT_OVERLAP_SECONDS` | `2` | 相鄰分段保留的短暫重疊秒數；切點優先位於靜音處。 |
 | `MEETING_ASSISTANT_TRUST_LOCAL_NETWORK` | `1` | 是否允許同 Wi-Fi / 信任本機網段直接開 Web 介面；設為 `0` 時手機網址會改用 `api_key`。 |
 | `MEETING_AUTH_ENABLED` | `0` | 未來帳號/角色權限開關。預設停用；停用時不會要求登入，也不會改變現有 API key / 同網段行為。 |
-| `MEETING_AUTH_USER_HEADER` | `X-Meeting-User` | 未來啟用帳號權限時讀取使用者身分的 HTTP header。 |
-| `MEETING_AUTH_DEFAULT_ROLE` | `viewer` | 未來啟用帳號權限時的預設角色。 |
+| `MEETING_AUTH_USER_HEADER` | `X-Meeting-User` | 未來啟用帳號權限時讀取使用者身分的 HTTP header；角色必須先寫在 `app_users`。 |
+| `MEETING_AUTH_DEFAULT_ROLE` | `viewer` | 未來啟用帳號權限時，既有使用者資料缺少角色時的保守預設。 |
 | `MEETING_ASSISTANT_NGROK` | `1` | 一鍵啟動是否自動啟動 ngrok；設為 `0` / `false` / `no` 可停用。 |
 | `MEETING_ASSISTANT_NGROK_URL` | 空白 | 固定 ngrok 公開 URL，例如 `https://example.ngrok-free.app`。留空時會嘗試沿用 LINE Console 既有 Webhook URL 的網域。 |
 | `MEETING_ASSISTANT_NGROK_API_URL` | `http://127.0.0.1:4040/api/tunnels` | ngrok 本機狀態 API；後端 `/metrics` 會讀取它，前端維運面板會顯示 LINE/ngrok 狀態。 |

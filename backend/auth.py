@@ -53,6 +53,13 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
 }
 
 
+def normalize_role(role: Optional[str], *, default: Optional[str] = None) -> str:
+    normalized = str(role or default or "").strip().lower()
+    if normalized not in ROLE_PERMISSIONS:
+        raise ValueError(f"unknown role: {normalized or '<empty>'}")
+    return normalized
+
+
 @dataclass(frozen=True)
 class AuthActor:
     email: str
@@ -90,10 +97,12 @@ def auth_config_payload() -> dict[str, Any]:
 
 
 def actor_from_request(request: Request) -> AuthActor:
-    """Build an actor from the configured header when RBAC is enabled.
+    """Build an actor from the configured user header when RBAC is enabled.
 
     This is intentionally not wired into request enforcement while the feature
     flag is false, preserving the current local-network/API-key behavior.
+    Roles are loaded from app_users so clients cannot grant themselves access
+    by sending a role header.
     """
     if not AUTH_FEATURE_ENABLED:
         return DISABLED_LOCAL_ACTOR
@@ -101,10 +110,30 @@ def actor_from_request(request: Request) -> AuthActor:
     email = (request.headers.get(AUTH_USER_HEADER) or "").strip().lower()
     if not email:
         raise HTTPException(status_code=401, detail="缺少使用者身分標頭。")
-    role = (request.headers.get("X-Meeting-Role") or AUTH_DEFAULT_ROLE).strip().lower()
-    if role not in ROLE_PERMISSIONS:
-        raise HTTPException(status_code=403, detail=f"未知角色：{role}")
-    return AuthActor(email=email, role=role, enabled=True)
+
+    from backend.database import get_app_user_by_email
+
+    user = get_app_user_by_email(email)
+    if not user:
+        raise HTTPException(status_code=403, detail="此使用者尚未建立權限。")
+    if not int(user.get("is_active") or 0):
+        raise HTTPException(status_code=403, detail="此使用者帳號已停用。")
+    try:
+        role = normalize_role(user.get("role"), default=AUTH_DEFAULT_ROLE)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="此使用者角色設定無效。") from exc
+
+    user_id = user.get("id")
+    try:
+        parsed_user_id = int(user_id) if user_id is not None else None
+    except (TypeError, ValueError):
+        parsed_user_id = None
+    return AuthActor(
+        email=str(user.get("email") or email).strip().lower(),
+        role=role,
+        user_id=parsed_user_id,
+        enabled=True,
+    )
 
 
 def require_permission(actor: AuthActor, permission: str) -> None:

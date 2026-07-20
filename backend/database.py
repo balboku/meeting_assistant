@@ -23,6 +23,7 @@ from backend.quality_segments import (
     review_segment_label,
     review_segment_label_sort_key,
 )
+from backend.auth import normalize_role
 
 logger = logging.getLogger("MeetingAssistant.DB")
 
@@ -2592,6 +2593,7 @@ def upsert_app_user(
     normalized_email = str(email or "").strip().lower()
     if not normalized_email:
         raise ValueError("email is required")
+    normalized_role = normalize_role(role)
 
     with get_db() as conn:
         _ensure_auth_tables(conn)
@@ -2604,7 +2606,7 @@ def upsert_app_user(
                    role=excluded.role,
                    is_active=excluded.is_active,
                    updated_at=excluded.updated_at""",
-            (normalized_email, display_name, role, 1 if is_active else 0, now, now),
+            (normalized_email, display_name, normalized_role, 1 if is_active else 0, now, now),
         )
         row = conn.execute("SELECT * FROM app_users WHERE email=?", (normalized_email,)).fetchone()
         return dict(row)

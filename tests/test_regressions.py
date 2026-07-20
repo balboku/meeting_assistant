@@ -235,6 +235,21 @@ class ConfigRegressionTests(unittest.TestCase):
 
 
 class AuthAuditRegressionTests(unittest.TestCase):
+    @staticmethod
+    def _request_with_headers(headers: dict[str, str]):
+        from starlette.requests import Request
+
+        return Request({
+            "type": "http",
+            "method": "GET",
+            "path": "/meetings",
+            "headers": [
+                (key.lower().encode("latin-1"), value.encode("latin-1"))
+                for key, value in headers.items()
+            ],
+            "client": ("127.0.0.1", 12345),
+        })
+
     def test_auth_feature_is_disabled_by_default_but_tables_and_helpers_exist(self):
         import backend.database as database
         from backend.auth import AUTH_FEATURE_ENABLED, ROLE_PERMISSIONS
@@ -277,6 +292,42 @@ class AuthAuditRegressionTests(unittest.TestCase):
         self.assertEqual(logs[0]["detail"]["source"], "manual_transcript_edit")
         self.assertIn("app_users", tables)
         self.assertIn("audit_logs", tables)
+
+    def test_future_auth_uses_database_role_instead_of_role_header(self):
+        import backend.auth as auth
+        import backend.database as database
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(database, "DB_PATH", Path(tmpdir) / "meetings.db"), \
+                 mock.patch.object(auth, "AUTH_FEATURE_ENABLED", True), \
+                 mock.patch.object(auth, "AUTH_USER_HEADER", "X-Meeting-User"):
+                database.init_db()
+                database.upsert_app_user(
+                    "editor@example.com",
+                    display_name="Editor",
+                    role="editor",
+                )
+                request = self._request_with_headers({
+                    "X-Meeting-User": "editor@example.com",
+                    "X-Meeting-Role": "admin",
+                })
+
+                actor = auth.actor_from_request(request)
+
+        self.assertTrue(actor.enabled)
+        self.assertEqual(actor.email, "editor@example.com")
+        self.assertEqual(actor.role, "editor")
+        self.assertTrue(actor.can("meeting:write"))
+        self.assertFalse(actor.can("user:manage"))
+
+    def test_future_auth_rejects_unknown_or_invalid_roles(self):
+        import backend.database as database
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(database, "DB_PATH", Path(tmpdir) / "meetings.db"):
+                database.init_db()
+                with self.assertRaises(ValueError):
+                    database.upsert_app_user("bad-role@example.com", role="owner")
 
 
 class ProjectGovernanceRegressionTests(unittest.TestCase):
