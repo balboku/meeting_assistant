@@ -240,14 +240,18 @@ def _markdown_export_problems(record: dict[str, Any], markdown_text: str) -> lis
         normalized_id = None
     meeting_title = str(record.get("title") or "").strip() or None
     problems: list[ConsistencyProblem] = []
-    if "逐字稿品質複核提示" not in markdown:
+    has_quality_note = (
+        "逐字稿品質複核提示" in markdown
+        or "逐字稿品質警示：問題位置" in markdown
+    )
+    if not has_quality_note:
         problems.append(
             ConsistencyProblem(
                 meeting_id=normalized_id,
                 meeting_title=meeting_title,
                 surface="markdown-export",
                 field="quality_review_note",
-                expected="Markdown 下載內容需包含逐字稿品質複核提示",
+                expected="Markdown 下載內容需包含逐字稿品質複核提示或逐字稿品質警示問題位置",
                 actual=markdown[:240],
             )
         )

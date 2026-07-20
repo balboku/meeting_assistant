@@ -751,6 +751,10 @@ database.save_meeting(
         missing_note = _markdown_export_problems(record, "## 一、討論摘要\n摘要")
         missing_label = _markdown_export_problems(record, "> 逐字稿品質複核提示：需複核問題分段。")
         ok = _markdown_export_problems(record, "> 逐字稿品質複核提示：第 8 段：需複核問題分段。")
+        ok_warning = _markdown_export_problems(
+            record,
+            "> ⚠️ 逐字稿品質警示：問題位置：第 8 段 70:01-80:01：疑似連續重複轉錄。",
+        )
 
         self.assertEqual(len(missing_note), 1)
         self.assertEqual(missing_note[0].surface, "markdown-export")
@@ -760,6 +764,7 @@ database.save_meeting(
         self.assertEqual(missing_label[0].field, "quality_review_segments")
         self.assertIn("第 8 段", missing_label[0].expected)
         self.assertEqual(ok, [])
+        self.assertEqual(ok_warning, [])
 
     def test_quality_review_segment_backfill_dry_run_then_apply(self):
         import sqlite3
@@ -6091,6 +6096,29 @@ title: 會議記錄 - 可重跑分段
         self.assertIn("第 1 段、第 3 段", content)
         self.assertIn("需複核或重跑問題分段", content)
         self.assertLess(content.index("逐字稿品質複核提示"), content.index("一、討論摘要"))
+
+    def test_export_quality_note_does_not_duplicate_existing_problem_location(self):
+        from backend.exporter import content_with_quality_review_note
+
+        markdown = """---
+title: 會議記錄 - 已有問題位置
+---
+
+> ⚠️ 逐字稿品質警示：問題位置：第 8 段 70:01-80:01：疑似連續重複轉錄。建議重跑上述分段或複核相關內容。
+
+## 一、討論摘要 (Discussion Summary)
+
+摘要內容。
+"""
+
+        content = content_with_quality_review_note({
+            "full_content": markdown,
+            "quality_review_rerunnable_segments": [7],
+        })
+
+        self.assertEqual(content, markdown)
+        self.assertEqual(content.count("逐字稿品質警示：問題位置"), 1)
+        self.assertNotIn("逐字稿品質複核提示", content)
 
     def test_markdown_endpoint_adds_quality_review_note(self):
         import backend.main as main

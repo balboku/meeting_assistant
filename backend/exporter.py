@@ -87,13 +87,21 @@ def _set_cell_text(cell, text: str):
 def content_with_quality_review_note(meeting_record: dict) -> str:
     content = str(meeting_record.get("full_content") or "")
     summary = _quality_review_export_summary(meeting_record)
-    if not summary or "逐字稿品質複核提示" in content[:1200]:
+    if not summary or _has_quality_review_note(content):
         return content
     note = (
         f"> 逐字稿品質複核提示：{summary}。"
         "請依原始錄音/錄影時間複核，必要時於系統重跑問題分段。"
     )
     return _insert_after_frontmatter(content, note + "\n\n")
+
+
+def _has_quality_review_note(markdown: str) -> bool:
+    head = str(markdown or "")[:1200]
+    return (
+        "逐字稿品質複核提示" in head
+        or "逐字稿品質警示：問題位置" in head
+    )
 
 
 def _content_with_quality_review_note(meeting_record: dict) -> str:
