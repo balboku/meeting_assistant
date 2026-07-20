@@ -3554,7 +3554,7 @@ class SearchRegressionTests(unittest.TestCase):
         )
         self.assertIn("逐字稿品質警示：疑似連續重複轉錄", listed["quality_warning_text"])
         self.assertIn(
-            "需複核分段：第 4 段 30:00-40:00：疑似連續重複轉錄；同一句連續重複 4 次：因為我是結所以我領車；重複時間：31:00-31:03",
+            "逐字稿品質警示：需複核分段：第 4 段 30:00-40:00：疑似連續重複轉錄；同一句連續重複 4 次：因為我是結所以我領車；重複時間：31:00-31:03",
             listed["quality_warning_text"],
         )
         self.assertIn(
@@ -6201,6 +6201,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const REVIEW_SEGMENT_SECONDS = 600;", html)
         self.assertIn("function parseClockSeconds", html)
         self.assertIn("return Number(match[1]) * 60 + Number(match[2]);", html)
+        self.assertIn("function isTranscriptQualityWarning", html)
         self.assertIn("function reviewIssueFocusSeconds", html)
         self.assertIn("if (fallbackSeconds === null || fallbackSeconds === undefined || fallbackSeconds === '') return null;", html)
         self.assertIn("function qualityWarningSegmentTargets", html)
@@ -6215,7 +6216,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function renderQualityWarning", html)
         self.assertIn("function renderQualityReviewSegments", html)
         self.assertIn("const reviewSegmentByIndex = new Map((reviewSegments || [])", html)
-        self.assertIn("const isTranscriptWarning = text.startsWith('逐字稿品質警示');", html)
+        self.assertIn("const isTranscriptWarning = isTranscriptQualityWarning(text);", html)
         self.assertIn("if (isTranscriptWarning)", html)
         self.assertIn("(reviewSegments || []).forEach(segment => addTarget(Number(segment?.index), segment));", html)
         self.assertIn("const issueFocusSeconds = reviewIssueFocusSeconds(sourceSegment?.issues || [], null);", html)
@@ -6272,7 +6273,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("setTimeout(() => segment?.classList.remove('highlight'), 2600);", html)
         self.assertIn("renderQualityWarning(warning, segmentItems, report.review_segments || [])", html)
         self.assertIn("const targets = qualityWarningSegmentTargets(warning, segments, reviewSegments);", html)
-        self.assertIn("const reviewSummary = warningText.startsWith('逐字稿品質警示')", html)
+        self.assertIn("const reviewSummary = isTranscriptQualityWarning(warningText)", html)
         self.assertIn("問題位置：${escapeHtml(reviewSummary)}", html)
         self.assertIn("const focusArgs = target.start_seconds !== null ? `${target.index}, ${target.start_seconds}` : `${target.index}`;", html)
         self.assertIn("定位第 ${target.index + 1} 段，並跳到原始檔 ${clockText(target.start_seconds)}", html)
@@ -6421,7 +6422,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("/meetings/search?q=${encodeURIComponent(query)}&limit=100${reviewParam}", html)
         self.assertIn("/meetings?limit=50${reviewParam}", html)
         self.assertIn("startsWith('摘要品質警示')", html)
-        self.assertIn("startsWith('逐字稿品質警示')", html)
+        self.assertIn("isTranscriptQualityWarning", html)
         self.assertIn("triggerButtonId", html)
         self.assertIn("rerun-segment-${index}", html)
         self.assertIn('data-segment-index="${index}"', html)
@@ -7046,6 +7047,7 @@ const code = [
   grab('escapeHtml'),
   grab('clockText'),
   grab('parseClockSeconds'),
+  grab('isTranscriptQualityWarning'),
   grab('reviewIssueFocusSeconds'),
   grab('qualityWarningSegmentTargets'),
   grab('reviewIssuePriority'),
@@ -7072,6 +7074,13 @@ partial = renderQualityWarning(
     {{ index: 1, label: '第 2 段', start_seconds: 600, end_seconds: 1200, issues: [issue] }},
     {{ index: 3, label: '第 4 段', start_seconds: 1800, end_seconds: 2400, issues: ['疑似連續重複轉錄；重複時間：31:02-31:05'] }},
     {{ index: 5, label: '第 6 段', start_seconds: 3000, end_seconds: 3600, issues: ['疑似連續重複轉錄；重複時間：51:02-51:05'] }}
+  ]
+);
+legacyPrefix = renderQualityWarning(
+  '需複核分段：第 2 段 10:00-20:00：疑似連續重複轉錄；重複時間：10:12-10:15',
+  [{{ index: 1 }}],
+  [
+    {{ index: 1, label: '第 2 段', start_seconds: 600, end_seconds: 1200, issues: [issue] }}
   ]
 );
 `, sandbox);
@@ -7106,6 +7115,10 @@ if (!sandbox.partial.includes('focusQualitySegment(1, 612)')) {{
 if (!sandbox.partial.includes('focusQualitySegment(5, 3062)')) {{
   console.error(sandbox.partial);
   process.exit(11);
+}}
+if (!sandbox.legacyPrefix.includes('quality-warning-summary') || !sandbox.legacyPrefix.includes('focusQualitySegment(1, 612)')) {{
+  console.error(sandbox.legacyPrefix);
+  process.exit(13);
 }}
 if (sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
   console.error(sandbox.result);
@@ -7326,10 +7339,11 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('isRecordingQualityWarning'), grab('renderQualityActions')].join('\\n');
+const code = [grab('isRecordingQualityWarning'), grab('isTranscriptQualityWarning'), grab('renderQualityActions')].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderQualityActions({{ id: 44 }}, ['偵測到可能的爆音；原始媒體檔已保留，重要內容請抽查。']);
+legacyTranscript = renderQualityActions({{ id: 45 }}, ['需複核分段：第 2 段 10:00-20:00：疑似連續重複轉錄']);
 `, sandbox);
 if (!sandbox.result.includes('quality-check-source-media-button')) {{
   console.error(sandbox.result);
@@ -7342,6 +7356,10 @@ if (!sandbox.result.includes('focusSourceMediaEvidence()')) {{
 if (sandbox.result.includes('rerunMeeting')) {{
   console.error(sandbox.result);
   process.exit(6);
+}}
+if (!sandbox.legacyTranscript.includes('quality-rerun-full-button')) {{
+  console.error(sandbox.legacyTranscript);
+  process.exit(7);
 }}
 console.log('recording_quality_action_ok');
 """
@@ -7377,6 +7395,7 @@ function grab(name) {{
 }}
 const code = [
   grab('isRecordingQualityWarning'),
+  grab('isTranscriptQualityWarning'),
   grab('recordQualityWarningTypes'),
   grab('qualityTypeMatchesRecord')
 ].join('\\n');
@@ -7385,6 +7404,7 @@ vm.runInNewContext(code + `
 const summary = {{ quality_warning_count: 1, quality_warning_preview: '摘要品質警示：討論摘要未使用 D 編號' }};
 const recording = {{ quality_warning_count: 1, quality_warning_preview: '偵測到可能的爆音；原始媒體檔已保留。' }};
 const transcript = {{ quality_warning_count: 0, quality_review_segment_count: 1, quality_review_segment_details: [{{ index: 0 }}] }};
+const legacyTranscript = {{ quality_warning_count: 1, quality_warning_text: '需複核分段：第 2 段 10:00-20:00：疑似連續重複轉錄' }};
 const mixed = {{
   quality_warning_count: 3,
   quality_warning_preview: '偵測到可能的爆音；原始媒體檔已保留。',
@@ -7395,6 +7415,7 @@ result = [
   qualityTypeMatchesRecord(summary, 'summary'),
   qualityTypeMatchesRecord(recording, 'recording'),
   qualityTypeMatchesRecord(transcript, 'transcript'),
+  qualityTypeMatchesRecord(legacyTranscript, 'transcript'),
   qualityTypeMatchesRecord(mixed, 'recording'),
   qualityTypeMatchesRecord(mixed, 'summary'),
   qualityTypeMatchesRecord(mixed, 'transcript'),

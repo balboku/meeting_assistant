@@ -2780,6 +2780,10 @@ function isRecordingQualityWarning(warning = '') {
   return /錄音|音檔|媒體|音量|爆音|靜音|聲道|取樣率/.test(String(warning || ''));
 }
 
+function isTranscriptQualityWarning(warning = '') {
+  return /(^|\n)\s*(?:逐字稿品質警示|需複核分段)\s*[：:]/.test(String(warning || ''));
+}
+
 function selectedQualityFilterType() {
   const value = document.getElementById('quality-type-filter')?.value || 'all';
   return ['summary', 'recording', 'transcript', 'other'].includes(value) ? value : 'all';
@@ -2808,7 +2812,7 @@ function recordQualityWarningTypes(record) {
   const types = new Set();
   if (warningText.includes('摘要品質警示')) types.add('summary');
   if (isRecordingQualityWarning(warningText)) types.add('recording');
-  if (warningText.includes('逐字稿品質警示') || reviewSegmentCount > 0 || reviewDetails.length > 0) {
+  if (isTranscriptQualityWarning(warningText) || reviewSegmentCount > 0 || reviewDetails.length > 0) {
     types.add('transcript');
   }
   const hasScore = score !== null && score !== undefined && score !== '';
@@ -3267,7 +3271,7 @@ function renderQualityActions(meeting, warnings = []) {
   const meetingId = Number(meeting?.id) || 0;
   if (!meetingId || !warnings.length) return '';
   const hasSummaryWarning = warnings.some(warning => String(warning).startsWith('摘要品質警示'));
-  const hasTranscriptWarning = warnings.some(warning => String(warning).startsWith('逐字稿品質警示'));
+  const hasTranscriptWarning = warnings.some(isTranscriptQualityWarning);
   const hasRecordingWarning = warnings.some(isRecordingQualityWarning);
   const actions = [];
   if (hasSummaryWarning) {
@@ -3385,7 +3389,7 @@ function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegment
     const endSeconds = parseClockSeconds(timeMatch[2]);
     if (startSeconds !== null) addTimeRangeTarget(startSeconds, endSeconds);
   }
-  const isTranscriptWarning = text.startsWith('逐字稿品質警示');
+  const isTranscriptWarning = isTranscriptQualityWarning(text);
   if (isTranscriptWarning) {
     (reviewSegments || []).forEach(segment => addTarget(Number(segment?.index), segment));
   }
@@ -3572,7 +3576,7 @@ function focusQualitySegment(segmentIndex, fallbackStartSeconds = null) {
 function renderQualityWarning(warning = '', segments = [], reviewSegments = []) {
   const targets = qualityWarningSegmentTargets(warning, segments, reviewSegments);
   const warningText = String(warning || '').trim();
-  const reviewSummary = warningText.startsWith('逐字稿品質警示')
+  const reviewSummary = isTranscriptQualityWarning(warningText)
     ? reviewSegmentIssueSummary(reviewSegments)
     : '';
   const summary = reviewSummary

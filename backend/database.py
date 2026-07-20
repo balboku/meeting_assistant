@@ -1860,7 +1860,7 @@ def apply_quality_preview_fields(
         for label in sorted_review_segment_labels
     )
     if review_summary and not has_segment_label_in_warning:
-        warning_text_items.append(f"需複核分段：{review_summary}")
+        warning_text_items.append(f"逐字稿品質警示：需複核分段：{review_summary}")
     record["quality_warning_text"] = "\n".join(dict.fromkeys(warning_text_items)) or None
     record["quality_review_segment_count"] = len(sorted_review_segment_labels)
     if not known_segment_indices and record["quality_review_segment_details"]:
