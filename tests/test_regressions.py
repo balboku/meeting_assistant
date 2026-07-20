@@ -6166,6 +6166,14 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("function setRecordingResult", html)
         self.assertIn(".rec-result.error", html)
         self.assertIn("recResult.classList.toggle('error'", html)
+        self.assertIn("let recPreviewQualityTimer = null;", html)
+        self.assertIn("let recPreviewBlankSamples = 0;", html)
+        self.assertIn("function clearRecordingPreviewQualityMonitor", html)
+        self.assertIn("function startRecordingPreviewQualityMonitor", html)
+        self.assertIn("function checkRecordingPreviewQuality", html)
+        self.assertIn("預覽畫面幾乎全黑", html)
+        self.assertIn("startRecordingPreviewQualityMonitor();", html)
+        self.assertIn("clearRecordingPreviewQualityMonitor();", html)
         self.assertIn("if (mode === 'screen') return '螢幕錄製';", html)
         self.assertIn("if (mode === 'video') return '鏡頭錄影';", html)
         self.assertIn("`🔴 ${recordingModeLabel()}中...`", html)
@@ -6226,6 +6234,101 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("displayStream.getAudioTracks()", html)
         self.assertIn("...micAudioTracks", html)
         self.assertIn("createMediaStreamDestination", html)
+
+    def test_recording_preview_warns_after_repeated_black_frames(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function startRecordingPreviewQualityMonitor'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [
+  'const SOURCE_VIDEO_BLANK_LUMA_THRESHOLD = 12;',
+  'const SOURCE_VIDEO_BRIGHT_PIXEL_THRESHOLD = 28;',
+  'const SOURCE_VIDEO_MAX_BRIGHT_RATIO = 0.01;',
+  grab('sourceVideoBlankFrameInfo'),
+  grab('recordingModeLabel'),
+  grab('recordingLiveStatusText'),
+  grab('setRecordingPreviewQualityWarning'),
+  grab('checkRecordingPreviewQuality')
+].join('\\n');
+const sandbox = {{
+  console,
+  pixelData: new Uint8ClampedArray([0, 0, 0, 255, 3, 3, 3, 255, 1, 1, 1, 255, 0, 0, 0, 255]),
+  document: {{
+    createElement() {{
+      return {{
+        getContext() {{
+          return {{
+            drawImage() {{}},
+            getImageData() {{ return {{ data: sandbox.pixelData }}; }}
+          }};
+        }}
+      }};
+    }}
+  }}
+}};
+vm.runInNewContext(code + `
+var mediaRecorder = {{ state: 'recording' }};
+var recMode = 'video';
+var recPreview = {{ tagName: 'VIDEO', readyState: 2, videoWidth: 1280, videoHeight: 720 }};
+var recStatusEl = {{ textContent: '' }};
+var recPreviewBlankSamples = 0;
+var recPreviewQualityWarning = false;
+checkRecordingPreviewQuality();
+firstMessage = recStatusEl.textContent;
+checkRecordingPreviewQuality();
+secondMessage = recStatusEl.textContent;
+checkRecordingPreviewQuality();
+thirdMessage = recStatusEl.textContent;
+pixelData = new Uint8ClampedArray([255, 255, 255, 255, 120, 90, 60, 255, 80, 80, 80, 255, 40, 40, 40, 255]);
+checkRecordingPreviewQuality();
+recoveredMessage = recStatusEl.textContent;
+`, sandbox);
+if (sandbox.firstMessage || sandbox.secondMessage) {{
+  console.error({{ firstMessage: sandbox.firstMessage, secondMessage: sandbox.secondMessage }});
+  process.exit(4);
+}}
+if (!sandbox.thirdMessage.includes('預覽畫面幾乎全黑')) {{
+  console.error(sandbox.thirdMessage);
+  process.exit(5);
+}}
+if (!sandbox.thirdMessage.includes('鏡頭錄影中')) {{
+  console.error(sandbox.thirdMessage);
+  process.exit(6);
+}}
+if (sandbox.recoveredMessage.includes('幾乎全黑')) {{
+  console.error(sandbox.recoveredMessage);
+  process.exit(7);
+}}
+if (!sandbox.recoveredMessage.includes('鏡頭錄影中')) {{
+  console.error(sandbox.recoveredMessage);
+  process.exit(8);
+}}
+console.log('recording_black_preview_warning_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_web_ui_modal_focus_and_escape_controls(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")

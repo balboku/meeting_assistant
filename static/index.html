@@ -5745,6 +5745,9 @@ let recScreenMicCaptured = false;
 let recMicAudioTracks = [];
 let recMicMuted = false;
 let recAnimFrame = null;
+let recPreviewQualityTimer = null;
+let recPreviewBlankSamples = 0;
+let recPreviewQualityWarning = false;
 let audioCtx = null;
 let analyser = null;
 let activeRecordingJobId = null;
@@ -5827,6 +5830,7 @@ async function cancelActiveRecording() {
 
 function resetRecorder() {
   clearActiveRecordingPoll();
+  clearRecordingPreviewQualityMonitor();
   activeRecordingJobId = null;
   activeRecordingMode = null;
   activeRecordingProfileId = null;
@@ -5928,7 +5932,59 @@ function stopStreamTracks(stream) {
   stream.getTracks().forEach(t => t.stop());
 }
 
+function recordingLiveStatusText() {
+  return recMode === 'screen'
+    ? screenRecordingStatusText()
+    : `🔴 ${recordingModeLabel()}中...`;
+}
+
+function clearRecordingPreviewQualityMonitor() {
+  if (recPreviewQualityTimer) {
+    clearInterval(recPreviewQualityTimer);
+    recPreviewQualityTimer = null;
+  }
+  recPreviewBlankSamples = 0;
+  recPreviewQualityWarning = false;
+}
+
+function setRecordingPreviewQualityWarning(active) {
+  recPreviewQualityWarning = Boolean(active);
+  if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
+  if (!recPreviewQualityWarning) {
+    recStatusEl.textContent = recordingLiveStatusText();
+    return;
+  }
+  const sourceLabel = recMode === 'screen' ? '螢幕、視窗或分頁' : '攝影機';
+  recStatusEl.textContent = `${recordingLiveStatusText()}；⚠️ 預覽畫面幾乎全黑，請確認是否選到正確${sourceLabel}`;
+}
+
+function checkRecordingPreviewQuality() {
+  if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
+  if (recMode !== 'video' && recMode !== 'screen') return;
+  const frameInfo = sourceVideoBlankFrameInfo(recPreview);
+  if (!frameInfo) return;
+  if (frameInfo.blank) {
+    recPreviewBlankSamples += 1;
+    if (recPreviewBlankSamples >= 3 && !recPreviewQualityWarning) {
+      setRecordingPreviewQualityWarning(true);
+    }
+    return;
+  }
+  recPreviewBlankSamples = 0;
+  if (recPreviewQualityWarning) {
+    setRecordingPreviewQualityWarning(false);
+  }
+}
+
+function startRecordingPreviewQualityMonitor() {
+  clearRecordingPreviewQualityMonitor();
+  if (recMode !== 'video' && recMode !== 'screen') return;
+  recPreviewQualityTimer = setInterval(checkRecordingPreviewQuality, 1500);
+  recPreview.addEventListener('loadeddata', checkRecordingPreviewQuality, { once: true });
+}
+
 function releaseRecordingStreams() {
+  clearRecordingPreviewQualityMonitor();
   stopStreamTracks(recStream);
   recStream = null;
   recSourceStreams.forEach(stopStreamTracks);
@@ -5942,6 +5998,7 @@ function releaseRecordingStreams() {
 }
 
 function restoreRecorderIdleState(statusText = '錄製未開始，請重新確認權限後再試') {
+  clearRecordingPreviewQualityMonitor();
   mediaRecorder = null;
   recordedChunks = [];
   recScreenAudioCaptured = false;
@@ -6099,7 +6156,11 @@ function toggleRecordingMic() {
       track.enabled = !recMicMuted;
     }
   });
-  recStatusEl.textContent = screenRecordingStatusText();
+  if (recPreviewQualityWarning) {
+    setRecordingPreviewQualityWarning(true);
+  } else {
+    recStatusEl.textContent = screenRecordingStatusText();
+  }
   updateRecordingMicToggle();
 }
 
@@ -6234,6 +6295,7 @@ async function startRecording() {
     mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
     mediaRecorder.onstop = onRecordingStopped;
     mediaRecorder.start(1000);  // 每秒收一次 chunk
+    startRecordingPreviewQualityMonitor();
 
     // 計時器
     recTimerInterval = setInterval(() => {
@@ -6247,9 +6309,7 @@ async function startRecording() {
     // UI 更新
     btnRecStart.style.display = 'none';
     btnRecStop.classList.add('show');
-    recStatusEl.textContent = recMode === 'screen'
-      ? screenRecordingStatusText()
-      : `🔴 ${recordingModeLabel()}中...`;
+    recStatusEl.textContent = recordingLiveStatusText();
     updateRecordingMicToggle();
     updateRecordingEstimate();
     recTimerEl.style.color = 'var(--red)';
