@@ -569,9 +569,11 @@
     .detail-placeholder p { font-size: 15px; }
 
     .detail-header {
+      width: 100%;
+      max-width: 1280px;
+      margin: 0 auto 22px;
       padding-bottom: 18px;
       border-bottom: 1px solid var(--border);
-      margin-bottom: 22px;
       flex-shrink: 0;
     }
     .detail-title {
@@ -584,8 +586,8 @@
       word-break: keep-all;
     }
     .detail-topline {
-      display: flex;
-      flex-direction: column;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
       align-items: stretch;
       gap: 12px;
     }

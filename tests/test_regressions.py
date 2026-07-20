@@ -7400,7 +7400,8 @@ console.log('summary_editor_quality_note_ok');
     def test_web_ui_prevents_detail_header_text_stacking(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
-        self.assertRegex(html, r"\.detail-topline \{[^}]*display: flex;[^}]*flex-direction: column;[^}]*align-items: stretch;")
+        self.assertRegex(html, r"\.detail-header \{[^}]*width: 100%;[^}]*max-width: 1280px;[^}]*margin: 0 auto 22px;")
+        self.assertRegex(html, r"\.detail-topline \{[^}]*display: grid;[^}]*grid-template-columns: minmax\(0, 1fr\);[^}]*align-items: stretch;")
         self.assertRegex(html, r"\.detail-title \{[^}]*font-size: 24px;[^}]*overflow-wrap: break-word;[^}]*text-wrap: pretty;[^}]*word-break: keep-all;")
         self.assertIn("overflow-wrap: anywhere;", html)
         self.assertIn("word-break: keep-all;", html)
