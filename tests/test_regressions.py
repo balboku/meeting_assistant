@@ -7357,9 +7357,11 @@ console.log('recording_black_preview_warning_ok');
 
     def test_frontend_smoke_script_checks_static_ui_and_upload_guard(self):
         smoke_script = ROOT / "scripts" / "smoke_e2e.sh"
+        windows_smoke_script = ROOT / "scripts" / "smoke_e2e.ps1"
 
         self.assertTrue(smoke_script.is_file())
         self.assertTrue(os.access(smoke_script, os.X_OK))
+        self.assertTrue(windows_smoke_script.is_file())
 
         script = smoke_script.read_text(encoding="utf-8")
         self.assertIn("BASE_URL", script)
@@ -7369,6 +7371,18 @@ console.log('recording_black_preview_warning_ok');
         self.assertNotIn("/upload-audio", script)
         self.assertIn("fake.mp3", script)
         self.assertIn("415", script)
+
+        ps1 = windows_smoke_script.read_text(encoding="utf-8")
+        self.assertIn("$env:BASE_URL", ps1)
+        self.assertIn("/history", ps1)
+        self.assertIn("ops-dashboard", ps1)
+        self.assertIn("/upload-media", ps1)
+        self.assertNotIn("/upload-audio", ps1)
+        self.assertIn("fake.mp3", ps1)
+        self.assertIn("415", ps1)
+        self.assertIn("Add-Type -AssemblyName System.Net.Http", ps1)
+        self.assertIn("System.Net.Http.MultipartFormDataContent", ps1)
+        self.assertIn("-UseBasicParsing", ps1)
 
     def test_desktop_gui_client_uses_primary_media_upload_endpoint(self):
         client_source = (ROOT / "gui" / "api_client.py").read_text(encoding="utf-8")
