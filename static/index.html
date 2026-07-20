@@ -3933,8 +3933,8 @@ function reviewSegmentIssueSummary(reviewSegments = [], limit = 5) {
       .map(issue => String(issue || '').trim())
       .filter(Boolean);
     const issue = reviewIssueDisplay(issues);
-    if (!grouped.has(issue.all)) grouped.set(issue.all, []);
-    grouped.get(issue.all).push(`${label}${timeText}`);
+    if (!grouped.has(issue.compact)) grouped.set(issue.compact, []);
+    grouped.get(issue.compact).push(`${label}${timeText}`);
   });
   const summaries = Array.from(grouped.entries())
     .map(([issue, segments]) => `${segments.join('、')}：${issue}`);

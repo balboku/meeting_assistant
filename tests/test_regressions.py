@@ -9740,13 +9740,14 @@ const code = [
 const sandbox = {{}};
 vm.runInNewContext(code + `
 const issue = '疑似連續重複轉錄；同一句連續重複 31 次；重複時間：10:12-10:15';
+const secondaryIssue = '曾觸發轉錄補救：非最後分段含自動過濾/截斷提示';
 const genericIssue = '分段疑似重複轉錄幻覺';
 result = renderQualityWarning(
   '逐字稿品質警示：疑似連續重複轉錄，建議重跑或複核相關分段。',
   [{{ index: 1 }}, {{ index: 3 }}],
   [
-    {{ index: 1, label: '第 2 段', start_seconds: 600, end_seconds: 1200, issues: [genericIssue, issue] }},
-    {{ index: 3, label: '第 4 段', start_seconds: 1800, end_seconds: 2400, issues: [genericIssue, issue] }}
+    {{ index: 1, label: '第 2 段', start_seconds: 600, end_seconds: 1200, issues: [genericIssue, secondaryIssue, issue] }},
+    {{ index: 3, label: '第 4 段', start_seconds: 1800, end_seconds: 2400, issues: [genericIssue, secondaryIssue, issue] }}
   ]
 );
 partial = renderQualityWarning(
@@ -9783,6 +9784,14 @@ if (!sandbox.result.includes('quality-warning-summary')) {{
 if (!sandbox.result.includes('問題位置：第 2 段 10:00-20:00、第 4 段 30:00-40:00：疑似連續重複轉錄')) {{
   console.error(sandbox.result);
   process.exit(5);
+}}
+if (!sandbox.result.includes('（另 1 項）')) {{
+  console.error(sandbox.result);
+  process.exit(21);
+}}
+if (sandbox.result.includes('非最後分段含自動過濾/截斷提示')) {{
+  console.error(sandbox.result);
+  process.exit(22);
 }}
 if (!sandbox.result.includes('quality-warning-body')) {{
   console.error(sandbox.result);
