@@ -127,6 +127,9 @@ class StorageFileMetric(BaseModel):
     source_media_type: Optional[str] = None
     linked_meeting_id: Optional[int] = None
     linked_meeting_title: Optional[str] = None
+    active_job_id: Optional[str] = None
+    active_job_status: Optional[str] = None
+    active_job_count: int = 0
 
 
 class StorageMetrics(BaseModel):
@@ -135,6 +138,8 @@ class StorageMetrics(BaseModel):
     source_media_bytes: int
     source_media_unlinked_files: int = 0
     source_media_unlinked_bytes: int = 0
+    source_media_active_job_files: int = 0
+    source_media_active_job_bytes: int = 0
     source_media_archived_files: int = 0
     source_media_archived_bytes: int = 0
     source_media_largest_files: list[StorageFileMetric] = Field(default_factory=list)
@@ -151,6 +156,8 @@ class SourceMediaInventoryResponse(BaseModel):
     offset: int = 0
     unlinked_files: int = 0
     unlinked_bytes: int = 0
+    active_job_files: int = 0
+    active_job_bytes: int = 0
     files: list[StorageFileMetric] = Field(default_factory=list)
 
 

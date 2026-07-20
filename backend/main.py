@@ -444,20 +444,23 @@ def _directory_file_stats(
     allowed_suffixes: set[str],
     *,
     largest_limit: int = 0,
-) -> tuple[int, int, list[StorageFileMetric], int, int]:
+) -> tuple[int, int, list[StorageFileMetric], int, int, int, int]:
     """Return file count, bytes, and optional largest files for a shallow scan."""
     count = 0
     total_bytes = 0
     unlinked_count = 0
     unlinked_bytes = 0
+    active_count = 0
+    active_bytes = 0
     files: list[StorageFileMetric] = []
     try:
         entries = list(path.iterdir())
     except OSError:
-        return 0, 0, [], 0, 0
+        return 0, 0, [], 0, 0, 0, 0
 
     normalized_suffixes = {suffix.lower() for suffix in allowed_suffixes}
     source_refs = _source_audio_refs_by_name() if path == SOURCE_AUDIO_DIR else None
+    active_refs = _active_source_audio_refs_by_name(path) if path == SOURCE_AUDIO_DIR else None
     for entry in entries:
         if entry.name.startswith("."):
             continue
@@ -472,7 +475,11 @@ def _directory_file_stats(
         count += 1
         total_bytes += int(stat.st_size)
         linked_ref = source_refs.get(entry.name) if source_refs is not None else None
-        if source_refs is not None and linked_ref is None:
+        active_ref = active_refs.get(entry.name) if active_refs is not None else None
+        if active_ref is not None:
+            active_count += 1
+            active_bytes += int(stat.st_size)
+        if source_refs is not None and linked_ref is None and active_ref is None:
             unlinked_count += 1
             unlinked_bytes += int(stat.st_size)
         if largest_limit > 0:
@@ -484,10 +491,13 @@ def _directory_file_stats(
                     source_media_type=_storage_source_media_type(entry, linked_ref) if source_refs is not None else None,
                     linked_meeting_id=int(linked_ref["id"]) if linked_ref else None,
                     linked_meeting_title=str(linked_ref["title"]) if linked_ref else None,
+                    active_job_id=str(active_ref["job_id"]) if active_ref else None,
+                    active_job_status=str(active_ref["status"]) if active_ref else None,
+                    active_job_count=int(active_ref.get("count", 0)) if active_ref else 0,
                 )
             )
     largest_files = sorted(files, key=lambda item: item.bytes, reverse=True)[:largest_limit]
-    return count, total_bytes, largest_files, unlinked_count, unlinked_bytes
+    return count, total_bytes, largest_files, unlinked_count, unlinked_bytes, active_count, active_bytes
 
 
 def _source_audio_refs_by_name() -> dict[str, dict]:
@@ -496,6 +506,41 @@ def _source_audio_refs_by_name() -> dict[str, dict]:
         source_name = Path(str(row.get("source_audio") or "")).name
         if source_name:
             refs.setdefault(source_name, row)
+    return refs
+
+
+def _active_source_audio_refs_by_name(source_dir: Optional[Path] = None) -> dict[str, dict]:
+    refs: dict[str, dict] = {}
+    source_dir = source_dir or SOURCE_AUDIO_DIR
+    try:
+        source_root = source_dir.resolve()
+    except OSError:
+        source_root = source_dir
+    for status in ("processing", "pending"):
+        for job in list_jobs(limit=1000, status=status):
+            payload = job.get("payload") or {}
+            audio_path = str(payload.get("audio_path") or "").strip()
+            if not audio_path:
+                continue
+            audio_file = Path(audio_path)
+            try:
+                if audio_file.resolve().parent != source_root:
+                    continue
+            except OSError:
+                if audio_file.parent != source_dir:
+                    continue
+            source_name = audio_file.name
+            if not source_name:
+                continue
+            ref = refs.setdefault(
+                source_name,
+                {
+                    "job_id": job.get("job_id"),
+                    "status": job.get("status") or status,
+                    "count": 0,
+                },
+            )
+            ref["count"] = int(ref.get("count", 0)) + 1
     return refs
 
 
@@ -540,8 +585,11 @@ def _source_media_inventory(limit: int = 100, offset: int = 0) -> SourceMediaInv
     total_bytes = 0
     unlinked_count = 0
     unlinked_bytes = 0
+    active_count = 0
+    active_bytes = 0
     files: list[StorageFileMetric] = []
     source_refs = _source_audio_refs_by_name()
+    active_refs = _active_source_audio_refs_by_name(SOURCE_AUDIO_DIR)
     normalized_suffixes = {suffix.lower() for suffix in SUPPORTED_MEDIA_FORMATS}
 
     try:
@@ -565,7 +613,11 @@ def _source_media_inventory(limit: int = 100, offset: int = 0) -> SourceMediaInv
         file_bytes = int(stat.st_size)
         total_bytes += file_bytes
         linked_ref = source_refs.get(entry.name)
-        if linked_ref is None:
+        active_ref = active_refs.get(entry.name)
+        if active_ref is not None:
+            active_count += 1
+            active_bytes += file_bytes
+        if linked_ref is None and active_ref is None:
             unlinked_count += 1
             unlinked_bytes += file_bytes
         files.append(
@@ -576,6 +628,9 @@ def _source_media_inventory(limit: int = 100, offset: int = 0) -> SourceMediaInv
                 source_media_type=_storage_source_media_type(entry, linked_ref),
                 linked_meeting_id=int(linked_ref["id"]) if linked_ref else None,
                 linked_meeting_title=str(linked_ref["title"]) if linked_ref else None,
+                active_job_id=str(active_ref["job_id"]) if active_ref else None,
+                active_job_status=str(active_ref["status"]) if active_ref else None,
+                active_job_count=int(active_ref.get("count", 0)) if active_ref else 0,
             )
         )
 
@@ -593,6 +648,8 @@ def _source_media_inventory(limit: int = 100, offset: int = 0) -> SourceMediaInv
         offset=safe_offset,
         unlinked_files=unlinked_count,
         unlinked_bytes=unlinked_bytes,
+        active_job_files=active_count,
+        active_job_bytes=active_bytes,
         files=sorted_files,
     )
 
@@ -888,6 +945,12 @@ def _delete_unlinked_source_media(filename: str) -> SourceMediaDeleteResponse:
             status_code=409,
             detail=f"原始檔仍連結到會議 #{linked_ref['id']}，不可從維運清單刪除。",
         )
+    active_ref = _active_source_audio_refs_by_name(SOURCE_AUDIO_DIR).get(source_path.name)
+    if active_ref:
+        raise HTTPException(
+            status_code=409,
+            detail=f"原始檔正在被任務 {active_ref['job_id']} 使用中，請等任務完成後再整理。",
+        )
     try:
         file_bytes = source_path.stat().st_size
         source_media_type = _storage_source_media_type(source_path)
@@ -916,18 +979,22 @@ def _storage_metrics() -> StorageMetrics:
         source_largest_files,
         source_unlinked_count,
         source_unlinked_bytes,
+        source_active_count,
+        source_active_bytes,
     ) = _directory_file_stats(
         SOURCE_AUDIO_DIR,
         set(SUPPORTED_MEDIA_FORMATS),
         largest_limit=5,
     )
     archive_count, archive_bytes = _source_media_archive_storage_stats()
-    markdown_count, markdown_bytes, _, _, _ = _directory_file_stats(OUTPUT_DIR, {".md"})
+    markdown_count, markdown_bytes, _, _, _, _, _ = _directory_file_stats(OUTPUT_DIR, {".md"})
     return StorageMetrics(
         source_media_files=source_count,
         source_media_bytes=source_bytes,
         source_media_unlinked_files=source_unlinked_count,
         source_media_unlinked_bytes=source_unlinked_bytes,
+        source_media_active_job_files=source_active_count,
+        source_media_active_job_bytes=source_active_bytes,
         source_media_archived_files=archive_count,
         source_media_archived_bytes=archive_bytes,
         source_media_largest_files=source_largest_files,

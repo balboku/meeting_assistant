@@ -1773,6 +1773,7 @@
       <select id="source-storage-filter" class="form-input" aria-label="原始檔連結狀態篩選" onchange="renderSourceStorageInventory()">
         <option value="all">全部原始檔</option>
         <option value="unlinked">未連結會議</option>
+        <option value="active">任務使用中</option>
         <option value="linked">已連結會議</option>
         <option value="archive">已移除備份</option>
       </select>
@@ -2023,8 +2024,11 @@ function sourceArchiveRetentionLabel(days = runtimeConfig.source_media_archive_r
     : '已移除備份自動清理停用';
 }
 
-function sourceStorageTitle(sourceFiles = 0, sourceBytes = 0, unlinkedFiles = 0, unlinkedBytes = 0, largestFiles = [], archivedFiles = 0, archivedBytes = 0) {
+function sourceStorageTitle(sourceFiles = 0, sourceBytes = 0, unlinkedFiles = 0, unlinkedBytes = 0, largestFiles = [], archivedFiles = 0, archivedBytes = 0, activeJobFiles = 0, activeJobBytes = 0) {
   const lines = [`原始錄音/錄影：${sourceFiles} 個檔案，${formatBytes(sourceBytes)}`];
+  if (activeJobFiles > 0) {
+    lines.push(`任務使用中：${activeJobFiles} 個，${formatBytes(activeJobBytes)}`);
+  }
   if (unlinkedFiles > 0) {
     lines.push(`未連結原始檔：${unlinkedFiles} 個，${formatBytes(unlinkedBytes)}`);
   }
@@ -2036,9 +2040,12 @@ function sourceStorageTitle(sourceFiles = 0, sourceBytes = 0, unlinkedFiles = 0,
   if (largest.length) {
     lines.push('最大檔案：');
     largest.forEach(file => {
+      const activeJobCount = Number(file.active_job_count || 0);
       const meeting = file.linked_meeting_title
         ? `#${file.linked_meeting_id || '?'} ${file.linked_meeting_title}`
-        : '未連結';
+        : activeJobCount > 0
+          ? `任務使用中 ${file.active_job_id || ''}`.trim()
+          : '未連結';
       lines.push(`${file.name || '未命名'} (${formatBytes(file.bytes)}) · ${meeting}`);
     });
   }
@@ -2252,16 +2259,26 @@ function renderSourceStorageFile(file) {
   const mediaType = sourceStorageMediaType(file);
   const mediaTypeLabel = mediaType === 'video' ? '影片' : mediaType === 'audio' ? '音訊' : '';
   const mediaActionLabel = mediaTypeLabel || '原始檔';
+  const activeJobCount = Number(file.active_job_count || 0);
+  const activeJobId = String(file.active_job_id || '').trim();
+  const activeJobStatus = String(file.active_job_status || '').trim();
+  const active = activeJobCount > 0 || Boolean(activeJobId);
+  const activeBadge = active
+    ? `<span class="source-storage-badge warning" title="此原始檔正在被任務使用，完成前不建議刪除">任務使用中${activeJobId ? ` ${escapeHtml(activeJobId.slice(0, 8))}` : ''}${activeJobCount > 1 ? ` 等 ${activeJobCount} 筆` : ''}</span>`
+    : '';
   const meetingBadge = linked
     ? `<span class="source-storage-badge">會議 #${meetingId} ${escapeHtml(file.linked_meeting_title)}</span>`
     : '<span class="source-storage-badge unlinked">未連結會議</span>';
+  const deleteAction = linked
+    ? `<button type="button" class="source-media-action" aria-label="開啟連結會議" onclick="openMeetingFromSourceStorage(${meetingId})">開會議</button>`
+    : active
+      ? `<button type="button" class="source-media-action" aria-label="原始檔任務使用中，完成前不可刪除" title="任務 ${escapeHtml(activeJobId || activeJobStatus || '使用中')} 使用中，完成前不可刪除" disabled>使用中</button>`
+      : `<button type="button" class="source-media-action danger" aria-label="刪除未連結原始檔" data-source-file="${escapeHtml(filename)}" onclick="deleteUnlinkedSourceMedia(this.dataset.sourceFile)">刪除</button>`;
   const actions = [
     `<button type="button" class="source-media-action" aria-label="預覽${mediaActionLabel}" data-source-url="${escapeHtml(sourceUrl)}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${escapeHtml(filename)}" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile)">預覽</button>`,
     `<a class="source-media-action" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer" aria-label="在新分頁開啟${mediaActionLabel}">新分頁</a>`,
     `<a class="source-media-action" href="${escapeHtml(downloadUrl)}" download aria-label="下載${mediaActionLabel}">下載</a>`,
-    linked
-      ? `<button type="button" class="source-media-action" aria-label="開啟連結會議" onclick="openMeetingFromSourceStorage(${meetingId})">開會議</button>`
-      : `<button type="button" class="source-media-action danger" aria-label="刪除未連結原始檔" data-source-file="${escapeHtml(filename)}" onclick="deleteUnlinkedSourceMedia(this.dataset.sourceFile)">刪除</button>`
+    deleteAction
   ].join('');
   return `<div class="source-storage-item" role="listitem">
     <div>
@@ -2271,6 +2288,7 @@ function renderSourceStorageFile(file) {
         ${mediaTypeLabel ? `<span class="source-storage-badge media-type">${mediaTypeLabel}</span>` : ''}
         <span class="source-storage-badge">${formatDate(file.modified_at)}</span>
         ${meetingBadge}
+        ${activeBadge}
       </div>
     </div>
     <div class="source-storage-actions">${actions}</div>
@@ -2312,6 +2330,8 @@ function sourceStorageSearchText(file) {
     file.archived_name,
     file.linked_meeting_title,
     file.linked_meeting_id,
+    file.active_job_id,
+    file.active_job_status,
     file.source_media_type,
     sourceStorageMediaType(file),
     formatDate(file.modified_at)
@@ -2329,8 +2349,10 @@ function sourceStorageFileMatches(file, query) {
 function sourceStorageLiveFilterMatches(file, filter) {
   const meetingId = Number(file.linked_meeting_id || 0);
   const linked = meetingId > 0 && file.linked_meeting_title;
+  const active = Number(file.active_job_count || 0) > 0 || Boolean(file.active_job_id);
   if (filter === 'linked') return linked;
-  if (filter === 'unlinked') return !linked;
+  if (filter === 'unlinked') return !linked && !active;
+  if (filter === 'active') return active;
   return filter !== 'archive';
 }
 
@@ -2480,9 +2502,11 @@ function renderSourceStorageInventory() {
   const shownCount = liveFiles.length + archivedFiles.length;
   const hiddenNotice = sourceStorageHiddenNotice(payload, archivePayload, sourceStorageInventoryState.files, sourceStorageInventoryState.archivedFiles);
   const archiveUnlistedBytes = sourceStorageArchiveUnlistedBytes(archivePayload, sourceStorageInventoryState.archivedFiles);
+  const activeJobFiles = Number(payload.active_job_files || 0);
   const summary = `<div class="source-storage-summary">
     <span class="source-storage-badge">總檔案 ${Number(payload.total_files || 0)} 個</span>
     <span class="source-storage-badge">總容量 ${formatBytes(payload.total_bytes)}</span>
+    ${activeJobFiles > 0 ? `<span class="source-storage-badge warning">任務使用中 ${activeJobFiles} 個 / ${formatBytes(payload.active_job_bytes)}</span>` : ''}
     <span class="source-storage-badge unlinked">未連結 ${Number(payload.unlinked_files || 0)} 個 / ${formatBytes(payload.unlinked_bytes)}</span>
     <span class="source-storage-badge">已移除備份 ${Number(archivePayload.total_files || 0)} 個 / ${formatBytes(archivePayload.total_bytes)}</span>
     ${archiveUnlistedBytes > 0 ? `<span class="source-storage-badge warning">未列出備份容量 ${formatBytes(archiveUnlistedBytes)}</span>` : ''}
@@ -2500,7 +2524,7 @@ function renderSourceStorageInventory() {
       '沒有符合條件的保留原始錄音/錄影檔。'
     ));
   }
-  if (!['linked', 'unlinked'].includes(filter)) {
+  if (!['linked', 'unlinked', 'active'].includes(filter)) {
     sections.push(sourceStorageRowsHtml(
       '已移除備份',
       archivedFiles,
@@ -4739,6 +4763,8 @@ async function loadMetrics() {
     const sourceBytes = Number(storage.source_media_bytes || 0);
     const unlinkedFiles = Number(storage.source_media_unlinked_files || 0);
     const unlinkedBytes = Number(storage.source_media_unlinked_bytes || 0);
+    const activeJobFiles = Number(storage.source_media_active_job_files || 0);
+    const activeJobBytes = Number(storage.source_media_active_job_bytes || 0);
     const archivedFiles = Number(storage.source_media_archived_files || 0);
     const archivedBytes = Number(storage.source_media_archived_bytes || 0);
     const totalManagedBytes = sourceBytes + archivedBytes;
@@ -4746,7 +4772,7 @@ async function loadMetrics() {
     const sourceLargestFiles = storage.source_media_largest_files || [];
     sourceStorageEl.textContent = `${managedFileLabel} / ${formatBytes(totalManagedBytes)}`;
     sourceStorageEl.classList.toggle('attention', unlinkedFiles > 0);
-    sourceStorageTile.title = sourceStorageTitle(sourceFiles, sourceBytes, unlinkedFiles, unlinkedBytes, sourceLargestFiles, archivedFiles, archivedBytes);
+    sourceStorageTile.title = sourceStorageTitle(sourceFiles, sourceBytes, unlinkedFiles, unlinkedBytes, sourceLargestFiles, archivedFiles, archivedBytes, activeJobFiles, activeJobBytes);
     averageEl.textContent = data.jobs?.average_completed_seconds == null
       ? '–'
       : `${data.jobs.average_completed_seconds}s`;

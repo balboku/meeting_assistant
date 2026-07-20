@@ -2643,6 +2643,78 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual(post_restore_storage["source_media_archived_files"], 0)
         self.assertEqual(post_restore_storage["source_media_archived_bytes"], 0)
 
+    def test_source_media_metrics_treat_active_job_file_as_in_use(self):
+        database = self._isolated_database()
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_dir = root / "source_audio"
+            output_dir = root / "output"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            external_dir = root / "external_source"
+            external_dir.mkdir()
+            active_source = source_dir / "active-source.webm"
+            orphan_source = source_dir / "orphan-source.m4a"
+            same_name_external_source = external_dir / "orphan-source.m4a"
+            active_source.write_bytes(b"active-source")
+            orphan_source.write_bytes(b"orphan")
+            same_name_external_source.write_bytes(b"external")
+            database.create_job(
+                "active-source-job",
+                payload={"audio_path": str(active_source), "output_dir": str(output_dir)},
+            )
+            database.update_job_status("active-source-job", "processing", "處理中")
+            database.create_job(
+                "external-source-job",
+                payload={"audio_path": str(same_name_external_source), "output_dir": str(output_dir)},
+            )
+            database.update_job_status("external-source-job", "processing", "處理中")
+
+            with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
+                 mock.patch.object(main, "OUTPUT_DIR", output_dir), \
+                 mock.patch.object(main, "BACKUP_DIR", root / "backups"):
+                metrics_response = asgi_request(main.app, "GET", "/metrics")
+                inventory_response = asgi_request(main.app, "GET", "/source-media/inventory?limit=10")
+                delete_response = asgi_request(main.app, "DELETE", "/source-media/inventory/active-source.webm")
+
+        self.assertEqual(metrics_response.status_code, 200)
+        storage = metrics_response.json()["storage"]
+        self.assertEqual(storage["source_media_files"], 2)
+        self.assertEqual(storage["source_media_active_job_files"], 1)
+        self.assertEqual(storage["source_media_active_job_bytes"], len(b"active-source"))
+        self.assertEqual(storage["source_media_unlinked_files"], 1)
+        self.assertEqual(storage["source_media_unlinked_bytes"], len(b"orphan"))
+        active_metric = next(
+            item
+            for item in storage["source_media_largest_files"]
+            if item["name"] == "active-source.webm"
+        )
+        self.assertEqual(active_metric["active_job_id"], "active-source-job")
+        self.assertEqual(active_metric["active_job_status"], "processing")
+        self.assertEqual(active_metric["active_job_count"], 1)
+
+        self.assertEqual(inventory_response.status_code, 200)
+        inventory = inventory_response.json()
+        self.assertEqual(inventory["active_job_files"], 1)
+        self.assertEqual(inventory["active_job_bytes"], len(b"active-source"))
+        self.assertEqual(inventory["unlinked_files"], 1)
+        active_inventory_item = next(
+            item
+            for item in inventory["files"]
+            if item["name"] == "active-source.webm"
+        )
+        orphan_inventory_item = next(
+            item
+            for item in inventory["files"]
+            if item["name"] == "orphan-source.m4a"
+        )
+        self.assertEqual(active_inventory_item["active_job_id"], "active-source-job")
+        self.assertIsNone(orphan_inventory_item["active_job_id"])
+        self.assertEqual(delete_response.status_code, 409)
+        self.assertIn("使用中", delete_response.json()["detail"])
+
     def test_source_media_archive_preserves_webm_video_metadata_for_preview(self):
         self._isolated_database()
         import backend.main as main
@@ -4605,6 +4677,7 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn('aria-label="搜尋原始檔檔名或會議"', html)
         self.assertIn('id="source-storage-filter"', html)
         self.assertIn('aria-label="原始檔連結狀態篩選"', html)
+        self.assertIn('<option value="active">任務使用中</option>', html)
         self.assertIn('id="source-storage-media-filter"', html)
         self.assertIn('aria-label="原始檔媒體類型篩選"', html)
         self.assertIn('id="source-storage-sort"', html)
@@ -4633,6 +4706,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("storage.source_media_bytes", html)
         self.assertIn("storage.source_media_unlinked_files", html)
         self.assertIn("storage.source_media_unlinked_bytes", html)
+        self.assertIn("storage.source_media_active_job_files", html)
+        self.assertIn("storage.source_media_active_job_bytes", html)
         self.assertIn("storage.source_media_archived_files", html)
         self.assertIn("storage.source_media_archived_bytes", html)
         self.assertIn("storage.source_media_largest_files", html)
@@ -4648,6 +4723,11 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("已移除備份", html)
         self.assertIn("最大檔案：", html)
         self.assertIn("未連結原始檔：", html)
+        self.assertIn("任務使用中：", html)
+        self.assertIn("payload.active_job_files", html)
+        self.assertIn("file.active_job_id", html)
+        self.assertIn("active_job_count", html)
+        self.assertIn("原始檔任務使用中，完成前不可刪除", html)
         self.assertIn("file.linked_meeting_title", html)
         self.assertIn("formatBytes(sourceBytes)", html)
         self.assertIn("原始檔", html)
