@@ -282,7 +282,7 @@ def _quality_review_issue_display(issues: Any) -> str:
     extras = ordered[1:]
     if not extras:
         return primary
-    return f"{primary}（另 {len(extras)} 項：{'；'.join(extras)}）"
+    return f"{primary}（另 {len(extras)} 項）"
 
 
 def _quality_review_segment_summary(details: list[dict[str, Any]], limit: int = 3) -> Optional[str]:

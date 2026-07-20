@@ -3920,14 +3920,16 @@ class SearchRegressionTests(unittest.TestCase):
 
         expected_summary = (
             "第 8 段 70:00-80:00："
-            f"{primary_issue}（另 1 項：{secondary_issue}）"
+            f"{primary_issue}（另 1 項）"
         )
         self.assertEqual(listed["quality_review_segment_summary"], expected_summary)
         self.assertEqual(searched["quality_review_segment_summary"], expected_summary)
         self.assertEqual(detail["quality_review_segment_summary"], expected_summary)
         self.assertIn("另 1 項", listed["quality_warning_preview"])
+        self.assertNotIn(secondary_issue, listed["quality_warning_preview"])
+        self.assertNotIn(secondary_issue, listed["quality_review_segment_summary"])
         self.assertIn(primary_issue, listed["quality_warning_text"])
-        self.assertIn(secondary_issue, listed["quality_warning_text"])
+        self.assertNotIn(secondary_issue, listed["quality_warning_text"])
         self.assertEqual(
             listed["quality_review_segment_details"][0]["issues"],
             [secondary_issue, primary_issue],
