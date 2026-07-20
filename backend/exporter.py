@@ -59,7 +59,7 @@ def export_meeting_to_docx(meeting_record: dict, output_filepath: str) -> bool:
 
         # 討論內容 (Row 5, Cell 0)
         if len(table.rows) > 5 and len(table.rows[5].cells) > 0:
-            content = meeting_record.get("full_content", "")
+            content = _content_with_quality_review_note(meeting_record)
             _set_cell_markdown(table.cell(5, 0), content)
 
         doc.save(output_filepath)
@@ -82,6 +82,51 @@ def _set_cell_text(cell, text: str):
         p.add_run(text)
     else:
         cell.text = text
+
+
+def _content_with_quality_review_note(meeting_record: dict) -> str:
+    content = str(meeting_record.get("full_content") or "")
+    summary = _quality_review_export_summary(meeting_record)
+    if not summary or "逐字稿品質複核提示" in content[:1200]:
+        return content
+    note = (
+        f"> 逐字稿品質複核提示：{summary}。"
+        "請依原始錄音/錄影時間複核，必要時於系統重跑問題分段。"
+    )
+    return _insert_after_frontmatter(content, note + "\n\n")
+
+
+def _quality_review_export_summary(meeting_record: dict) -> str:
+    summary = str(meeting_record.get("quality_review_segment_summary") or "").strip()
+    if summary:
+        return summary
+    try:
+        from backend.database import apply_quality_preview_fields
+    except Exception:
+        return ""
+    quality_report = meeting_record.get("quality_report")
+    try:
+        quality_fields = apply_quality_preview_fields(
+            dict(meeting_record),
+            quality_report=quality_report if isinstance(quality_report, dict) else None,
+        )
+    except Exception:
+        logger.exception("DOCX 匯出時重建品質複核摘要失敗")
+        return ""
+    return str(quality_fields.get("quality_review_segment_summary") or "").strip()
+
+
+def _insert_after_frontmatter(markdown: str, insertion: str) -> str:
+    text = str(markdown or "")
+    if not text.startswith("---"):
+        return insertion + text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return insertion + text
+    after = end + 4
+    while after < len(text) and text[after] in "\r\n":
+        after += 1
+    return text[:after] + insertion + text[after:]
 
 
 def _set_cell_markdown(cell, markdown: str) -> None:

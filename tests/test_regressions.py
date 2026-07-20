@@ -5695,6 +5695,64 @@ title: 會議記錄 - 測試會議
             self.assertNotIn("**", content_cell.text)
             self.assertNotIn("|---", content_cell.text)
 
+    def test_exporter_adds_compact_transcript_review_note_from_quality_report(self):
+        from docx import Document
+        from backend.exporter import export_meeting_to_docx
+
+        markdown = """---
+title: 會議記錄 - 需複核會議
+---
+
+## 📋 一、討論摘要 (Discussion Summary)
+
+摘要內容。
+"""
+        primary_issue = "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:01-73:00"
+        secondary_issue = "曾觸發轉錄補救：非最後分段含自動過濾/截斷提示"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template_path = Path(tmpdir) / "template.docx"
+            template_doc = Document()
+            template_doc.add_table(rows=6, cols=2)
+            template_doc.save(str(template_path))
+            template_env = mock.patch.dict(os.environ, {"MEETING_DOCX_TEMPLATE_PATH": str(template_path)})
+            template_env.start()
+            self.addCleanup(template_env.stop)
+
+            output_path = Path(tmpdir) / "meeting.docx"
+            ok = export_meeting_to_docx(
+                {
+                    "date": "2026/07/20",
+                    "title": "需複核會議",
+                    "full_content": markdown,
+                    "quality_report": {
+                        "review_segments": [
+                            {
+                                "index": 7,
+                                "label": "第 8 段",
+                                "start_seconds": 4201,
+                                "end_seconds": 4801,
+                                "issues": [secondary_issue, primary_issue],
+                            },
+                        ],
+                        "segments": [
+                            {"index": 7, "start_seconds": 4201, "end_seconds": 4801, "issues": []},
+                        ],
+                    },
+                },
+                str(output_path),
+            )
+
+            self.assertTrue(ok)
+            doc = Document(str(output_path))
+            content_text = doc.tables[0].cell(5, 0).text
+            self.assertIn("逐字稿品質複核提示", content_text)
+            self.assertIn("第 8 段 70:01-80:01", content_text)
+            self.assertIn(primary_issue, content_text)
+            self.assertIn("另 1 項", content_text)
+            self.assertNotIn(secondary_issue, content_text)
+            self.assertLess(content_text.index("逐字稿品質複核提示"), content_text.index("一、討論摘要"))
+
 
 class JobQueueWorkerRegressionTests(unittest.TestCase):
     def _isolated_database(self):
