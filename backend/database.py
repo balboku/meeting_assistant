@@ -818,6 +818,166 @@ def _transcript_segment_spans(transcript: str) -> list[dict[str, int]]:
     return spans
 
 
+def _repeated_phrase_from_warning(warning: str) -> Optional[dict[str, Any]]:
+    match = re.search(
+        r"同一句連續重複\s*(?P<count>\d+)\s*次[：:]\s*"
+        r"(?P<phrase>[^；;，,。)\]）]{4,80})",
+        str(warning or ""),
+    )
+    if not match:
+        return None
+    phrase = str(match.group("phrase") or "").strip()
+    normalized = _normalize_turn_text(phrase)
+    if len(normalized) < 4:
+        return None
+    return {
+        "count": int(match.group("count")),
+        "phrase": phrase,
+        "normalized": normalized,
+    }
+
+
+def _transcript_lookup_line_text(line: str) -> str:
+    cleaned = re.sub(r"\[\d{1,3}:[0-5]\d\]", "", str(line or ""))
+    cleaned = re.sub(r"\*\*\[[^\]]+\]\*\*", "", cleaned)
+    cleaned = re.sub(r"\[[^\]]+\]", "", cleaned)
+    cleaned = re.sub(r"^[：:,\s]+", "", cleaned)
+    return _normalize_turn_text(cleaned)
+
+
+def _heading_segment_from_line(line: str) -> Optional[dict[str, int]]:
+    match = _TRANSCRIPT_SEGMENT_HEADING_PATTERN.match(str(line or "").strip())
+    if not match:
+        return None
+    raw_index = match.group("zh_index") or match.group("en_index")
+    raw_start = match.group("zh_start") or match.group("en_start")
+    raw_end = match.group("zh_end") or match.group("en_end")
+    try:
+        index = int(raw_index) - 1
+    except (TypeError, ValueError):
+        return None
+    start_seconds = _clock_text_to_seconds(raw_start)
+    end_seconds = _clock_text_to_seconds(raw_end)
+    if index < 0 or start_seconds is None:
+        return None
+    if end_seconds is None or end_seconds <= start_seconds:
+        end_seconds = start_seconds + 1
+    return {
+        "index": index,
+        "start_seconds": start_seconds,
+        "end_seconds": end_seconds,
+    }
+
+
+def _warning_phrase_review_segments_from_transcript(
+    transcript: str,
+    warnings: list[str],
+    *,
+    segment_seconds: int = 600,
+) -> list[dict[str, Any]]:
+    phrase_infos = [
+        phrase_info
+        for warning in warnings
+        if (phrase_info := _repeated_phrase_from_warning(warning))
+    ]
+    if not phrase_infos:
+        return []
+
+    details_by_key: dict[tuple[int, str], dict[str, Any]] = {}
+    current_segment: Optional[dict[str, int]] = None
+    for raw_line in (transcript or "").splitlines():
+        heading_segment = _heading_segment_from_line(raw_line)
+        if heading_segment is not None:
+            current_segment = heading_segment
+            continue
+        timestamp_match = _TRANSCRIPT_TIMESTAMP_PATTERN.search(raw_line)
+        if not timestamp_match:
+            continue
+        line_seconds = (
+            int(timestamp_match.group("minutes")) * 60
+            + int(timestamp_match.group("seconds"))
+        )
+        line_text = _transcript_lookup_line_text(raw_line)
+        if not line_text:
+            continue
+        for phrase_info in phrase_infos:
+            phrase = str(phrase_info["normalized"])
+            if phrase not in line_text and line_text not in phrase:
+                continue
+            fallback_index = max(0, line_seconds // segment_seconds)
+            segment = current_segment or {
+                "index": fallback_index,
+                "start_seconds": fallback_index * segment_seconds,
+                "end_seconds": (fallback_index + 1) * segment_seconds,
+            }
+            index = int(segment["index"])
+            key = (index, phrase)
+            detail = details_by_key.setdefault(
+                key,
+                {
+                    "index": index,
+                    "label": review_segment_label(index),
+                    "start_seconds": int(segment["start_seconds"]),
+                    "end_seconds": int(segment["end_seconds"]),
+                    "first_match_seconds": line_seconds,
+                    "last_match_seconds": line_seconds,
+                    "phrase_info": phrase_info,
+                },
+            )
+            detail["first_match_seconds"] = min(int(detail["first_match_seconds"]), line_seconds)
+            detail["last_match_seconds"] = max(int(detail["last_match_seconds"]), line_seconds)
+
+    details_by_index: dict[int, dict[str, Any]] = {}
+    for detail in details_by_key.values():
+        phrase_info = detail.pop("phrase_info")
+        start_time = int(detail.pop("first_match_seconds"))
+        end_time = int(detail.pop("last_match_seconds"))
+        issue = (
+            "疑似連續重複轉錄；"
+            f"同一句連續重複 {phrase_info['count']} 次：{phrase_info['phrase']}；"
+            f"重複時間：{_format_clock(start_time)}-{_format_clock(end_time)}"
+        )
+        index = int(detail["index"])
+        merged = details_by_index.setdefault(
+            index,
+            {
+                "index": index,
+                "label": review_segment_label(index),
+                "start_seconds": int(detail["start_seconds"]),
+                "end_seconds": int(detail["end_seconds"]),
+                "issues": [],
+            },
+        )
+        if issue not in merged["issues"]:
+            merged["issues"].append(issue)
+    return [
+        details_by_index[index]
+        for index in sorted(details_by_index)
+    ]
+
+
+def _markdown_warning_phrase_review_segments_from_text(
+    text: str,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    transcript = _markdown_section(text, ("完整逐字稿", "Verbatim Transcript"), ())
+    return _warning_phrase_review_segments_from_transcript(transcript, warnings)
+
+
+def _legacy_markdown_warning_phrase_review_segments(
+    output_path: str,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    path = Path(output_path or "")
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return _markdown_warning_phrase_review_segments_from_text(text, warnings)
+
+
 def _markdown_repeated_turn_review_segments_from_text(text: str) -> list[dict[str, Any]]:
     transcript = _markdown_section(text, ("完整逐字稿", "Verbatim Transcript"), ())
     segments = _transcript_segment_spans(transcript)
@@ -2028,6 +2188,7 @@ def apply_quality_preview_fields(
     known_segment_indices: set[int] = set()
     segment_issue_previews: list[str] = []
     review_segment_issue_previews: list[str] = []
+    quality_warning_lines_for_lookup: list[str] = []
     generic_review_issue = "品質警示提及此分段"
 
     def has_structured_review_issues(report: Any) -> bool:
@@ -2136,12 +2297,14 @@ def apply_quality_preview_fields(
             if warnings:
                 warning_preview = str(warnings[0]).strip() or None
             for warning in warnings:
+                warning_text = str(warning)
+                quality_warning_lines_for_lookup.append(warning_text)
                 if (
                     skip_derived_location_warning_segments
-                    and _is_derived_review_location_warning(str(warning))
+                    and _is_derived_review_location_warning(warning_text)
                 ):
                     continue
-                add_review_segment_labels_from_text(str(warning))
+                add_review_segment_labels_from_text(warning_text)
         for review_segment in quality_report.get("review_segments") or []:
             if not isinstance(review_segment, dict):
                 continue
@@ -2192,17 +2355,33 @@ def apply_quality_preview_fields(
         if legacy_warnings:
             warning_preview = legacy_warnings[0]
             for warning in legacy_warnings:
+                quality_warning_lines_for_lookup.append(warning)
                 add_review_segment_labels_from_text(warning)
     output_path_text = str(record.get("output_path") or "")
     legacy_repeated_details = _legacy_markdown_repeated_turn_review_segments(output_path_text)
     full_content_text = str(record.get("full_content") or "")
     if not legacy_repeated_details and full_content_text.strip():
         legacy_repeated_details = _markdown_repeated_turn_review_segments_from_text(full_content_text)
+    phrase_review_details: list[dict[str, Any]] = []
+    if not review_segment_labels and not legacy_repeated_details:
+        phrase_review_details = _legacy_markdown_warning_phrase_review_segments(
+            output_path_text,
+            quality_warning_lines_for_lookup,
+        )
+        if not phrase_review_details and full_content_text.strip():
+            phrase_review_details = _markdown_warning_phrase_review_segments_from_text(
+                full_content_text,
+                quality_warning_lines_for_lookup,
+            )
+    if phrase_review_details:
+        known_segment_indices.update(_markdown_transcript_segment_indices(output_path_text))
+        if not known_segment_indices and full_content_text.strip():
+            known_segment_indices.update(_markdown_transcript_segment_indices_from_text(full_content_text))
     if legacy_repeated_details:
         known_segment_indices.update(_markdown_transcript_segment_indices(output_path_text))
         if not known_segment_indices and full_content_text.strip():
             known_segment_indices.update(_markdown_transcript_segment_indices_from_text(full_content_text))
-    for detail in legacy_repeated_details:
+    for detail in [*legacy_repeated_details, *phrase_review_details]:
         segment_issues = [
             _normalize_quality_review_issue_text(str(issue).strip())
             for issue in detail.get("issues") or []
