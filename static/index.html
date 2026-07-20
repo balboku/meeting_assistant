@@ -4595,8 +4595,11 @@ function detailQualityReport(meeting) {
   if (fallback?.warnings?.length) {
     report.warnings = mergeQualityReportWarnings(report.warnings, fallback.warnings);
   }
-  if ((!Array.isArray(report.review_segments) || !report.review_segments.length) && fallback?.review_segments?.length) {
-    report.review_segments = fallback.review_segments;
+  if (fallback?.review_segments?.length) {
+    report.review_segments = mergeQualityReviewSegments(
+      Array.isArray(report.review_segments) ? report.review_segments : [],
+      fallback.review_segments
+    );
   }
   return report;
 }

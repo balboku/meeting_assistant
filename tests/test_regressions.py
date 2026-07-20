@@ -9039,6 +9039,62 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertTrue(any("那這個分數就歸零" in issue for issue in report["review_segments"][1]["issues"]))
         self.assertFalse(any("品質警示提及此分段" in issue for issue in report["review_segments"][0]["issues"]))
 
+    def test_meeting_detail_merges_phrase_inferred_segments_with_existing_review_segments(self):
+        import backend.main as main
+
+        warning = "逐字稿品質警示：疑似連續重複轉錄（同一句連續重複 31 次：因為我是結所以我領車），建議重跑或複核相關分段。"
+        record = {
+            "id": 19,
+            "title": "既有複核分段與重複句定位",
+            "date": "2026/07/08",
+            "source_audio": "phrase-warning.webm",
+            "output_path": "phrase-warning.md",
+            "summary": "摘要",
+            "job_id": None,
+            "quality_score": 80,
+            "quality_label": "需複核",
+            "created_at": "2026-07-08 10:00:00",
+            "quality_report": {
+                "warnings": [warning],
+                "segments": [
+                    {"index": 0, "start_seconds": 0, "end_seconds": 600, "issues": ["既有音訊需複核"]},
+                ],
+                "review_segments": [
+                    {
+                        "index": 0,
+                        "label": "第 1 段",
+                        "start_seconds": 0,
+                        "end_seconds": 600,
+                        "issues": ["既有音訊需複核"],
+                    },
+                ],
+            },
+            "full_content": (
+                "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+                "## 二、最終決議 (Final Decisions)\n決議\n"
+                "## 三、待辦事項 (Action Items)\n待辦\n"
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 8 段｜70:01 – 80:01】\n"
+                "[70:15] **[發言者 A]**：因為我是結，所以我領車。\n"
+                "[70:30] **[發言者 B]**：後續正常討論。\n"
+            ),
+        }
+        with mock.patch.object(main, "get_meeting", return_value=record):
+            response = asgi_request(main.app, "GET", "/meetings/19")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        report = payload["quality_report"]
+        self.assertEqual([segment["index"] for segment in report["review_segments"]], [0, 7])
+        self.assertIn("第 8 段 70:01-80:01", payload["quality_warning_text"])
+        self.assertIn("同一句連續重複 31 次：因為我是結所以我領車", payload["quality_warning_text"])
+        self.assertNotIn("建議重跑或複核相關分段", payload["quality_warning_text"])
+        self.assertIn(7, payload["quality_review_rerunnable_segments"])
+        repeat_segment = next(segment for segment in report["review_segments"] if segment["index"] == 7)
+        self.assertEqual(repeat_segment["start_seconds"], 4201)
+        self.assertEqual(repeat_segment["end_seconds"], 4801)
+        self.assertTrue(any("重複時間：70:15-70:15" in issue for issue in repeat_segment["issues"]))
+
     def test_meeting_detail_infers_review_segments_from_warning_text(self):
         import backend.main as main
 
@@ -10367,11 +10423,28 @@ const oldLocated = detailQualityReport({{
     {{ index: 7, label: '第 8 段', start_seconds: 4201, end_seconds: 4801, issues: ['疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:01-73:00'] }}
   ]
 }});
+const mergedExisting = detailQualityReport({{
+  quality_report: {{
+    score: 80,
+    label: '需複核',
+    warnings: ['逐字稿品質警示：疑似連續重複轉錄（同一句連續重複 31 次：因為我是結所以我領車），建議重跑或複核相關分段。'],
+    review_segments: [
+      {{ index: 1, label: '第 2 段', start_seconds: 600, end_seconds: 1200, issues: ['既有音訊需複核'] }}
+    ]
+  }},
+  quality_warning_text: '逐字稿品質警示：問題位置：第 8 段 70:01-80:01：疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:01-73:00。建議重跑上述分段或複核相關內容。',
+  quality_review_segment_details: [
+    {{ index: 7, label: '第 8 段', start_seconds: 4201, end_seconds: 4801, issues: ['疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:01-73:00'] }}
+  ]
+}});
 if (!oldLocated.warnings[0].includes('問題位置：第 8 段')) process.exit(10);
 if (oldLocated.warnings.length !== 1) process.exit(11);
 if (oldLocated.warnings.some(warning => warning.includes('需複核分段：第 8 段'))) process.exit(12);
 if (oldLocated.warnings.some(warning => warning.includes('建議重跑或複核相關分段'))) process.exit(16);
 if (oldLocated.review_segments[0].index !== 7) process.exit(13);
+if (mergedExisting.review_segments.map(segment => segment.index).join(',') !== '1,7') process.exit(17);
+if (!mergedExisting.review_segments[1].issues[0].includes('同一句連續重複 31 次')) process.exit(18);
+if (!mergedExisting.warnings[0].includes('問題位置：第 8 段')) process.exit(19);
 result = 'detail_quality_fallback_ok';
 `, sandbox);
 if (sandbox.result !== 'detail_quality_fallback_ok') process.exit(9);

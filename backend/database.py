@@ -2360,6 +2360,29 @@ def apply_quality_preview_fields(
                     skip_derived_location_warning_segments
                     and _is_derived_review_location_warning(warning_text)
                 ):
+                    for detail in review_segment_details_from_text(warning_text):
+                        segment_index = int_or_none(detail.get("index"))
+                        if segment_index is None:
+                            continue
+                        already_has_segment = any(
+                            existing_detail.get("index") == segment_index
+                            for existing_detail in review_segment_detail_by_label.values()
+                        )
+                        if already_has_segment:
+                            continue
+                        detail_issues = [
+                            _normalize_quality_review_issue_text(str(issue).strip())
+                            for issue in detail.get("issues") or []
+                            if _normalize_quality_review_issue_text(str(issue).strip())
+                        ] or [generic_review_issue]
+                        add_review_segment_label(
+                            detail.get("label") or review_segment_label(segment_index),
+                            index=segment_index,
+                            start_seconds=int_or_none(detail.get("start_seconds")),
+                            end_seconds=int_or_none(detail.get("end_seconds")),
+                            issues=detail_issues,
+                        )
+                        known_segment_indices.add(segment_index)
                     continue
                 add_review_segment_labels_from_text(warning_text)
         for review_segment in quality_report.get("review_segments") or []:
@@ -2438,11 +2461,11 @@ def apply_quality_preview_fields(
             )
     if phrase_review_details:
         known_segment_indices.update(_markdown_transcript_segment_indices(output_path_text))
-        if not known_segment_indices and full_content_text.strip():
+        if full_content_text.strip():
             known_segment_indices.update(_markdown_transcript_segment_indices_from_text(full_content_text))
     if legacy_repeated_details:
         known_segment_indices.update(_markdown_transcript_segment_indices(output_path_text))
-        if not known_segment_indices and full_content_text.strip():
+        if full_content_text.strip():
             known_segment_indices.update(_markdown_transcript_segment_indices_from_text(full_content_text))
     for detail in [*legacy_repeated_details, *phrase_review_details]:
         segment_issues = [

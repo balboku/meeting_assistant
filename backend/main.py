@@ -2369,6 +2369,10 @@ def _detail_transcript_repeated_turn_warning(
     return diagnostic["warning"] if diagnostic else None
 
 
+def _detail_api_warning_text(warning: str) -> str:
+    return re.sub(r"(第\s*\d+\s*段)｜", r"\1 ", str(warning or ""))
+
+
 def _add_detail_segment_issue(
     quality_report: dict,
     segment_indices: list[int],
@@ -2494,6 +2498,60 @@ def _add_detail_review_segment_issue(
         if match_issue and match_issue not in issues:
             issues.append(match_issue)
         review_segment["issues"] = issues
+
+
+def _merge_detail_review_segment_lists(
+    primary_segments: list[object],
+    fallback_segments: list[object],
+) -> list[dict]:
+    merged_by_index: dict[int, dict] = {}
+
+    for segment in [*(primary_segments or []), *(fallback_segments or [])]:
+        if not isinstance(segment, dict):
+            continue
+        try:
+            index = int(segment.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        if index < 0:
+            continue
+
+        default_label = review_segment_label(index)
+        item = merged_by_index.setdefault(
+            index,
+            {
+                "index": index,
+                "label": default_label,
+                "issues": [],
+            },
+        )
+
+        label = str(segment.get("label") or "").strip()
+        if label and (not item.get("label") or item.get("label") == default_label):
+            item["label"] = label
+
+        for key in ("start_seconds", "end_seconds", "status"):
+            if item.get(key) not in (None, ""):
+                continue
+            value = segment.get(key)
+            if value not in (None, ""):
+                item[key] = value
+
+        issues = [
+            str(issue).strip()
+            for issue in item.get("issues") or []
+            if str(issue).strip()
+        ]
+        for issue in segment.get("issues") or []:
+            issue_text = str(issue).strip()
+            if issue_text and issue_text not in issues:
+                issues.append(issue_text)
+        item["issues"] = issues
+
+    return [
+        merged_by_index[index]
+        for index in sorted(merged_by_index)
+    ]
 
 
 def _refresh_quality_report_review_segments(quality_report: dict) -> None:
@@ -2723,7 +2781,9 @@ def _detail_is_transcript_quality_warning(warning: str) -> bool:
 
 def _detail_has_review_location_warning(warning: str) -> bool:
     text = str(warning or "")
-    return bool(re.search(r"逐字稿品質警示[：:]\s*(?:問題位置|需複核分段)[：:]", text))
+    if not _detail_is_transcript_quality_warning(text):
+        return False
+    return bool(re.search(r"(?:問題位置|需複核分段)[：:]", text))
 
 
 def _detail_is_redundant_unlocated_transcript_warning(warning: str) -> bool:
@@ -2892,7 +2952,7 @@ async def get_meeting_detail(meeting_id: int):
             if repeated_turn_diagnostic else None
         )
         if repeated_turn_warning:
-            transcript_warnings.append(repeated_turn_warning)
+            transcript_warnings.append(_detail_api_warning_text(repeated_turn_warning))
             _add_detail_segment_issues_from_matches(
                 quality_report,
                 repeated_turn_diagnostic.get("segment_matches") or [],
@@ -2976,6 +3036,13 @@ async def get_meeting_detail(meeting_id: int):
         },
         quality_report=detail_quality_report if isinstance(detail_quality_report, dict) else None,
     )
+    if isinstance(quality_report, dict):
+        merged_review_segments = _merge_detail_review_segment_lists(
+            list(quality_report.get("review_segments") or []),
+            list(quality_fields.get("quality_review_segment_details") or []),
+        )
+        if merged_review_segments:
+            quality_report["review_segments"] = merged_review_segments
 
     return MeetingDetail(
         id=record["id"],
