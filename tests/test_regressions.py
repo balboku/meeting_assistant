@@ -2191,6 +2191,9 @@ class TaskRegressionTests(unittest.TestCase):
             self.assertEqual([call.args[1] for call in transcribe_mock.call_args_list], [seg1, sub1, sub2, seg2])
 
             content = output_path.read_text(encoding="utf-8")
+            self.assertIn("逐字稿品質複核提示", content)
+            self.assertIn("第 1 段 00:00-10:00", content)
+            self.assertIn("曾觸發轉錄補救", content)
             self.assertIn("[00:00] **[發言者 A]**：補救前半段。", content)
             self.assertIn("[05:00] **[發言者 B]**：補救後半段。", content)
             self.assertIn("[10:00] **[發言者 C]**：第二段。", content)

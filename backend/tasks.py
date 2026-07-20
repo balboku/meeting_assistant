@@ -36,6 +36,7 @@ from backend.database import (
     update_job_status,
     save_meeting
 )
+from backend.exporter import content_with_quality_review_note
 
 # 載入 .env 環境變數
 load_dotenv(dotenv_path=ROOT_DIR / ".env")
@@ -3289,6 +3290,15 @@ quality_label: {quality_report['label']}
 
 """
         full_content = frontmatter + meeting_content
+        full_content = content_with_quality_review_note({
+            "title": title,
+            "date": meeting_date_str,
+            "source_audio": audio_path.name,
+            "output_path": str(output_path),
+            "summary": _extract_summary_preview(meeting_content),
+            "quality_report": quality_report,
+            "full_content": full_content,
+        })
         output_path.write_text(full_content, encoding="utf-8")
         logger.info(f"[{job_id}] 💾 Markdown 已儲存：{output_path}")
 
