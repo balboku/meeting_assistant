@@ -1910,6 +1910,10 @@ def _is_recording_quality_warning(warning: str) -> bool:
     return bool(re.search(r"錄音|音檔|媒體|音量|爆音|靜音|聲道|取樣率", str(warning or "")))
 
 
+def _is_transcript_quality_warning(warning: str) -> bool:
+    return bool(re.search(r"(^|\n)\s*(?:逐字稿品質警示|需複核分段)\s*[：:]", str(warning or "")))
+
+
 def _meeting_record_quality_types(record: dict[str, Any]) -> set[str]:
     warning_preview = str(record.get("quality_warning_preview") or "").strip()
     warning_text = "\n".join(
@@ -1927,7 +1931,7 @@ def _meeting_record_quality_types(record: dict[str, Any]) -> set[str]:
     if _is_recording_quality_warning(warning_text):
         types.add("recording")
     if (
-        "逐字稿品質警示" in warning_text
+        _is_transcript_quality_warning(warning_text)
         or review_segment_count > 0
         or bool(review_segment_details)
     ):

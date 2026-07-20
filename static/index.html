@@ -2767,7 +2767,7 @@ function cardWarningTypeLabel(warningPreview = '', hasReviewSegments = false, wa
     .join('\n');
   const summaryWarning = warning.includes('摘要品質警示');
   const recordingWarning = isRecordingQualityWarning(warning);
-  const transcriptWarning = warning.includes('逐字稿品質警示');
+  const transcriptWarning = isTranscriptQualityWarning(warning);
   const typeCount = [summaryWarning, recordingWarning, transcriptWarning].filter(Boolean).length;
   if (typeCount > 1) return '多重警示';
   if (summaryWarning) return '摘要警示';

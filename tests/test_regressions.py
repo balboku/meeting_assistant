@@ -3825,6 +3825,34 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(search_response.status_code, 200)
         self.assertEqual([row["id"] for row in search_response.json()], [mixed_id])
 
+    def test_quality_type_filter_treats_review_segment_note_as_transcript_warning(self):
+        database, tmp_path = self._isolated_database()
+        shared = "legacy-review-note-quality-type"
+        output_path = tmp_path / "legacy-review-note.md"
+        output_path.write_text(shared, encoding="utf-8")
+        meeting_id = database.save_meeting(
+            title="Legacy Review Note",
+            date="2026/07/12",
+            source_audio="legacy-review-note.webm",
+            output_path=str(output_path),
+            summary=shared,
+            quality_report={
+                "warnings": ["需複核分段：逐字稿疑似連續重複轉錄，請人工抽查"],
+            },
+        )
+
+        listed = database.list_meetings()[0]
+
+        self.assertEqual(listed["id"], meeting_id)
+        self.assertEqual(listed["quality_warning_count"], 1)
+        self.assertEqual(listed["quality_review_segment_count"], 0)
+        self.assertEqual([row["id"] for row in database.list_meetings(quality_type="transcript")], [meeting_id])
+        self.assertEqual(database.list_meetings(quality_type="other"), [])
+        self.assertEqual(
+            [row["id"] for row in database.search_meetings(shared, quality_type="transcript")],
+            [meeting_id],
+        )
+
 
 class MeetingEvidenceRegressionTests(unittest.TestCase):
     def _isolated_database(self):
@@ -6362,6 +6390,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("openDetailAndFocusSourceMedia(event, ${recordId})", html)
         self.assertIn("檢查原始檔：${escapeHtml(record?.title || `#${recordId}`)}", html)
         self.assertIn("function cardWarningTypeLabel(warningPreview = '', hasReviewSegments = false, warningText = '')", html)
+        self.assertIn("const transcriptWarning = isTranscriptQualityWarning(warning);", html)
         self.assertIn("if (typeCount > 1) return '多重警示';", html)
         self.assertIn("const warningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0, warningText);", html)
         self.assertIn("const warningText = String(record?.quality_warning_text || warningPreview).trim();", html)
@@ -6643,6 +6672,7 @@ const code = [
   grab('clockText'),
   grab('parseClockSeconds'),
   grab('isRecordingQualityWarning'),
+  grab('isTranscriptQualityWarning'),
   grab('cardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
@@ -6749,6 +6779,7 @@ const code = [
   grab('clockText'),
   grab('parseClockSeconds'),
   grab('isRecordingQualityWarning'),
+  grab('isTranscriptQualityWarning'),
   grab('cardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
@@ -6764,6 +6795,12 @@ result = renderCardQuality({{
   quality_warning_count: 3,
   quality_warning_preview: '摘要品質警示：討論摘要未使用 D 編號'
 }});
+legacyTranscript = renderCardQuality({{
+  id: 23,
+  title: '舊式逐字稿警示',
+  quality_warning_count: 1,
+  quality_warning_preview: '需複核分段：逐字稿疑似連續重複轉錄，請人工抽查'
+}});
 `, sandbox);
 if (!sandbox.result.includes('摘要警示 3')) {{
   console.error(sandbox.result);
@@ -6776,6 +6813,14 @@ if (!sandbox.result.includes('rerunSummaryFromCard(event, 22)')) {{
 if (sandbox.result.includes('分段：')) {{
   console.error(sandbox.result);
   process.exit(6);
+}}
+if (!sandbox.legacyTranscript.includes('逐字稿警示 1')) {{
+  console.error(sandbox.legacyTranscript);
+  process.exit(7);
+}}
+if (sandbox.legacyTranscript.includes('其他品質警示') || sandbox.legacyTranscript.includes('品質警示 1')) {{
+  console.error(sandbox.legacyTranscript);
+  process.exit(8);
 }}
 console.log('summary_card_quality_action_ok');
 """
@@ -6814,6 +6859,7 @@ const code = [
   grab('clockText'),
   grab('parseClockSeconds'),
   grab('isRecordingQualityWarning'),
+  grab('isTranscriptQualityWarning'),
   grab('cardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
@@ -6906,6 +6952,7 @@ const code = [
   grab('clockText'),
   grab('parseClockSeconds'),
   grab('isRecordingQualityWarning'),
+  grab('isTranscriptQualityWarning'),
   grab('cardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
@@ -6976,6 +7023,7 @@ const code = [
   grab('clockText'),
   grab('parseClockSeconds'),
   grab('isRecordingQualityWarning'),
+  grab('isTranscriptQualityWarning'),
   grab('cardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
