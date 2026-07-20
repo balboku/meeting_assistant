@@ -446,6 +446,7 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
             ".venv/bin/python -m unittest discover -v",
             ".venv/bin/python -m compileall -q backend gui tests meeting_assistant.py start.py test_regex.py test_gemini.py",
             ".venv/bin/python scripts/security_scan.py",
+            ".venv/bin/python scripts/audit_quality_consistency.py",
             ".venv/bin/python -m pip check",
             "node --check static/index.html",
         ):
@@ -790,6 +791,7 @@ database.save_meeting(
 
         workflow = ci.read_text(encoding="utf-8")
         self.assertIn("python scripts/security_scan.py", workflow)
+        self.assertIn("python scripts/audit_quality_consistency.py", workflow)
         self.assertIn("python -m unittest discover -v", workflow)
         self.assertIn("python -m pip check", workflow)
 

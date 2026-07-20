@@ -29,6 +29,9 @@ jobs:
       - name: Security scan
         run: python scripts/security_scan.py
 
+      - name: Quality consistency audit
+        run: python scripts/audit_quality_consistency.py
+
       - name: Unit tests
         run: python -m unittest discover -v
 
