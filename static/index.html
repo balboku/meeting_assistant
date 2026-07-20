@@ -4616,11 +4616,28 @@ function renderQualityReport(meeting) {
   </div>`;
 }
 
+function stripLeadingQualityReviewNotes(markdown = '') {
+  const lines = String(markdown || '').split(/\r?\n/);
+  const isQualityNote = line => {
+    const text = String(line || '').trim().replace(/^>\s*/, '').trim();
+    return /^(?:⚠️\s*)?逐字稿品質(?:複核提示|警示)[：:]/.test(text);
+  };
+  while (lines.length) {
+    if (!lines[0].trim()) {
+      lines.shift();
+      continue;
+    }
+    if (!isQualityNote(lines[0])) break;
+    lines.shift();
+  }
+  return lines.join('\n').trim();
+}
+
 function extractEditableSummaryMarkdown(fullContent = '') {
   let text = String(fullContent || '').replace(/^---\s*\r?\n[\s\S]*?\r?\n---\s*(?:\r?\n)?/, '');
   const transcriptIndex = text.search(/^##\s*[^\n]*(?:完整逐字稿|Verbatim Transcript)[^\n]*$/im);
   if (transcriptIndex >= 0) text = text.slice(0, transcriptIndex);
-  return text.replace(/\n-{3,}\s*$/, '').trim();
+  return stripLeadingQualityReviewNotes(text).replace(/\n-{3,}\s*$/, '').trim();
 }
 
 function extractTranscriptMarkdown(fullContent = '') {

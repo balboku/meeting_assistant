@@ -6720,6 +6720,91 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("activeUploadJobId", html)
         self.assertIn("activeRecordingJobId", html)
 
+    def test_summary_editor_omits_transcript_quality_note(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function extractEditableSummaryMarkdown'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [
+  grab('stripLeadingQualityReviewNotes'),
+  grab('extractEditableSummaryMarkdown'),
+  grab('extractTranscriptMarkdown')
+].join('\\n');
+const fullContent = [
+  '---',
+  'title: 測試',
+  '---',
+  '',
+  '> 逐字稿品質複核提示：第 8 段 70:01-80:01：疑似連續重複轉錄。請依原始錄音/錄影時間複核。',
+  '',
+  '## 一、討論摘要 (Discussion Summary)',
+  '',
+  '### D1. 主題',
+  '- 摘要：可編輯摘要。',
+  '',
+  '> 一般摘要引用應保留。',
+  '',
+  '## 二、最終決議 (Final Decisions)',
+  '',
+  'R1（關聯 D1）：確認。',
+  '',
+  '## 三、待辦事項 (Action Items)',
+  '',
+  '| # | 任務描述 | 負責人 | 期限 | 優先級 |',
+  '|---|---|---|---|---|',
+  '| A1 | 整理 | 發言者 A | 未提及 | 中 |',
+  '',
+  '## 四、完整逐字稿 (Verbatim Transcript)',
+  '[70:01] **[發言者 A]**：逐字稿。'
+].join('\\n');
+const sandbox = {{ fullContent }};
+vm.runInNewContext(code + `
+summary = extractEditableSummaryMarkdown(fullContent);
+transcript = extractTranscriptMarkdown(fullContent);
+`, sandbox);
+if (sandbox.summary.includes('逐字稿品質複核提示')) {{
+  console.error(sandbox.summary);
+  process.exit(4);
+}}
+if (!sandbox.summary.startsWith('## 一、討論摘要')) {{
+  console.error(sandbox.summary);
+  process.exit(5);
+}}
+if (!sandbox.summary.includes('一般摘要引用應保留')) {{
+  console.error(sandbox.summary);
+  process.exit(6);
+}}
+if (!sandbox.transcript.includes('[70:01]')) {{
+  console.error(sandbox.transcript);
+  process.exit(7);
+}}
+console.log('summary_editor_quality_note_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_web_ui_has_job_dashboard(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
