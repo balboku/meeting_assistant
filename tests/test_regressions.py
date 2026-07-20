@@ -8556,14 +8556,21 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("start_seconds: Math.max(startSeconds, index * REVIEW_SEGMENT_SECONDS)", html)
         self.assertIn("const endSeconds = parseClockSeconds(timeMatch[2]);", html)
         self.assertIn("if (startSeconds !== null) addTimeRangeTarget(startSeconds, endSeconds);", html)
-        self.assertIn("const reviewSegments = renderQualityReviewSegments(meeting.id, report.review_segments || [], segmentItems);", html)
+        self.assertIn("const rerunnableSegmentIndices = normalizeSegmentIndices(meeting?.quality_review_rerunnable_segments || []);", html)
+        self.assertIn("const synthesizedRerunnableReviewSegments = rerunnableSegmentIndices", html)
+        self.assertIn("const reviewSegmentItems = mergeQualityReviewSegments(baseReviewSegments, synthesizedRerunnableReviewSegments);", html)
+        self.assertIn("const reviewSegments = renderQualityReviewSegments(meeting.id, reviewSegmentItems, segmentItems, rerunnableSegmentIndices);", html)
         self.assertIn("const knownSegmentIndices = new Set((knownSegments || [])", html)
+        self.assertIn("const explicitRerunnableSegmentIndices = normalizeSegmentIndices(rerunnableSegments || []);", html)
         self.assertIn("const rerunnableSegmentIndices = reviewSegmentIndices", html)
+        self.assertIn("knownSegmentIndices.has(index) || explicitRerunnableSegmentSet.has(index)", html)
         self.assertIn("const focusSeconds = reviewIssueFocusSeconds(issues, hasStartSeconds ? startSeconds : null);", html)
         self.assertIn("const canCueSource = hasFocusSeconds;", html)
         self.assertIn("const focusArgs = hasFocusSeconds ? `${index}, ${focusSeconds}` : `${index}`;", html)
         self.assertIn("quality-review-segment unavailable", html)
         self.assertIn("quality-review-segment media-only", html)
+        self.assertIn("此紀錄可重跑本段，也可定位原始檔時間；${reviewSegmentTitle}", html)
+        self.assertIn("此紀錄可重跑本段，但缺少可定位的分段控制；${reviewSegmentTitle}", html)
         self.assertIn('此舊紀錄沒有可定位的分段控制；${reviewSegmentTitle}', html)
         self.assertIn('此舊紀錄沒有可重跑的分段控制，可定位原始檔時間；${reviewSegmentTitle}', html)
         self.assertIn("const titleText = reviewCount ? `問題分段 ${reviewCount} 段` : '問題分段';", html)
@@ -8595,7 +8602,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("已定位第 ${index + 1} 段${mediaHint}${transcriptHint}，可按「重跑」重新處理此分段", html)
         self.assertIn("找不到第 ${index + 1} 段的重跑控制", html)
         self.assertIn("setTimeout(() => segment?.classList.remove('highlight'), 2600);", html)
-        self.assertIn("renderQualityWarning(warning, segmentItems, report.review_segments || [])", html)
+        self.assertIn("renderQualityWarning(warning, segmentItems, reviewSegmentItems)", html)
         self.assertIn("const targets = qualityWarningSegmentTargets(warning, segments, reviewSegments);", html)
         self.assertIn("const fullReviewSummary = isTranscriptQualityWarning(warningText)", html)
         self.assertIn("const visibleReviewSummary = fullReviewSummary && (reviewSegments || []).length", html)
@@ -10254,6 +10261,7 @@ const reviewSegments = [
 ];
 unavailable = renderQualityReviewSegments(31, reviewSegments, []);
 available = renderQualityReviewSegments(43, [{{ index: 7, start_seconds: 4200, end_seconds: 4800, issues: ['疑似連續重複轉錄'] }}], [{{ index: 7 }}]);
+authoritative = renderQualityReviewSegments(57, reviewSegments, [], [10]);
 `, sandbox);
 if (!sandbox.unavailable.includes('quality-review-note')) {{
   console.error(sandbox.unavailable);
@@ -10336,6 +10344,26 @@ if (!sandbox.available.includes('aria-label="重跑第 8 段"') || !sandbox.avai
 if (!sandbox.available.includes('↻ 重跑 1 段')) {{
   console.error(sandbox.available);
   process.exit(22);
+}}
+if (sandbox.authoritative.includes('quality-review-note')) {{
+  console.error(sandbox.authoritative);
+  process.exit(24);
+}}
+if (!sandbox.authoritative.includes('quality-rerun-review-segments-button')) {{
+  console.error(sandbox.authoritative);
+  process.exit(25);
+}}
+if (!sandbox.authoritative.includes("rerunMeeting(57, 10, false, false, 'quality-rerun-review-segment-10')")) {{
+  console.error(sandbox.authoritative);
+  process.exit(26);
+}}
+if (!sandbox.authoritative.includes("rerunMeeting(57, [10], false, false, 'quality-rerun-review-segments-button')")) {{
+  console.error(sandbox.authoritative);
+  process.exit(27);
+}}
+if (!sandbox.authoritative.includes('此紀錄可重跑本段，也可定位原始檔時間')) {{
+  console.error(sandbox.authoritative);
+  process.exit(28);
 }}
 console.log('quality_review_segment_note_ok');
 """

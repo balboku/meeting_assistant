@@ -4190,18 +4190,22 @@ function compactQualityWarningBody(warningText = '', reviewSummary = '') {
   return compacted || '';
 }
 
-function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegments = []) {
+function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegments = [], rerunnableSegments = []) {
   const knownSegmentIndices = new Set((knownSegments || [])
     .map(segment => Number(segment?.index))
     .filter(index => Number.isInteger(index) && index >= 0));
   const reviewSegmentIndices = normalizeSegmentIndices((reviewSegments || []).map(segment => segment?.index));
+  const explicitRerunnableSegmentIndices = normalizeSegmentIndices(rerunnableSegments || []);
+  const explicitRerunnableSegmentSet = new Set(explicitRerunnableSegmentIndices);
   const rerunnableSegmentIndices = reviewSegmentIndices
-    .filter(index => knownSegmentIndices.has(index));
+    .filter(index => knownSegmentIndices.has(index) || explicitRerunnableSegmentSet.has(index));
+  const rerunnableSegmentSet = new Set(rerunnableSegmentIndices);
   const items = (reviewSegments || [])
     .map(segment => {
       const index = Number(segment?.index);
       if (!Number.isInteger(index) || index < 0) return '';
       const canFocusSegment = knownSegmentIndices.has(index);
+      const canRerunSegment = rerunnableSegmentSet.has(index);
       const issues = (segment.issues || [])
         .map(issue => String(issue || '').trim())
         .filter(Boolean);
@@ -4223,20 +4227,26 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
       const focusArgs = hasFocusSeconds ? `${index}, ${focusSeconds}` : `${index}`;
       const rerunButtonId = `quality-rerun-review-segment-${index}`;
       const reviewSegmentTitle = `第 ${index + 1} 段${plainTimeText}：${allIssueText}`;
-      const rerunControl = canFocusSegment
+      const rerunControl = canRerunSegment
         ? `<button id="${rerunButtonId}" type="button" class="quality-review-segment-rerun" aria-describedby="detail-status" aria-busy="false" title="只重跑第 ${index + 1} 段，其他分段沿用快取" aria-label="重跑第 ${index + 1} 段" onclick="rerunMeeting(${Number(meetingId) || 0}, ${index}, false, false, '${rerunButtonId}')">↻ 重跑本段</button>`
         : '';
       if (!canFocusSegment) {
         if (canCueSource) {
-          return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment media-only" aria-describedby="detail-status" title="${escapeHtml(`此舊紀錄沒有可重跑的分段控制，可定位原始檔時間；${reviewSegmentTitle}`)}" onclick="focusQualitySegment(${focusArgs})">
+          const mediaOnlyTitle = canRerunSegment
+            ? `此紀錄可重跑本段，也可定位原始檔時間；${reviewSegmentTitle}`
+            : `此舊紀錄沒有可重跑的分段控制，可定位原始檔時間；${reviewSegmentTitle}`;
+          return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment media-only" aria-describedby="detail-status" title="${escapeHtml(mediaOnlyTitle)}" onclick="focusQualitySegment(${focusArgs})">
             <span class="quality-review-segment-label">第 ${index + 1} 段</span>
             <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
-          </button></span>`;
+          </button>${rerunControl}</span>`;
         }
-        return `<span class="quality-review-segment-wrap"><span class="quality-review-segment unavailable" aria-disabled="true" title="${escapeHtml(`此舊紀錄沒有可定位的分段控制；${reviewSegmentTitle}`)}">
+        const unavailableTitle = canRerunSegment
+          ? `此紀錄可重跑本段，但缺少可定位的分段控制；${reviewSegmentTitle}`
+          : `此舊紀錄沒有可定位的分段控制；${reviewSegmentTitle}`;
+        return `<span class="quality-review-segment-wrap"><span class="quality-review-segment unavailable" aria-disabled="true" title="${escapeHtml(unavailableTitle)}">
           <span class="quality-review-segment-label">第 ${index + 1} 段</span>
           <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
-        </span></span>`;
+        </span>${rerunControl}</span>`;
       }
       return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment" aria-describedby="detail-status" title="${escapeHtml(`定位第 ${index + 1} 段問題逐字稿與原始檔時間；${reviewSegmentTitle}`)}" onclick="focusQualitySegment(${focusArgs})">
         <span class="quality-review-segment-label">第 ${index + 1} 段</span>
@@ -4544,9 +4554,20 @@ function renderQualityReport(meeting) {
   const warningItems = Array.isArray(report.warnings) ? report.warnings : [];
   const qualityActions = renderQualityActions(meeting, warningItems);
   const segmentItems = Array.isArray(report.segments) ? report.segments : [];
-  const reviewSegments = renderQualityReviewSegments(meeting.id, report.review_segments || [], segmentItems);
+  const rerunnableSegmentIndices = normalizeSegmentIndices(meeting?.quality_review_rerunnable_segments || []);
+  const baseReviewSegments = Array.isArray(report.review_segments) ? report.review_segments : [];
+  const baseReviewSegmentIndices = new Set(normalizeSegmentIndices(baseReviewSegments.map(segment => segment?.index)));
+  const synthesizedRerunnableReviewSegments = rerunnableSegmentIndices
+    .filter(index => !baseReviewSegmentIndices.has(index))
+    .map(index => ({
+      index,
+      label: `第 ${index + 1} 段`,
+      issues: ['需複核或重跑此分段'],
+    }));
+  const reviewSegmentItems = mergeQualityReviewSegments(baseReviewSegments, synthesizedRerunnableReviewSegments);
+  const reviewSegments = renderQualityReviewSegments(meeting.id, reviewSegmentItems, segmentItems, rerunnableSegmentIndices);
   const warnings = warningItems
-    .map(warning => renderQualityWarning(warning, segmentItems, report.review_segments || []))
+    .map(warning => renderQualityWarning(warning, segmentItems, reviewSegmentItems))
     .join('');
   const segments = segmentItems.map(segment => {
     const index = Number(segment.index) || 0;
