@@ -7384,6 +7384,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function focusTranscriptLocation", html)
         self.assertIn("function focusQualitySegment", html)
         self.assertIn("function renderQualityWarning", html)
+        self.assertIn("function reviewSummaryFromWarningText", html)
+        self.assertIn("function compactQualityWarningBody", html)
+        self.assertIn("const bodyText = compactQualityWarningBody(warningText, reviewSummary);", html)
         self.assertIn("report.warnings = mergeQualityReportWarnings(report.warnings, fallback.warnings);", html)
         self.assertIn("function renderQualityReviewSegments", html)
         self.assertIn("const reviewSegmentByIndex = new Map((reviewSegments || [])", html)
@@ -7416,14 +7419,15 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality-review-segment media-only", html)
         self.assertIn('title="此舊紀錄沒有可定位的分段控制"', html)
         self.assertIn('title="此舊紀錄沒有可重跑的分段控制，可定位原始檔時間"', html)
-        self.assertIn("aria-label=\"需複核分段\"", html)
+        self.assertIn("const titleText = reviewCount ? `問題分段 ${reviewCount} 段` : '問題分段';", html)
+        self.assertIn('aria-label="${escapeHtml(titleText)}"', html)
         self.assertIn("onclick=\"focusQualitySegment(${focusArgs})\"", html)
         self.assertIn('return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment"', html)
         self.assertIn('id="${rerunButtonId}" type="button" class="quality-review-segment-rerun"', html)
         self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, ${index}, false, false, '${rerunButtonId}')\"", html)
         self.assertIn("quality-review-title", html)
         self.assertIn('id="quality-rerun-review-segments-button"', html)
-        self.assertIn("↻ 重跑需複核分段", html)
+        self.assertIn("↻ 重跑全部問題分段", html)
         self.assertIn("此紀錄缺少可直接重跑的分段資料；可定位原始檔時間複核，必要時使用完整重跑。", html)
         self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, null, false, false, 'quality-rerun-review-full-button')\"", html)
         self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, [${rerunnableSegmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')\"", html)
@@ -8477,6 +8481,8 @@ const code = [
   grab('reviewIssuePriority'),
   grab('preferredReviewIssue'),
   grab('reviewSegmentIssueSummary'),
+  grab('reviewSummaryFromWarningText'),
+  grab('compactQualityWarningBody'),
   grab('renderQualityWarning')
 ].join('\\n');
 const sandbox = {{}};
@@ -8556,6 +8562,14 @@ if (!sandbox.warningOnlyPrecise.includes('focusQualitySegment(3, 1860)')) {{
 if (sandbox.warningOnlyPrecise.includes('focusQualitySegment(3, 1800)')) {{
   console.error(sandbox.warningOnlyPrecise);
   process.exit(15);
+}}
+if (sandbox.warningOnlyPrecise.includes('逐字稿品質警示：疑似連續重複轉錄；問題位置')) {{
+  console.error(sandbox.warningOnlyPrecise);
+  process.exit(16);
+}}
+if (!sandbox.warningOnlyPrecise.includes('quality-warning-body') || !sandbox.warningOnlyPrecise.includes('建議重跑上述分段或複核相關內容。')) {{
+  console.error(sandbox.warningOnlyPrecise);
+  process.exit(17);
 }}
 if (sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
   console.error(sandbox.result);

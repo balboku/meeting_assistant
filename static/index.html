@@ -3976,10 +3976,14 @@ function renderQualityWarning(warning = '', segments = [], reviewSegments = []) 
   const targets = qualityWarningSegmentTargets(warning, segments, reviewSegments);
   const warningText = String(warning || '').trim();
   const reviewSummary = isTranscriptQualityWarning(warningText)
-    ? reviewSegmentIssueSummary(reviewSegments)
+    ? (reviewSegmentIssueSummary(reviewSegments) || reviewSummaryFromWarningText(warningText))
     : '';
   const summary = reviewSummary
     ? `<span class="quality-warning-summary">問題位置：${escapeHtml(reviewSummary)}</span>`
+    : '';
+  const bodyText = compactQualityWarningBody(warningText, reviewSummary);
+  const body = bodyText
+    ? `<span class="quality-warning-body">${escapeHtml(bodyText)}</span>`
     : '';
   const actions = targets.length
     ? `<span class="quality-warning-actions">${targets
@@ -3992,7 +3996,26 @@ function renderQualityWarning(warning = '', segments = [], reviewSegments = []) 
         })
         .join('')}</span>`
     : '';
-  return `<div class="quality-warning">${summary}<span class="quality-warning-body">${escapeHtml(warningText)}</span>${actions}</div>`;
+  return `<div class="quality-warning">${summary}${body}${actions}</div>`;
+}
+
+function reviewSummaryFromWarningText(warningText = '') {
+  const text = String(warningText || '').trim();
+  const match = text.match(/(?:問題位置|需複核分段)[：:]\s*(.+?)(?:[。．.]\s*建議|$)/);
+  return match ? match[1].trim() : '';
+}
+
+function compactQualityWarningBody(warningText = '', reviewSummary = '') {
+  const text = String(warningText || '').trim();
+  const summary = String(reviewSummary || '').trim();
+  if (!text || !summary) return text;
+  const markers = [`問題位置：${summary}`, `問題位置:${summary}`, `需複核分段：${summary}`, `需複核分段:${summary}`];
+  const marker = markers.find(item => text.includes(item));
+  if (!marker) return text;
+  const markerAt = text.indexOf(marker);
+  if (markerAt < 0 || markerAt > 40 || !text.startsWith('逐字稿品質警示')) return text;
+  const compacted = text.slice(markerAt + marker.length).replace(/^[\s。．.；;，,、]+/, '').trim();
+  return compacted || '';
 }
 
 function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegments = []) {
@@ -4046,13 +4069,15 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
     .join('');
   if (!items) return '';
   const rerunButton = rerunnableSegmentIndices.length
-    ? `<button id="quality-rerun-review-segments-button" type="button" class="quality-rerun-review-segments" aria-describedby="detail-status" aria-busy="false" title="只重跑已標記需複核且可定位的分段" onclick="rerunMeeting(${Number(meetingId) || 0}, [${rerunnableSegmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')">↻ 重跑需複核分段</button>`
+    ? `<button id="quality-rerun-review-segments-button" type="button" class="quality-rerun-review-segments" aria-describedby="detail-status" aria-busy="false" title="只重跑已標記需複核且可定位的分段" onclick="rerunMeeting(${Number(meetingId) || 0}, [${rerunnableSegmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')">↻ 重跑全部問題分段</button>`
     : '';
   const fallbackNote = !rerunnableSegmentIndices.length
     ? `<span class="quality-review-note">此紀錄缺少可直接重跑的分段資料；可定位原始檔時間複核，必要時使用完整重跑。<button id="quality-rerun-review-full-button" type="button" class="quality-rerun-review-segments" aria-describedby="detail-status" aria-busy="false" title="重新轉錄並重新產生完整會議紀錄" onclick="rerunMeeting(${Number(meetingId) || 0}, null, false, false, 'quality-rerun-review-full-button')">🔁 完整重跑</button></span>`
     : '';
-  return `<div class="quality-review-segments" aria-label="需複核分段">
-    <span class="quality-review-title">需複核分段</span>
+  const reviewCount = reviewSegmentIndices.length || (reviewSegments || []).length;
+  const titleText = reviewCount ? `問題分段 ${reviewCount} 段` : '問題分段';
+  return `<div class="quality-review-segments" aria-label="${escapeHtml(titleText)}">
+    <span class="quality-review-title">${escapeHtml(titleText)}</span>
     ${rerunButton}
     ${fallbackNote}
     ${items}
