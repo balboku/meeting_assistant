@@ -3339,7 +3339,14 @@ function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegment
     const hasFocusSeconds = focusSeconds !== null;
     if (knownIndices.size && !knownIndices.has(index) && !hasFocusSeconds) return;
     if (!knownIndices.size && !hasFocusSeconds) return;
-    const focusPrecision = hasIssueFocusSeconds ? 2 : hasFocusSeconds ? 1 : 0;
+    const suppliedPrecision = Number(sourceSegment?.focus_precision);
+    const focusPrecision = Number.isFinite(suppliedPrecision)
+      ? suppliedPrecision
+      : hasIssueFocusSeconds
+      ? 2
+      : hasFocusSeconds
+      ? 1
+      : 0;
     const existing = targets.find(target => target.index === index);
     if (existing) {
       if (hasFocusSeconds && focusPrecision > (existing.focus_precision || 0)) {
@@ -3371,7 +3378,8 @@ function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegment
     const lastIndex = Math.max(firstIndex, Math.floor(inclusiveEnd / REVIEW_SEGMENT_SECONDS));
     for (let index = firstIndex; index <= lastIndex; index += 1) {
       addTarget(index, {
-        start_seconds: Math.max(startSeconds, index * REVIEW_SEGMENT_SECONDS)
+        start_seconds: Math.max(startSeconds, index * REVIEW_SEGMENT_SECONDS),
+        focus_precision: 2
       });
     }
   };

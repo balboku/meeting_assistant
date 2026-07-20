@@ -7205,6 +7205,11 @@ legacyPrefix = renderQualityWarning(
     {{ index: 1, label: '第 2 段', start_seconds: 600, end_seconds: 1200, issues: [issue] }}
   ]
 );
+warningOnlyPrecise = renderQualityWarning(
+  '逐字稿品質警示：疑似連續重複轉錄；問題位置：第 4 段｜30:00-40:00：同一句連續重複 31 次：因為我是結所以我領車；重複時間：31:00-31:30。建議重跑上述分段或複核相關內容。',
+  [{{ index: 3 }}],
+  []
+);
 `, sandbox);
 if (!sandbox.result.includes('quality-warning-summary')) {{
   console.error(sandbox.result);
@@ -7241,6 +7246,14 @@ if (!sandbox.partial.includes('focusQualitySegment(5, 3062)')) {{
 if (!sandbox.legacyPrefix.includes('quality-warning-summary') || !sandbox.legacyPrefix.includes('focusQualitySegment(1, 612)')) {{
   console.error(sandbox.legacyPrefix);
   process.exit(13);
+}}
+if (!sandbox.warningOnlyPrecise.includes('focusQualitySegment(3, 1860)')) {{
+  console.error(sandbox.warningOnlyPrecise);
+  process.exit(14);
+}}
+if (sandbox.warningOnlyPrecise.includes('focusQualitySegment(3, 1800)')) {{
+  console.error(sandbox.warningOnlyPrecise);
+  process.exit(15);
 }}
 if (sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
   console.error(sandbox.result);
