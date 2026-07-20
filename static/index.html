@@ -4089,6 +4089,35 @@ function isReviewLocationWarning(value = '') {
   return text.includes('問題位置：') || text.includes('需複核分段：');
 }
 
+function isProblemLocationWarning(value = '') {
+  return String(value || '').includes('問題位置：');
+}
+
+function hasTranscriptReviewSignal(value = '') {
+  return /疑似連續重複轉錄|重複轉錄|曾觸發轉錄補救|轉錄內容為空|自動過濾|截斷提示|同一句連續重複|重複時間/.test(String(value || ''));
+}
+
+function isRedundantTranscriptWarning(value = '', hasProblemLocation = false) {
+  if (!hasProblemLocation) return false;
+  const text = String(value || '').trim();
+  if (!text || isProblemLocationWarning(text)) return false;
+  if (text.includes('摘要品質警示') || isRecordingQualityWarning(text)) return false;
+  if (/^(?:逐字稿品質警示[：:]\s*)?需複核分段[：:]/.test(text)) return true;
+  if (/^逐字稿品質警示[：:]\s*(?:需抽查|需複核|建議抽查|建議複核|需複核相關內容|需複核相關分段)[。.]?$/.test(text)) return true;
+  if (text.startsWith('逐字稿品質警示') && (hasTranscriptReviewSignal(text) || text.includes('建議重跑或複核相關分段'))) return true;
+  if (/^第\s*\d+\s*段[：:]/.test(text) && hasTranscriptReviewSignal(text)) return true;
+  return false;
+}
+
+function compactQualityReportWarnings(warnings = []) {
+  const uniqueWarnings = (warnings || [])
+    .map(warning => String(warning || '').trim())
+    .filter(Boolean)
+    .filter((warning, index, all) => all.indexOf(warning) === index);
+  const hasProblemLocation = uniqueWarnings.some(isProblemLocationWarning);
+  return uniqueWarnings.filter(warning => !isRedundantTranscriptWarning(warning, hasProblemLocation));
+}
+
 function synthesizedReviewLocationWarning(reviewSegments = []) {
   const reviewSummary = reviewSegmentIssueSummary(reviewSegments);
   return reviewSummary
@@ -4103,10 +4132,9 @@ function mergeQualityReportWarnings(reportWarnings = [], fallbackWarnings = []) 
   const fallbackItems = (Array.isArray(fallbackWarnings) ? fallbackWarnings : [])
     .map(warning => String(warning || '').trim())
     .filter(Boolean);
-  if (!primaryWarnings.length) return fallbackItems;
+  if (!primaryWarnings.length) return compactQualityReportWarnings(fallbackItems);
   const locationSupplements = fallbackItems.filter(isReviewLocationWarning);
-  return [...locationSupplements, ...primaryWarnings]
-    .filter((warning, index, all) => all.indexOf(warning) === index);
+  return compactQualityReportWarnings([...locationSupplements, ...primaryWarnings]);
 }
 
 function fallbackQualityReportFromMeeting(meeting) {
@@ -4122,6 +4150,7 @@ function fallbackQualityReportFromMeeting(meeting) {
   if (locationWarning && !warnings.some(isReviewLocationWarning)) {
     warnings = [locationWarning, ...warnings];
   }
+  warnings = compactQualityReportWarnings(warnings);
   const hasQualityFields = warnings.length
     || reviewSegments.length
     || Number(meeting?.quality_warning_count || 0) > 0

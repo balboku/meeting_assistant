@@ -7341,6 +7341,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function detailQualityReport", html)
         self.assertIn("const report = detailQualityReport(meeting);", html)
         self.assertIn("meeting?.quality_warning_text || meeting?.quality_warning_preview", html)
+        self.assertIn("function isProblemLocationWarning", html)
+        self.assertIn("function compactQualityReportWarnings", html)
+        self.assertIn("warnings = compactQualityReportWarnings(warnings);", html)
         self.assertIn("meeting?.quality_review_segment_details", html)
         self.assertIn("quality_review_segment_count", html)
         self.assertIn("quality_report", html)
@@ -7894,6 +7897,10 @@ const code = [
   grab('finiteQualityScore'),
   grab('effectiveQualityStatus'),
   grab('isReviewLocationWarning'),
+  grab('isProblemLocationWarning'),
+  grab('hasTranscriptReviewSignal'),
+  grab('isRedundantTranscriptWarning'),
+  grab('compactQualityReportWarnings'),
   grab('synthesizedReviewLocationWarning'),
   grab('mergeQualityReportWarnings'),
   grab('fallbackQualityReportFromMeeting'),
@@ -7908,7 +7915,7 @@ const legacy = detailQualityReport({{
     {{ index: 7, label: '第 8 段', start_seconds: 4200, end_seconds: 4800, issues: ['疑似連續重複轉錄'] }}
   ]
 }});
-if (!legacy || legacy.warnings.length !== 3) process.exit(4);
+if (!legacy || legacy.warnings.length !== 1) process.exit(4);
 if (!legacy.warnings[0].includes('問題位置：第 8 段 70:00-80:00')) process.exit(14);
 if (legacy.review_segments[0].index !== 7) process.exit(5);
 if (legacy.score !== 82 || legacy.label !== '需複核逐字稿') process.exit(6);
@@ -7934,8 +7941,9 @@ const oldLocated = detailQualityReport({{
   ]
 }});
 if (!oldLocated.warnings[0].includes('問題位置：第 8 段')) process.exit(10);
-if (!oldLocated.warnings[1].includes('需複核分段：第 8 段')) process.exit(11);
-if (!oldLocated.warnings[2].includes('建議重跑或複核相關分段')) process.exit(12);
+if (oldLocated.warnings.length !== 1) process.exit(11);
+if (oldLocated.warnings.some(warning => warning.includes('需複核分段：第 8 段'))) process.exit(12);
+if (oldLocated.warnings.some(warning => warning.includes('建議重跑或複核相關分段'))) process.exit(16);
 if (oldLocated.review_segments[0].index !== 7) process.exit(13);
 result = 'detail_quality_fallback_ok';
 `, sandbox);
@@ -8619,6 +8627,10 @@ const code = [
   grab('preferredReviewIssue'),
   grab('reviewSegmentIssueSummary'),
   grab('isReviewLocationWarning'),
+  grab('isProblemLocationWarning'),
+  grab('hasTranscriptReviewSignal'),
+  grab('isRedundantTranscriptWarning'),
+  grab('compactQualityReportWarnings'),
   grab('synthesizedReviewLocationWarning'),
   grab('fallbackQualityReportFromMeeting')
 ].join('\\n');
@@ -8640,9 +8652,13 @@ if (!sandbox.report.warnings[0].includes('重複時間：70:01-73:00')) {{
   console.error(JSON.stringify(sandbox.report));
   process.exit(5);
 }}
-if (!sandbox.report.warnings[1].includes('建議重跑或複核相關分段')) {{
+if (sandbox.report.warnings.length !== 1) {{
   console.error(JSON.stringify(sandbox.report));
   process.exit(6);
+}}
+if (sandbox.report.warnings.some(warning => warning.includes('建議重跑或複核相關分段'))) {{
+  console.error(JSON.stringify(sandbox.report));
+  process.exit(7);
 }}
 console.log('fallback_location_warning_ok');
 """
