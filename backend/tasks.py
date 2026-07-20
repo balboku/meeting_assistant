@@ -99,6 +99,8 @@ SEGMENT_MAX_NORMALIZED_TURN_CHARS = 8000
 SEGMENT_REPEATED_NGRAM_CHARS = 18
 SEGMENT_REPEATED_NGRAM_THRESHOLD = 12
 SEGMENT_STRUCTURED_TURN_REPEAT_THRESHOLD = 12
+SEGMENT_STRUCTURED_TURN_MAX_TIMESTAMP_GAP_SECONDS = 15
+SEGMENT_STRUCTURED_TURN_SHORT_GAP_RATIO = 0.75
 TRANSCRIPT_INTEGRITY_MIN_CHAR_RATIO = 0.95
 TRANSCRIPT_INTEGRITY_MIN_TIMESTAMP_RATIO = 0.95
 TRANSCRIPT_OMISSION_MARKERS = (
@@ -860,10 +862,17 @@ def _segment_repetition_quality_issue(transcript: str) -> Optional[str]:
 
 def _structured_numeric_turn_quality_issue(transcript: str) -> Optional[str]:
     """Detect pattern-completion loops that change only the numeric values."""
-    templates: dict[str, list[tuple[str, ...]]] = {}
+    templates: dict[str, list[tuple[tuple[str, ...], Optional[int]]]] = {}
     number_pattern = re.compile(r"[+-]?\d+(?:[.,]\d+)?%?")
 
     for raw_line in (transcript or "").splitlines():
+        timestamp_match = TIMESTAMP_PATTERN.search(raw_line)
+        timestamp_seconds = None
+        if timestamp_match:
+            timestamp_seconds = (
+                int(timestamp_match.group("minutes")) * 60
+                + int(timestamp_match.group("seconds"))
+            )
         line = TIMESTAMP_PATTERN.sub("", raw_line)
         line = re.sub(r"\*\*\[[^\]]+\]\*\*", "", line).strip()
         numbers = tuple(number_pattern.findall(line))
@@ -874,18 +883,31 @@ def _structured_numeric_turn_quality_issue(transcript: str) -> Optional[str]:
         template = re.sub(r"[^\w\u4e00-\u9fff#]+", "", template)
         if len(template) < 6:
             continue
-        templates.setdefault(template, []).append(numbers)
+        templates.setdefault(template, []).append((numbers, timestamp_seconds))
 
-    for numeric_variants in templates.values():
-        count = len(numeric_variants)
-        distinct_count = len(set(numeric_variants))
+    for template_rows in templates.values():
+        count = len(template_rows)
+        distinct_count = len({numbers for numbers, _timestamp in template_rows})
+        timestamps = [timestamp for _numbers, timestamp in template_rows if timestamp is not None]
+        timestamp_gaps = [
+            current - previous
+            for previous, current in zip(timestamps, timestamps[1:])
+            if current >= previous
+        ]
+        short_gap_count = sum(
+            gap <= SEGMENT_STRUCTURED_TURN_MAX_TIMESTAMP_GAP_SECONDS
+            for gap in timestamp_gaps
+        )
+        short_gap_ratio = short_gap_count / len(timestamp_gaps) if timestamp_gaps else 0.0
         if (
             count >= SEGMENT_STRUCTURED_TURN_REPEAT_THRESHOLD
             and distinct_count >= SEGMENT_STRUCTURED_TURN_REPEAT_THRESHOLD
+            and len(timestamps) >= SEGMENT_STRUCTURED_TURN_REPEAT_THRESHOLD
+            and short_gap_ratio >= SEGMENT_STRUCTURED_TURN_SHORT_GAP_RATIO
         ):
             return (
                 "分段疑似數列延伸轉錄幻覺"
-                f"（相同句型僅替換數字，共 {count} 次）"
+                f"（相同句型僅替換數字且時間戳密集，共 {count} 次）"
             )
     return None
 

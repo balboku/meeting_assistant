@@ -1090,7 +1090,7 @@ class TaskRegressionTests(unittest.TestCase):
     def test_segment_transcript_quality_rejects_structured_numeric_continuation(self):
         from backend.tasks import _segment_transcript_quality_issues
 
-        transcript = "\n".join(
+        dense_transcript = "\n".join(
             (
                 f"[{30 + offset // 60:02d}:{offset % 60:02d}] **[發言者 A]**："
                 f"好，那 {101 + index} 的時候，上限 {930 + index * 10}，"
@@ -1098,9 +1098,24 @@ class TaskRegressionTests(unittest.TestCase):
             )
             for index, offset in enumerate(range(0, 120, 8))
         )
+        normal_numeric_review = "\n".join(
+            (
+                f"[{30 + offset // 60:02d}:{offset % 60:02d}] **[發言者 A]**："
+                f"項目 {101 + index}，上限 {930 + index * 10}，"
+                f"下限 {790.5 + index * 8.5:.1f}。"
+            )
+            for index, offset in enumerate(range(0, 360, 30))
+        )
 
         issues = _segment_transcript_quality_issues(
-            transcript,
+            dense_transcript,
+            segment_index=3,
+            total_segments=6,
+            expected_start_seconds=1800,
+            expected_end_seconds=2400,
+        )
+        normal_issues = _segment_transcript_quality_issues(
+            normal_numeric_review,
             segment_index=3,
             total_segments=6,
             expected_start_seconds=1800,
@@ -1108,6 +1123,7 @@ class TaskRegressionTests(unittest.TestCase):
         )
 
         self.assertTrue(any("數列延伸轉錄幻覺" in issue for issue in issues))
+        self.assertFalse(any("數列延伸轉錄幻覺" in issue for issue in normal_issues))
 
     def test_segment_transcript_quality_rejects_timestamps_beyond_audio_bounds(self):
         from backend.tasks import _segment_transcript_quality_issues
@@ -1161,8 +1177,8 @@ class TaskRegressionTests(unittest.TestCase):
         from backend import tasks
 
         def numeric_chunk(start_value: int) -> str:
-            offsets = (0, 50, 100, 150, 220, 290)
-            return "\n".join(
+            offsets = (0, 8, 16, 24, 32, 40)
+            numeric_rows = "\n".join(
                 (
                     f"[{offset // 60:02d}:{offset % 60:02d}] **[發言者 A]**："
                     f"項目 {start_value + index}，上限 {100 + (start_value + index) * 10}，"
@@ -1170,6 +1186,7 @@ class TaskRegressionTests(unittest.TestCase):
                 )
                 for index, offset in enumerate(offsets)
             )
+            return numeric_rows + "\n[04:50] **[發言者 B]**：這一小段接近結尾。"
 
         incomplete = "[00:00] **[發言者 A]**：只有開頭。"
         sub1 = Path("sub1.mp3")
