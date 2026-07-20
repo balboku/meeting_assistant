@@ -1939,6 +1939,13 @@ def apply_quality_preview_fields(
     known_segment_indices: set[int] = set()
     segment_issue_previews: list[str] = []
     review_segment_issue_previews: list[str] = []
+    generic_review_issue = "品質警示提及此分段"
+
+    def clean_review_issues(issues: list[str]) -> list[str]:
+        unique_issues = list(dict.fromkeys(issue for issue in issues if issue))
+        if any(issue != generic_review_issue for issue in unique_issues):
+            unique_issues = [issue for issue in unique_issues if issue != generic_review_issue]
+        return unique_issues
 
     def add_review_segment_label(
         label: str,
@@ -1979,7 +1986,7 @@ def apply_quality_preview_fields(
                     continue
                 merged_issues.append(issue)
                 seen_issue_keys.add(key)
-            detail["issues"] = merged_issues
+            detail["issues"] = clean_review_issues(merged_issues)
 
     def add_review_segment_labels_from_text(text: str) -> None:
         for detail in review_segment_details_from_text(text):
@@ -1987,7 +1994,7 @@ def apply_quality_preview_fields(
                 _normalize_quality_review_issue_text(str(issue).strip())
                 for issue in detail.get("issues") or []
                 if _normalize_quality_review_issue_text(str(issue).strip())
-            ] or ["品質警示提及此分段"]
+            ] or [generic_review_issue]
             add_review_segment_label(
                 detail.get("label") or review_segment_label(int(detail["index"])),
                 index=int(detail["index"]),

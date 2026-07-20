@@ -2257,6 +2257,14 @@ def _refresh_quality_report_review_segments(quality_report: dict) -> None:
         return
     review_segments_by_index: dict[int, dict] = {}
     known_segment_indices: set[int] = set()
+    generic_review_issue = "品質警示提及此分段"
+
+    def clean_review_issues(issues: list[str]) -> list[str]:
+        unique_issues = list(dict.fromkeys(issue for issue in issues if issue))
+        if any(issue != generic_review_issue for issue in unique_issues):
+            unique_issues = [issue for issue in unique_issues if issue != generic_review_issue]
+        return unique_issues
+
     for position, segment in enumerate(quality_report.get("segments") or []):
         if not isinstance(segment, dict):
             continue
@@ -2296,7 +2304,7 @@ def _refresh_quality_report_review_segments(quality_report: dict) -> None:
                 item["label"] = label
         clean_issues = [str(issue).strip() for issue in issues if str(issue).strip()]
         if clean_issues:
-            item["issues"] = list(dict.fromkeys([*(item.get("issues") or []), *clean_issues]))
+            item["issues"] = clean_review_issues([*(item.get("issues") or []), *clean_issues])
         segment = source_segment if isinstance(source_segment, dict) else segment_metadata(index)
         for key in ("start_seconds", "end_seconds"):
             if key in item:
@@ -2361,7 +2369,7 @@ def _refresh_quality_report_review_segments(quality_report: dict) -> None:
             if existing and existing.get("issues"):
                 add_review_segment(index, detail_issues, source_segment)
             else:
-                add_review_segment(index, detail_issues or ["品質警示提及此分段"], source_segment)
+                add_review_segment(index, detail_issues or [generic_review_issue], source_segment)
 
     quality_report["review_segments"] = [
         review_segments_by_index[index]

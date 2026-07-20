@@ -3463,6 +3463,67 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(issue_review_search["id"], meeting_id)
         self.assertIn(meeting_id, [row["id"] for row in needs_review])
 
+    def test_review_segment_details_drop_generic_issue_when_specific_exists(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "specific-review-issue.md"
+        output_path.write_text("specific-review-issue-content", encoding="utf-8")
+        specific_issue = (
+            "曾觸發轉錄補救：非最後分段含自動過濾/截斷提示；"
+            "非最後分段時間戳只到 13:34，未接近段尾 20:01"
+        )
+        quality_report = {
+            "warnings": [
+                "逐字稿品質警示：問題位置：第 2 段 09:56-20:01："
+                f"{specific_issue}。建議重跑上述分段或複核相關內容。"
+            ],
+            "segments": [
+                {
+                    "index": 1,
+                    "start_seconds": 596,
+                    "end_seconds": 1201,
+                    "issues": [specific_issue],
+                },
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Specific Review Issue",
+            date="2026/07/20",
+            source_audio="specific-review-issue.webm",
+            output_path=str(output_path),
+            summary="specific-review-issue-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Specific Review Issue")[0]
+
+        import backend.main as main
+
+        detail_response = asgi_request(main.app, "GET", f"/meetings/{meeting_id}")
+        self.assertEqual(detail_response.status_code, 200)
+        detail = detail_response.json()
+
+        expected_details = [
+            {
+                "label": "第 2 段",
+                "index": 1,
+                "start_seconds": 596,
+                "end_seconds": 1201,
+                "issues": [specific_issue],
+            },
+        ]
+        self.assertEqual(listed["quality_review_segment_details"], expected_details)
+        self.assertEqual(searched["quality_review_segment_details"], expected_details)
+        self.assertEqual(detail["quality_review_segment_details"], expected_details)
+        self.assertNotIn("品質警示提及此分段", listed["quality_review_segment_summary"])
+        self.assertFalse(
+            any(
+                "品質警示提及此分段" in issue
+                for segment in detail["quality_report"]["review_segments"]
+                for issue in segment.get("issues", [])
+            )
+        )
+
     def test_list_and_search_include_review_segment_labels(self):
         database, tmp_path = self._isolated_database()
         output_path = tmp_path / "review-segments.md"
