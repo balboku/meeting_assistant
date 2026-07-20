@@ -307,6 +307,7 @@ class MeetingRecord(BaseModel):
     quality_review_segment_count: int = Field(0, description="需複核分段數量")
     quality_review_rerunnable_segments: list[int] = Field(default_factory=list, description="可直接指定重跑的零起算分段索引")
     source_media_type: Optional[str] = Field(None, description="原始檔媒體類型：audio 或 video")
+    source_media_available: bool = Field(True, description="原始媒體檔目前是否仍存在且可播放/下載")
     recording_profile: Optional[str] = Field(None, description="錄製或轉檔設定代號")
     source_media_size_bytes: Optional[int] = Field(None, description="原始媒體檔大小")
     source_media_sha256: Optional[str] = Field(None, description="原始媒體 SHA256")

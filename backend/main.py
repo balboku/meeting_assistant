@@ -1767,8 +1767,10 @@ def _meeting_records_with_source_media_type(records: list[dict]) -> list[dict]:
     resolved_records: list[dict] = []
     for record in records:
         item = dict(record)
+        source_path = _optional_source_media_path(item)
+        item["source_media_available"] = bool(source_path)
         if not item.get("source_media_type"):
-            item["source_media_type"] = _source_media_type(item)
+            item["source_media_type"] = _source_media_type(item, source_path)
         resolved_records.append(item)
     return resolved_records
 
@@ -2852,6 +2854,7 @@ async def get_meeting_detail(meeting_id: int):
         full_content=record["full_content"],
         quality_report=quality_report or None,
         source_media_type=source_media_type,
+        source_media_available=bool(source_path),
         recording_profile=source_media_metadata["recording_profile"],
         source_media_size_bytes=source_media_metadata["source_media_size_bytes"],
         source_media_sha256=source_media_metadata["source_media_sha256"],

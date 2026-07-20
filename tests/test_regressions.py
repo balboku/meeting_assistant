@@ -5204,19 +5204,24 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(list_response.status_code, 200)
         api_by_id = {row["id"]: row for row in list_response.json()["records"]}
         self.assertEqual(api_by_id[video_id]["source_media_type"], "video")
+        self.assertFalse(api_by_id[video_id]["source_media_available"])
         self.assertEqual(api_by_id[video_id]["recording_profile"], "video_balanced")
         self.assertEqual(api_by_id[video_id]["source_media_size_bytes"], 12345)
         self.assertEqual(api_by_id[video_id]["source_media_sha256"], "a" * 64)
         self.assertEqual(api_by_id[audio_id]["source_media_type"], "audio")
+        self.assertFalse(api_by_id[audio_id]["source_media_available"])
         self.assertEqual(api_by_id[audio_id]["recording_profile"], "audio_standard")
         self.assertEqual(api_by_id[audio_id]["source_media_size_bytes"], 6789)
         self.assertEqual(api_by_id[audio_id]["source_media_sha256"], "b" * 64)
         self.assertEqual(api_by_id[legacy_webm_id]["source_media_type"], "video")
+        self.assertTrue(api_by_id[legacy_webm_id]["source_media_available"])
         self.assertEqual(search_response.status_code, 200)
         self.assertEqual(search_response.json()[0]["source_media_type"], "video")
+        self.assertFalse(search_response.json()[0]["source_media_available"])
         self.assertEqual(search_response.json()[0]["source_media_sha256"], "a" * 64)
         self.assertEqual(legacy_search_response.status_code, 200)
         self.assertEqual(legacy_search_response.json()[0]["source_media_type"], "video")
+        self.assertTrue(legacy_search_response.json()[0]["source_media_available"])
 
     def test_legacy_meeting_list_infers_quality_warning_count_from_markdown(self):
         database, tmp_path = self._isolated_database()
@@ -8333,9 +8338,40 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["source_media_type"], "video")
+        self.assertTrue(payload["source_media_available"])
         self.assertEqual(payload["recording_profile"], "video_balanced")
         self.assertEqual(payload["source_media_size_bytes"], 5)
         self.assertEqual(payload["source_media_sha256"], "abc123def4567890")
+
+    def test_meeting_detail_marks_missing_source_media_unavailable(self):
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_dir = Path(tmpdir) / "source_audio"
+            source_dir.mkdir()
+            record = {
+                "id": 17,
+                "title": "缺少原始檔",
+                "date": "2026/07/12",
+                "source_audio": "missing-source.webm",
+                "output_path": "meeting.md",
+                "summary": "summary",
+                "job_id": None,
+                "quality_score": None,
+                "quality_label": None,
+                "created_at": datetime(2026, 7, 12, 9, 0, 0),
+                "full_content": "## 一、討論摘要 (Discussion Summary)\nD1 測試",
+                "quality_report": {},
+            }
+            with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
+                 mock.patch.object(main, "get_meeting", return_value=record):
+                response = asgi_request(main.app, "GET", "/meetings/17")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["source_media_available"])
+        self.assertEqual(payload["source_media_type"], "audio")
+        self.assertIsNone(payload["source_media_size_bytes"])
 
     def test_meeting_rerun_api_can_force_selected_segments(self):
         import backend.main as main
@@ -9366,6 +9402,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const evidence = document.getElementById('source-media-evidence');", html)
         self.assertIn("evidence.scrollIntoView({ block: 'center', behavior: 'smooth' });", html)
         self.assertIn("setDetailStatus('已定位原始檔播放器，請抽查錄音或錄影品質警示時段');", html)
+        self.assertIn("setDetailStatus('已定位原始檔狀態；這筆紀錄的原始檔不存在，無法播放或下載');", html)
         self.assertIn("window.requestAnimationFrame(focus)", html)
         self.assertIn("function isNeedsReviewRecord", html)
         self.assertIn("const reviewSegmentCount = Number(record?.quality_review_segment_count || 0);", html)
@@ -9385,11 +9422,13 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn(".quality-warning-jump:hover", html)
         self.assertIn("card-source-media", html)
         self.assertIn("card-source-media-button", html)
+        self.assertIn(".card-source-media.unavailable", html)
         self.assertIn("card-source-media-kind", html)
         self.assertIn("card-source-media-name", html)
         self.assertIn("card-header-actions", html)
         self.assertIn("card-delete-button", html)
         self.assertIn("meta-chip-action", html)
+        self.assertIn(".meta-chip.unavailable", html)
         self.assertIn("meta-chip-label", html)
         self.assertIn("meta-chip-text", html)
         self.assertIn("source-media-meta-chip", html)
@@ -9397,9 +9436,13 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("text-overflow: ellipsis;", html)
         self.assertIn("function renderCardSourceMedia", html)
         self.assertIn("function renderDetailSourceMediaChip", html)
+        self.assertIn("function sourceMediaAvailable", html)
+        self.assertIn("meeting.source_media_available", html)
         self.assertIn("function sourceMediaShortLabel", html)
         self.assertIn('title="開啟${safeKind}播放器：${safeName}"', html)
         self.assertIn('onclick="openDetailAndFocusSourceMedia(event, ${recordId})"', html)
+        self.assertIn('title="${safeKind}不存在，無法播放或下載：${safeName}"', html)
+        self.assertIn("原始檔遺失", html)
         self.assertIn('title="定位${safeKind}播放器：${safeName}"', html)
         self.assertIn('onclick="focusSourceMediaEvidence()"', html)
         self.assertIn('id="needs-review-filter"', html)
@@ -9688,6 +9731,7 @@ const code = [
   grab('normalizeMediaKind'),
   grab('sourceMediaExtension'),
   grab('sourceMediaExplicitKind'),
+  grab('sourceMediaAvailable'),
   grab('isVideoSource'),
   grab('sourceMediaVideoPreviewCapable'),
   grab('sourceMediaPlayerMode'),
@@ -9718,6 +9762,16 @@ const meeting = {{
 card = renderCardSourceMedia(meeting);
 chip = renderDetailSourceMediaChip(meeting);
 player = renderAudioEvidence(meeting);
+const missingMeeting = {{
+  id: 34,
+  title: '缺少原始檔',
+  source_audio: 'missing-source.webm',
+  source_media_type: 'video',
+  source_media_available: false
+}};
+missingCard = renderCardSourceMedia(missingMeeting);
+missingChip = renderDetailSourceMediaChip(missingMeeting);
+missingPlayer = renderAudioEvidence(missingMeeting);
 `, sandbox);
 if (!sandbox.card.includes('card-source-media-button')) {{
   console.error(sandbox.card);
@@ -9750,6 +9804,26 @@ if (!sandbox.player.includes('data-source-mode="audio" onclick="switchSourceMedi
 if (!sandbox.player.includes('SHA256 abcdef012345')) {{
   console.error(sandbox.player);
   process.exit(11);
+}}
+if (!sandbox.missingCard.includes('card-source-media unavailable') || sandbox.missingCard.includes('card-source-media-button')) {{
+  console.error(sandbox.missingCard);
+  process.exit(12);
+}}
+if (!sandbox.missingCard.includes('原始檔遺失')) {{
+  console.error(sandbox.missingCard);
+  process.exit(13);
+}}
+if (!sandbox.missingChip.includes('meta-chip unavailable') || sandbox.missingChip.includes('source-media-meta-chip')) {{
+  console.error(sandbox.missingChip);
+  process.exit(14);
+}}
+if (!sandbox.missingPlayer.includes('media-unavailable') || !sandbox.missingPlayer.includes('找不到保留的原始媒體檔')) {{
+  console.error(sandbox.missingPlayer);
+  process.exit(15);
+}}
+if (sandbox.missingPlayer.includes('<video') || sandbox.missingPlayer.includes('<audio') || sandbox.missingPlayer.includes('download=1')) {{
+  console.error(sandbox.missingPlayer);
+  process.exit(16);
 }}
 console.log('source_video_entry_points_ok');
 """
