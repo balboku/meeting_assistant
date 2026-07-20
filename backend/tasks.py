@@ -292,7 +292,36 @@ def _transcript_segment_metadata(transcript: str) -> list[dict[str, Any]]:
             "status": "existing_record",
             "issues": [],
         })
+    if not metadata:
+        for index in _timestamp_bucketed_transcript_segments(transcript):
+            metadata.append({
+                "index": index,
+                "start_seconds": index * SEGMENT_TARGET_SECONDS,
+                "end_seconds": (index + 1) * SEGMENT_TARGET_SECONDS,
+                "status": "existing_record",
+                "issues": [],
+            })
     return metadata
+
+
+def _timestamp_bucketed_transcript_segments(transcript: str) -> dict[int, str]:
+    """Split legacy transcripts without headings into 10-minute timestamp buckets."""
+    segments: dict[int, list[str]] = {}
+    current_index: Optional[int] = None
+    for raw_line in (transcript or "").splitlines():
+        line = raw_line.rstrip()
+        match = TIMESTAMP_PATTERN.search(line)
+        if match:
+            seconds = int(match.group("minutes")) * 60 + int(match.group("seconds"))
+            current_index = max(0, seconds // SEGMENT_TARGET_SECONDS)
+        if current_index is None or not line.strip():
+            continue
+        segments.setdefault(current_index, []).append(line)
+    return {
+        index: "\n".join(lines).strip()
+        for index, lines in sorted(segments.items())
+        if "\n".join(lines).strip()
+    }
 
 
 def _transcript_segments_by_index(transcript: str) -> dict[int, str]:
@@ -304,6 +333,8 @@ def _transcript_segments_by_index(transcript: str) -> dict[int, str]:
         body = (transcript or "")[match.end():body_end].strip()
         if body:
             segments[max(0, int(raw_index) - 1)] = body
+    if not segments:
+        segments = _timestamp_bucketed_transcript_segments(transcript)
     if not segments and (transcript or "").strip():
         segments[0] = (transcript or "").strip()
     return segments

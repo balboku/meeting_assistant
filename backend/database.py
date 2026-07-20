@@ -292,6 +292,15 @@ _TRANSCRIPT_SEGMENT_HEADING_PATTERN = re.compile(
     r"(?P<en_start>\d{1,3}:[0-5]\d)\s*[–—-]\s*(?P<en_end>\d{1,3}:[0-5]\d|end)\]?)\s*$",
     flags=re.IGNORECASE,
 )
+_TRANSCRIPT_TIMESTAMP_PATTERN = re.compile(r"\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\d)\]")
+
+
+def _timestamp_segment_indices(transcript: str, segment_seconds: int = 600) -> set[int]:
+    indices: set[int] = set()
+    for match in _TRANSCRIPT_TIMESTAMP_PATTERN.finditer(transcript or ""):
+        seconds = int(match.group("minutes")) * 60 + int(match.group("seconds"))
+        indices.add(max(0, seconds // segment_seconds))
+    return indices
 
 
 def _markdown_transcript_segment_indices(output_path: str) -> set[int]:
@@ -311,7 +320,10 @@ def _markdown_transcript_segment_indices(output_path: str) -> set[int]:
             continue
         if index >= 0:
             indices.add(index)
-    return indices
+    if indices:
+        return indices
+    transcript = _markdown_section(text, ("完整逐字稿", "Verbatim Transcript"), ())
+    return _timestamp_segment_indices(transcript)
 
 
 def _repeated_transcript_turn_review_segments(
@@ -478,6 +490,13 @@ def _transcript_segment_spans(transcript: str) -> list[dict[str, int]]:
             "start_seconds": start_seconds,
             "end_seconds": end_seconds,
         })
+    if not spans:
+        for index in sorted(_timestamp_segment_indices(transcript)):
+            spans.append({
+                "index": index,
+                "start_seconds": index * 600,
+                "end_seconds": (index + 1) * 600,
+            })
     return spans
 
 

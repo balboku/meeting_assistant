@@ -3583,6 +3583,8 @@ class SearchRegressionTests(unittest.TestCase):
         )
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
         self.assertEqual(searched["quality_warning_text"], listed["quality_warning_text"])
+        self.assertEqual(listed["quality_review_rerunnable_segments"], [3, 5])
+        self.assertEqual(searched["quality_review_rerunnable_segments"], [3, 5])
 
     def test_list_and_search_locate_phrase_only_repeat_warning_from_transcript(self):
         database, tmp_path = self._isolated_database()
@@ -5841,6 +5843,67 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                  mock.patch.object(tasks, "save_meeting"):
                 output_path = tasks.process_audio_task(
                     job_id="partial-rerun-job",
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    force_segment_indices=[1],
+                    transcript_reuse_source_path=source_path,
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertEqual(transcribe.call_count, 1)
+            output_text = output_path.read_text(encoding="utf-8")
+            self.assertIn("保留第一段", output_text)
+            self.assertIn("新第二段", output_text)
+            self.assertIn("保留第三段", output_text)
+            self.assertNotIn("舊第二段", output_text)
+
+    def test_partial_rerun_reuses_timestamp_only_legacy_segments(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{"topic": "時間戳舊紀錄", "summary": "完成", "evidence_timecodes": ["00:00"]}],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **kwargs):
+                return type("Response", (), {"text": json.dumps(summary_payload, ensure_ascii=False)})()
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            slices = []
+            for index in range(3):
+                segment_path = root / f"_seg_meeting_{index:03d}.mp3"
+                segment_path.write_bytes(b"segment")
+                slices.append(tasks.AudioSlice(segment_path, index * 600, (index + 1) * 600))
+            source_path = root / "timestamp-only-existing.md"
+            source_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "[00:00] **[發言者 A]**：保留第一段。\n"
+                "[10:00] **[發言者 B]**：舊第二段。\n"
+                "[20:00] **[發言者 C]**：保留第三段。",
+                encoding="utf-8",
+            )
+            output_dir = root / "output"
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=slices), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", return_value="[10:00] **[發言者 B]**：新第二段。") as transcribe, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting"):
+                output_path = tasks.process_audio_task(
+                    job_id="timestamp-only-partial-rerun-job",
                     audio_path=audio_path,
                     output_dir=output_dir,
                     force_segment_indices=[1],
