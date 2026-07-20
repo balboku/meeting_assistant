@@ -472,6 +472,39 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
         self.assertEqual(payload["case_count"], 1)
         self.assertGreaterEqual(payload["average_score"], 80)
 
+    def test_quality_consistency_audit_initializes_empty_database(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            env = os.environ.copy()
+            env.update({
+                "DB_PATH": str(tmp_path / "meetings.db"),
+                "MEETING_OUTPUT_DIR": str(tmp_path / "output"),
+                "MEETING_TEMP_DIR": str(tmp_path / "temp"),
+                "MEETING_BACKUP_DIR": str(tmp_path / "backups"),
+            })
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/audit_quality_consistency.py",
+                    "--limit",
+                    "10",
+                ],
+                cwd=ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["passed"])
+        self.assertEqual(payload["records"], 0)
+        self.assertEqual(payload["search_checked"], 0)
+        self.assertEqual(payload["problem_count"], 0)
+
     def test_quality_consistency_audit_runs_against_isolated_database(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)

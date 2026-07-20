@@ -263,6 +263,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         ) as client:
             return await _audit(client, args.limit)
 
+    from backend import database
+
+    database.init_db()
+
     import backend.main as main
 
     transport = httpx.ASGITransport(app=main.app, client=("127.0.0.1", 0))
