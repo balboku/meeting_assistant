@@ -3218,6 +3218,43 @@ function reviewIssueDisplay(issues = [], fallback = '需複核') {
   };
 }
 
+function conciseReviewIssueLabel(issue = '') {
+  const text = String(issue || '').trim();
+  if (!text) return '需複核';
+  const extraMatch = text.match(/（另\s*\d+\s*項）$/);
+  const extraText = extraMatch ? extraMatch[0] : '';
+  const core = extraText ? text.slice(0, -extraText.length) : text;
+  const rangeMatch = core.match(/(?:重複時間|重複時段|問題時間|異常時間)[：:]\s*(\d{1,3}:[0-5]\d)\s*(?:-|–|—|~|至|到)\s*(\d{1,3}:[0-5]\d)/);
+  const rangeText = rangeMatch ? `（${rangeMatch[1]}-${rangeMatch[2]}）` : '';
+  const repeatCount = core.match(/同一句連續重複\s*\d+\s*次/);
+
+  let label = '';
+  if (core.includes('疑似連續重複轉錄')) {
+    label = repeatCount
+      ? `疑似連續重複轉錄；${repeatCount[0]}${rangeText}`
+      : `疑似連續重複轉錄${rangeText}`;
+  } else if (core.includes('重複轉錄幻覺')) {
+    const hallucination = core.includes('短句重複轉錄幻覺')
+      ? '短句重複轉錄幻覺'
+      : '分段疑似重複轉錄幻覺';
+    label = core.includes('曾觸發轉錄補救')
+      ? `曾觸發轉錄補救：${hallucination}`
+      : hallucination;
+  } else if (core.includes('自動過濾') || core.includes('截斷提示')) {
+    label = core.includes('曾觸發轉錄補救')
+      ? '曾觸發轉錄補救：自動過濾/截斷提示'
+      : '自動過濾/截斷提示';
+  } else if (core.includes('時間戳只到') || core.includes('未接近段尾')) {
+    label = core.includes('曾觸發轉錄補救')
+      ? '曾觸發轉錄補救：時間戳未接近段尾'
+      : '時間戳未接近段尾';
+  } else {
+    label = core.length > 56 ? `${core.slice(0, 56)}...` : core;
+  }
+
+  return `${label}${extraText}`;
+}
+
 function renderCardQuality(record, qualityType = 'all') {
   const warningCount = Number(record?.quality_warning_count || 0);
   const qualityStatus = effectiveQualityStatus(record);
@@ -3264,6 +3301,11 @@ function renderCardQuality(record, qualityType = 'all') {
     .filter(Boolean);
   const reviewSegmentSummary = String(record?.quality_review_segment_summary || '').trim()
     || reviewSegmentIssueSummary(record?.quality_review_segment_details || []);
+  const cardReviewSegmentSummary = reviewSegmentIssueSummary(
+    record?.quality_review_segment_details || [],
+    3,
+    { concise: true }
+  ) || reviewSegmentSummary;
   const warningLines = [...new Set(
     [warningText, warningPreview]
       .flatMap(value => String(value || '').split(/\r?\n/))
@@ -3395,7 +3437,7 @@ function renderCardQuality(record, qualityType = 'all') {
         || '';
     }
     if (filterType === 'transcript' || filterType === 'rerunnable') {
-      return reviewSegmentSummary
+      return cardReviewSegmentSummary
         || reviewSegmentReasons[0]
         || warningLines.find(line => isTranscriptQualityWarning(line) || line.includes('需複核分段：'))
         || '';
@@ -3406,7 +3448,7 @@ function renderCardQuality(record, qualityType = 'all') {
     }
     return '';
   })();
-  const visibleReason = filteredWarningReason || reviewSegmentSummary || reviewSegmentReasons[0] || warningPreview;
+  const visibleReason = filteredWarningReason || cardReviewSegmentSummary || reviewSegmentReasons[0] || warningPreview;
   const extraReasonText = reviewSegmentReasons.length > 1
     ? `；另有 ${reviewSegmentReasons.length - 1} 項`
     : '';
@@ -3917,7 +3959,8 @@ function qualityWarningSegmentIndices(warning = '', segments = [], reviewSegment
   return qualityWarningSegmentTargets(warning, segments, reviewSegments).map(target => target.index);
 }
 
-function reviewSegmentIssueSummary(reviewSegments = [], limit = 5) {
+function reviewSegmentIssueSummary(reviewSegments = [], limit = 5, options = {}) {
+  const concise = Boolean(options?.concise);
   const grouped = new Map();
   (reviewSegments || []).slice(0, limit).forEach(segment => {
     const index = Number(segment?.index);
@@ -3933,8 +3976,9 @@ function reviewSegmentIssueSummary(reviewSegments = [], limit = 5) {
       .map(issue => String(issue || '').trim())
       .filter(Boolean);
     const issue = reviewIssueDisplay(issues);
-    if (!grouped.has(issue.compact)) grouped.set(issue.compact, []);
-    grouped.get(issue.compact).push(`${label}${timeText}`);
+    const issueText = concise ? conciseReviewIssueLabel(issue.compact) : issue.compact;
+    if (!grouped.has(issueText)) grouped.set(issueText, []);
+    grouped.get(issueText).push(`${label}${timeText}`);
   });
   const summaries = Array.from(grouped.entries())
     .map(([issue, segments]) => `${segments.join('、')}：${issue}`);

@@ -8600,6 +8600,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const reviewSegmentDetails = (record?.quality_review_segment_details || [])", html)
         self.assertIn("const reviewSegmentSummary = String(record?.quality_review_segment_summary || '').trim()", html)
         self.assertIn("|| reviewSegmentIssueSummary(record?.quality_review_segment_details || []);", html)
+        self.assertIn("function conciseReviewIssueLabel", html)
+        self.assertIn("{ concise: true }", html)
         self.assertIn("function reviewIssuePriority", html)
         self.assertIn("function preferredReviewIssue", html)
         self.assertIn("const issues = (segment?.issues || [])", html)
@@ -8616,7 +8618,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("return `${displayText}：${issue}`;", html)
         self.assertIn("const reviewSegmentReasons = groupedReasons.length", html)
         self.assertIn("const filteredWarningReason = (() => {", html)
-        self.assertIn("const visibleReason = filteredWarningReason || reviewSegmentSummary || reviewSegmentReasons[0] || warningPreview;", html)
+        self.assertIn("const visibleReason = filteredWarningReason || cardReviewSegmentSummary || reviewSegmentReasons[0] || warningPreview;", html)
         self.assertIn("；另有 ${reviewSegmentReasons.length - 1} 項", html)
         self.assertIn("const reasonTitle = [...new Set([warningPreview, reviewSegmentSummary, ...reviewSegmentReasons].filter(Boolean))].join('\\n');", html)
         self.assertIn("const reasonPrefix = filteredWarningReason && filterType !== 'all'", html)
@@ -9110,6 +9112,7 @@ const code = [
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
   grab('reviewIssueDisplay'),
+  grab('conciseReviewIssueLabel'),
   grab('reviewSegmentIssueSummary'),
   grab('isRecordingQualityWarning'),
   grab('isTranscriptQualityWarning'),
@@ -9224,6 +9227,7 @@ const code = [
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
   grab('reviewIssueDisplay'),
+  grab('conciseReviewIssueLabel'),
   grab('reviewSegmentIssueSummary'),
   grab('reviewIssueFocusSeconds'),
   grab('renderCardQuality')
@@ -9273,6 +9277,16 @@ if (sandbox.result.includes('>逐字稿警示 1<')) {{
 if (!sandbox.result.includes('title="逐字稿警示：第 1 段 09:59-10:00、第 2 段 10:00-10:02：疑似連續重複轉錄')) {{
   console.error(sandbox.result);
   process.exit(13);
+}}
+const reasonMatch = sandbox.result.match(/<div class="card-review-reason"[^>]*>([^<]+)<\\/div>/);
+const visibleReason = reasonMatch ? reasonMatch[1] : '';
+if (!visibleReason.includes('需複核：第 1 段 09:59-10:00、第 2 段 10:00-10:02：疑似連續重複轉錄（09:59-10:02）')) {{
+  console.error(sandbox.result);
+  process.exit(15);
+}}
+if (visibleReason.includes('重複時間：')) {{
+  console.error(sandbox.result);
+  process.exit(16);
 }}
 if (sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
   console.error(sandbox.result);
@@ -9338,6 +9352,7 @@ const code = [
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
   grab('reviewIssueDisplay'),
+  grab('conciseReviewIssueLabel'),
   grab('reviewSegmentIssueSummary'),
   grab('reviewIssueFocusSeconds'),
   grab('renderCardQuality')
@@ -9425,6 +9440,7 @@ const code = [
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
   grab('reviewIssueDisplay'),
+  grab('conciseReviewIssueLabel'),
   grab('reviewSegmentIssueSummary'),
   grab('reviewIssueFocusSeconds'),
   grab('renderCardQuality')
@@ -9487,9 +9503,13 @@ if (!sandbox.result.includes('問題分段：第 8 段 70:00-80:00')) {{
   console.error(sandbox.result);
   process.exit(6);
 }}
-if (!sandbox.result.includes('需複核：第 8 段 70:00-80:00：疑似連續重複轉錄；重複時間：70:01-73:00')) {{
+if (!sandbox.result.includes('需複核：第 8 段 70:00-80:00：疑似連續重複轉錄（70:01-73:00）')) {{
   console.error(sandbox.result);
   process.exit(7);
+}}
+if (!sandbox.result.includes('title="偵測到可能的爆音；原始媒體檔已保留，重要內容請抽查。\\n第 8 段 70:00-80:00：疑似連續重複轉錄；重複時間：70:01-73:00"')) {{
+  console.error(sandbox.result);
+  process.exit(20);
 }}
 if (!sandbox.result.includes('openDetailAndFocusSegment(event, 43, 7, 4201)')) {{
   console.error(sandbox.result);
@@ -9523,7 +9543,7 @@ if (sandbox.recordingResult.includes('錄音警示：第 8 段')) {{
   console.error(sandbox.recordingResult);
   process.exit(16);
 }}
-if (!sandbox.rerunnableResult.includes('可重跑分段：第 8 段 70:00-80:00：疑似連續重複轉錄；重複時間：70:01-73:00')) {{
+if (!sandbox.rerunnableResult.includes('可重跑分段：第 8 段 70:00-80:00：疑似連續重複轉錄（70:01-73:00）')) {{
   console.error(sandbox.rerunnableResult);
   process.exit(17);
 }}
@@ -9579,6 +9599,7 @@ const code = [
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
   grab('reviewIssueDisplay'),
+  grab('conciseReviewIssueLabel'),
   grab('reviewSegmentIssueSummary'),
   grab('reviewIssueFocusSeconds'),
   grab('renderCardQuality')
@@ -9657,6 +9678,7 @@ const code = [
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
   grab('reviewIssueDisplay'),
+  grab('conciseReviewIssueLabel'),
   grab('reviewSegmentIssueSummary'),
   grab('reviewIssueFocusSeconds'),
   grab('renderCardQuality')
@@ -9732,6 +9754,7 @@ const code = [
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
   grab('reviewIssueDisplay'),
+  grab('conciseReviewIssueLabel'),
   grab('reviewSegmentIssueSummary'),
   grab('reviewSummaryFromWarningText'),
   grab('compactQualityWarningBody'),
@@ -9894,6 +9917,7 @@ const code = [
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
   grab('reviewIssueDisplay'),
+  grab('conciseReviewIssueLabel'),
   grab('reviewSegmentIssueSummary'),
   grab('isReviewLocationWarning'),
   grab('isProblemLocationWarning'),
@@ -10014,6 +10038,7 @@ const code = [
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
   grab('reviewIssueDisplay'),
+  grab('conciseReviewIssueLabel'),
   grab('reviewSegmentIssueSummary'),
   grab('reviewIssueFocusSeconds'),
   grab('renderQualityReviewSegments')
