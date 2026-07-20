@@ -22,6 +22,21 @@ except ImportError:  # pragma: no cover - direct use before dependencies are ins
 from backend.ngrok_status import DEFAULT_NGROK_API_URL, get_ngrok_status
 
 
+def configure_stdio_encoding() -> None:
+    """Keep Windows redirected startup logs from crashing on Unicode output."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if not stream or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
+configure_stdio_encoding()
+
+
 ROOT_DIR = Path(__file__).resolve().parent
 if load_dotenv:
     load_dotenv(ROOT_DIR / ".env")

@@ -5176,6 +5176,17 @@ class TestSuiteQualityRegressionTests(unittest.TestCase):
 
 
 class StartupScriptRegressionTests(unittest.TestCase):
+    def test_startup_configures_stdio_for_utf8_redirected_logs(self):
+        source = (ROOT / "start.py").read_text(encoding="utf-8")
+
+        self.assertIn("def configure_stdio_encoding()", source)
+        self.assertIn('stream.reconfigure(encoding="utf-8", errors="replace")', source)
+        self.assertIn("configure_stdio_encoding()", source)
+        self.assertLess(
+            source.index("configure_stdio_encoding()"),
+            source.index('if __name__ == "__main__":'),
+        )
+
     def test_startup_kills_existing_meeting_assistant_listener_before_launch(self):
         import start
 
