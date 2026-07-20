@@ -5219,6 +5219,29 @@ class StartupScriptRegressionTests(unittest.TestCase):
         self.assertIn(["kill", "-TERM", "123"], calls)
         self.assertNotIn(["kill", "-TERM", "456"], calls)
 
+    def test_startup_suppresses_windows_taskkill_output(self):
+        import start
+
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(start.platform, "system", return_value="Windows"), \
+             mock.patch.object(start.os, "getpid", return_value=999), \
+             mock.patch.object(start, "_process_command", return_value="python -m uvicorn backend.main:app"), \
+             mock.patch.object(start.subprocess, "run", side_effect=fake_run), \
+             mock.patch("builtins.print"):
+            start._terminate_pid(123)
+
+        self.assertEqual(len(calls), 1)
+        args, kwargs = calls[0]
+        self.assertEqual(args, ["taskkill", "/PID", "123", "/F"])
+        self.assertIs(kwargs["stdout"], start.subprocess.DEVNULL)
+        self.assertIs(kwargs["stderr"], start.subprocess.DEVNULL)
+        self.assertFalse(kwargs["check"])
+
     def test_startup_script_uses_cleanup_before_uvicorn_launch(self):
         source = (ROOT / "start.py").read_text(encoding="utf-8")
         main_block = source[source.index('if __name__ == "__main__":') :]

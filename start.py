@@ -127,6 +127,15 @@ def _is_ngrok_process(command):
     return "ngrok" in command and " http" in f" {command}"
 
 
+def _run_taskkill(pid):
+    return subprocess.run(
+        ["taskkill", "/PID", str(pid), "/F"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
 def _terminate_pid(pid):
     if pid == os.getpid():
         return
@@ -138,7 +147,7 @@ def _terminate_pid(pid):
 
     print(f"🧹 偵測到舊的會議助理服務（PID {pid}），正在關閉...")
     if platform.system() == "Windows":
-        subprocess.run(["taskkill", "/PID", str(pid), "/F"], check=False)
+        _run_taskkill(pid)
         return
 
     subprocess.run(["kill", "-TERM", str(pid)], check=False)
@@ -275,7 +284,7 @@ def _terminate_process_pid(pid):
         return
 
     if platform.system() == "Windows":
-        subprocess.run(["taskkill", "/PID", str(pid), "/F"], check=False)
+        _run_taskkill(pid)
         return
 
     subprocess.run(["kill", "-TERM", str(pid)], check=False)
