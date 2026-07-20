@@ -3524,6 +3524,56 @@ class SearchRegressionTests(unittest.TestCase):
             )
         )
 
+    def test_review_segment_summary_marks_additional_segment_issues(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "multi-review-issue.md"
+        output_path.write_text("multi-review-issue-content", encoding="utf-8")
+        primary_issue = "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:00-70:30"
+        secondary_issue = "曾觸發轉錄補救：非最後分段含自動過濾/截斷提示"
+        quality_report = {
+            "review_segments": [
+                {
+                    "label": "第 8 段",
+                    "index": 7,
+                    "start_seconds": 4200,
+                    "end_seconds": 4800,
+                    "issues": [secondary_issue, primary_issue],
+                },
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Multi Review Issue",
+            date="2026/07/20",
+            source_audio="multi-review-issue.webm",
+            output_path=str(output_path),
+            summary="multi-review-issue-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Multi Review Issue")[0]
+
+        import backend.main as main
+
+        detail_response = asgi_request(main.app, "GET", f"/meetings/{meeting_id}")
+        self.assertEqual(detail_response.status_code, 200)
+        detail = detail_response.json()
+
+        expected_summary = (
+            "第 8 段 70:00-80:00："
+            f"{primary_issue}（另 1 項：{secondary_issue}）"
+        )
+        self.assertEqual(listed["quality_review_segment_summary"], expected_summary)
+        self.assertEqual(searched["quality_review_segment_summary"], expected_summary)
+        self.assertEqual(detail["quality_review_segment_summary"], expected_summary)
+        self.assertIn("另 1 項", listed["quality_warning_preview"])
+        self.assertIn(primary_issue, listed["quality_warning_text"])
+        self.assertIn(secondary_issue, listed["quality_warning_text"])
+        self.assertEqual(
+            listed["quality_review_segment_details"][0]["issues"],
+            [secondary_issue, primary_issue],
+        )
+
     def test_list_and_search_include_review_segment_labels(self):
         database, tmp_path = self._isolated_database()
         output_path = tmp_path / "review-segments.md"

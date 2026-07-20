@@ -173,6 +173,97 @@ def _quality_review_issue_dedupe_key(issue: str) -> str:
     return cleaned
 
 
+def _is_actionable_repeated_review_issue(issue: str) -> bool:
+    cleaned = _normalize_quality_review_issue_text(issue)
+    return (
+        "疑似連續重複轉錄" in cleaned
+        and "同一句連續重複" in cleaned
+        and (
+            "重複時間" in cleaned
+            or re.search(r"\d{1,3}:[0-5]\d\s*[-–—~至到]\s*\d{1,3}:[0-5]\d", cleaned)
+        )
+    )
+
+
+def _is_generic_repeated_review_issue(issue: str) -> bool:
+    cleaned = _normalize_quality_review_issue_text(issue)
+    return (
+        "重複轉錄幻覺" in cleaned
+        and "同一句連續重複" not in cleaned
+        and "重複時間" not in cleaned
+    )
+
+
+def _repeated_review_issue_time_range(issue: str) -> Optional[tuple[str, str]]:
+    cleaned = _normalize_quality_review_issue_text(issue)
+    match = re.search(
+        r"(?:重複時間[：:]\s*)?"
+        r"(?P<start>\d{1,3}:[0-5]\d)\s*[-–—~至到]\s*"
+        r"(?P<end>\d{1,3}:[0-5]\d)",
+        cleaned,
+    )
+    if not match:
+        return None
+    return (match.group("start"), match.group("end"))
+
+
+def _is_time_only_repeated_review_issue(issue: str) -> bool:
+    cleaned = _normalize_quality_review_issue_text(issue)
+    return (
+        "疑似連續重複轉錄" in cleaned
+        and "同一句連續重複" not in cleaned
+        and _repeated_review_issue_time_range(cleaned) is not None
+    )
+
+
+def _ordered_quality_review_issues(issues: Any) -> list[str]:
+    ordered: list[str] = []
+    seen_keys: set[str] = set()
+    for issue in issues or []:
+        normalized = _normalize_quality_review_issue_text(str(issue).strip())
+        if not normalized:
+            continue
+        key = _quality_review_issue_dedupe_key(normalized)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        ordered.append(normalized)
+    if any(_is_actionable_repeated_review_issue(issue) for issue in ordered):
+        ordered = [
+            issue
+            for issue in ordered
+            if not _is_generic_repeated_review_issue(issue)
+        ]
+    actionable_ranges = {
+        time_range
+        for issue in ordered
+        if _is_actionable_repeated_review_issue(issue)
+        for time_range in [_repeated_review_issue_time_range(issue)]
+        if time_range is not None
+    }
+    if actionable_ranges:
+        ordered = [
+            issue
+            for issue in ordered
+            if not (
+                _is_time_only_repeated_review_issue(issue)
+                and _repeated_review_issue_time_range(issue) in actionable_ranges
+            )
+        ]
+    return sorted(ordered, key=_quality_review_issue_priority, reverse=True)
+
+
+def _quality_review_issue_display(issues: Any) -> str:
+    ordered = _ordered_quality_review_issues(issues)
+    if not ordered:
+        return ""
+    primary = ordered[0]
+    extras = ordered[1:]
+    if not extras:
+        return primary
+    return f"{primary}（另 {len(extras)} 項：{'；'.join(extras)}）"
+
+
 def _quality_review_segment_summary(details: list[dict[str, Any]], limit: int = 3) -> Optional[str]:
     if not details:
         return None
@@ -199,23 +290,12 @@ def _quality_review_segment_summary(details: list[dict[str, Any]], limit: int = 
             time_text = f" {_format_clock(start or 0)}-{_format_clock(end or start or 0)}"
         return f"{label}{time_text}"
 
-    def preferred_issue(detail: dict[str, Any]) -> str:
-        issues = [
-            _normalize_quality_review_issue_text(str(issue).strip())
-            for issue in detail.get("issues") or []
-            if _normalize_quality_review_issue_text(str(issue).strip())
-        ]
-        if not issues:
-            return ""
-        return max(issues, key=_quality_review_issue_priority)
-
     grouped_segments: dict[str, dict[str, Any]] = {}
     for detail in details[:limit]:
-        issue = preferred_issue(detail)
-        key = _quality_review_issue_dedupe_key(issue)
+        ordered_issues = _ordered_quality_review_issues(detail.get("issues") or [])
+        issue = _quality_review_issue_display(ordered_issues)
+        key = "\n".join(_quality_review_issue_dedupe_key(issue) for issue in ordered_issues)
         group = grouped_segments.setdefault(key, {"issue": issue, "segments": []})
-        if issue and _quality_review_issue_priority(issue)[0] > _quality_review_issue_priority(group["issue"])[0]:
-            group["issue"] = issue
         group["segments"].append(segment_text(detail))
 
     summaries: list[str] = []
@@ -2131,7 +2211,9 @@ def apply_quality_preview_fields(
         record["quality_review_segment_details"]
     )
     review_summary = str(record.get("quality_review_segment_summary") or "").strip()
-    if review_summary and _has_standard_review_location_warning(str(warning_preview or "")):
+    if review_summary and not warning_preview:
+        warning_preview = f"逐字稿品質警示：問題位置：{review_summary}"
+    elif review_summary and _has_standard_review_location_warning(str(warning_preview or "")):
         warning_preview = f"逐字稿品質警示：問題位置：{review_summary}"
     elif (
         review_summary
