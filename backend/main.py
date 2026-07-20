@@ -63,6 +63,10 @@ from backend.database import (
     delete_meeting,
     update_meeting_content_with_revision,
     list_meeting_revisions,
+    upsert_app_user,
+    list_app_users,
+    list_audit_logs,
+    record_audit_log,
 )
 from backend.models import (
     JobResponse,
@@ -80,6 +84,9 @@ from backend.models import (
     MeetingListResponse,
     MeetingEvidenceResponse,
     HealthResponse,
+    AppUserUpsertRequest,
+    AppUserRecord,
+    AuditLogRecord,
     JobMetrics,
     StorageFileMetric,
     StorageMetrics,
@@ -94,7 +101,8 @@ from backend.models import (
     ErrorResponse,
 )
 from backend.job_queue import enqueue_audio_job, enqueue_line_audio_job, job_worker
-from backend.auth import auth_config_payload
+from backend import auth as auth_module
+from backend.auth import actor_from_request, auth_config_payload, require_permission
 from backend.cleanup import (
     SOURCE_AUDIO_TEMP_PREFIXES,
     cleanup_stale_source_audio_temp_segments,
@@ -1324,6 +1332,90 @@ async def app_config():
         supported_extensions=sorted(SUPPORTED_MEDIA_FORMATS.keys()),
         source_media_archive_retention_days=SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS,
     )
+
+
+def _request_client_host(request: Request) -> Optional[str]:
+    return request.client.host if request.client else None
+
+
+def _require_auth_management_actor(request: Request, permission: str):
+    if not auth_module.AUTH_FEATURE_ENABLED:
+        raise HTTPException(status_code=404, detail="帳號權限功能尚未啟用。")
+    actor = actor_from_request(request)
+    require_permission(actor, permission)
+    return actor
+
+
+@app.get(
+    "/admin/users",
+    response_model=list[AppUserRecord],
+    summary="列出同仁帳號（預設停用）",
+    tags=["系統"],
+    responses={403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+)
+async def admin_list_app_users(
+    request: Request,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    _require_auth_management_actor(request, "user:manage")
+    return list_app_users(limit=limit, offset=offset)
+
+
+@app.put(
+    "/admin/users/{email}",
+    response_model=AppUserRecord,
+    summary="建立或更新同仁帳號（預設停用）",
+    tags=["系統"],
+    responses={400: {"model": ErrorResponse}, 403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+)
+async def admin_upsert_app_user(
+    email: str,
+    request: Request,
+    request_body: AppUserUpsertRequest,
+):
+    actor = _require_auth_management_actor(request, "user:manage")
+    try:
+        user = upsert_app_user(
+            email,
+            display_name=request_body.display_name,
+            role=request_body.role,
+            is_active=request_body.is_active,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    record_audit_log(
+        action="auth.user.upsert",
+        actor_user_id=actor.user_id,
+        actor_email=actor.email,
+        resource_type="app_user",
+        resource_id=user["email"],
+        request_method=request.method,
+        request_path=request.url.path,
+        client_host=_request_client_host(request),
+        detail={
+            "role": user["role"],
+            "is_active": bool(user["is_active"]),
+        },
+    )
+    return user
+
+
+@app.get(
+    "/admin/audit-logs",
+    response_model=list[AuditLogRecord],
+    summary="列出稽核紀錄（預設停用）",
+    tags=["系統"],
+    responses={403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+)
+async def admin_list_audit_logs(
+    request: Request,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    _require_auth_management_actor(request, "audit:read")
+    return list_audit_logs(limit=limit, offset=offset)
 
 
 # =============================================================================

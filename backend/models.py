@@ -248,6 +248,40 @@ class AppConfigResponse(BaseModel):
 
 
 # =============================================================================
+# 帳號 / 稽核管理模型（預設停用，待未來啟用 RBAC）
+# =============================================================================
+
+class AppUserUpsertRequest(BaseModel):
+    display_name: Optional[str] = Field(None, max_length=120, description="同仁顯示名稱")
+    role: str = Field("viewer", description="角色：admin、editor 或 viewer")
+    is_active: bool = Field(True, description="是否啟用帳號")
+
+
+class AppUserRecord(BaseModel):
+    id: int
+    email: str
+    display_name: Optional[str] = None
+    role: str
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class AuditLogRecord(BaseModel):
+    id: int
+    actor_user_id: Optional[int] = None
+    actor_email: Optional[str] = None
+    action: str
+    resource_type: Optional[str] = None
+    resource_id: Optional[str] = None
+    request_method: Optional[str] = None
+    request_path: Optional[str] = None
+    client_host: Optional[str] = None
+    detail: Optional[dict[str, Any]] = None
+    created_at: datetime
+
+
+# =============================================================================
 # 會議記錄相關模型
 # =============================================================================
 

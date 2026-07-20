@@ -103,7 +103,7 @@ SEGMENT_OVERLAP_SECONDS=2
 
 安全預設：`/line-webhook` 可公開給 LINE 呼叫；Web 介面與管理 API 允許本機與信任本機網段存取。若要透過 ngrok 或其他公開網路管理，請使用 `APP_API_KEY`。
 
-帳號、角色與稽核紀錄的資料表與 helper 已先完成，但 `MEETING_AUTH_ENABLED` 預設為 `0`，目前不會改變既有同網段 / API key 使用方式。啟用前請先建立同仁帳號、角色配置與登入來源；啟用後系統只會從 `app_users` 讀取角色，HTTP header 只提供使用者身分，不可用來授權角色。
+帳號、角色與稽核紀錄的資料表、helper 與管理 API 已先完成，但 `MEETING_AUTH_ENABLED` 預設為 `0`，目前不會改變既有同網段 / API key 使用方式。啟用前請先建立同仁帳號、角色配置與登入來源；啟用後系統只會從 `app_users` 讀取角色，HTTP header 只提供使用者身分，不可用來授權角色。未啟用時 `/admin/users` 與 `/admin/audit-logs` 會回傳 404。
 
 > 資安提醒：不要提交 `.env`、`meetings.db*`、`temp/`、`output/`、`backups/`、`logs/`、原始錄音、會議記錄或匯出的文件。若金鑰曾暴露，請立即到對應平台輪換 `GEMINI_API_KEY`、`APP_API_KEY`、LINE token 與 ngrok token。
 

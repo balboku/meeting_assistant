@@ -329,6 +329,95 @@ class AuthAuditRegressionTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     database.upsert_app_user("bad-role@example.com", role="owner")
 
+    def test_future_auth_management_routes_are_hidden_until_enabled(self):
+        from backend.main import app
+
+        response = asgi_request(app, "GET", "/admin/users")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("尚未啟用", response.json()["detail"])
+
+    def test_future_admin_can_manage_users_and_view_audit_logs_when_enabled(self):
+        import backend.auth as auth
+        import backend.database as database
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(database, "DB_PATH", Path(tmpdir) / "meetings.db"), \
+                 mock.patch.object(auth, "AUTH_FEATURE_ENABLED", True), \
+                 mock.patch.object(auth, "AUTH_USER_HEADER", "X-Meeting-User"):
+                database.init_db()
+                database.upsert_app_user(
+                    "admin@example.com",
+                    display_name="Admin",
+                    role="admin",
+                )
+
+                upsert_response = asgi_request(
+                    main.app,
+                    "PUT",
+                    "/admin/users/editor%40example.com",
+                    headers={"X-Meeting-User": "admin@example.com"},
+                    json={
+                        "display_name": "Editor",
+                        "role": "editor",
+                        "is_active": True,
+                    },
+                )
+                users_response = asgi_request(
+                    main.app,
+                    "GET",
+                    "/admin/users",
+                    headers={"X-Meeting-User": "admin@example.com"},
+                )
+                audit_response = asgi_request(
+                    main.app,
+                    "GET",
+                    "/admin/audit-logs",
+                    headers={"X-Meeting-User": "admin@example.com"},
+                )
+
+        self.assertEqual(upsert_response.status_code, 200)
+        self.assertEqual(upsert_response.json()["email"], "editor@example.com")
+        self.assertEqual(upsert_response.json()["role"], "editor")
+        self.assertEqual(users_response.status_code, 200)
+        self.assertEqual(
+            {user["email"] for user in users_response.json()},
+            {"admin@example.com", "editor@example.com"},
+        )
+        self.assertEqual(audit_response.status_code, 200)
+        audit_logs = audit_response.json()
+        self.assertEqual(audit_logs[0]["action"], "auth.user.upsert")
+        self.assertEqual(audit_logs[0]["actor_email"], "admin@example.com")
+        self.assertEqual(audit_logs[0]["resource_id"], "editor@example.com")
+        self.assertEqual(audit_logs[0]["detail"]["role"], "editor")
+
+    def test_future_editor_cannot_use_management_routes_when_enabled(self):
+        import backend.auth as auth
+        import backend.database as database
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(database, "DB_PATH", Path(tmpdir) / "meetings.db"), \
+                 mock.patch.object(auth, "AUTH_FEATURE_ENABLED", True), \
+                 mock.patch.object(auth, "AUTH_USER_HEADER", "X-Meeting-User"):
+                database.init_db()
+                database.upsert_app_user(
+                    "editor@example.com",
+                    display_name="Editor",
+                    role="editor",
+                )
+
+                response = asgi_request(
+                    main.app,
+                    "GET",
+                    "/admin/users",
+                    headers={"X-Meeting-User": "editor@example.com"},
+                )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("缺少權限", response.json()["detail"])
+
 
 class ProjectGovernanceRegressionTests(unittest.TestCase):
     def test_gitignore_excludes_runtime_artifacts(self):
