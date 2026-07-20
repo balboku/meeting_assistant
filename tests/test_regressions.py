@@ -10070,6 +10070,18 @@ const inferredMeeting = {{
     '[71:00] **[發言者 C]**：下一句正常內容。\\\\n'
 }};
 inferred = fallbackQualityReportFromMeeting(inferredMeeting);
+const noTimestampMeeting = {{
+  quality_warning_text: '逐字稿品質警示：疑似連續重複轉錄（同一句連續重複 31 次：因為我是結所以我領車），建議重跑或複核相關分段。',
+  full_content:
+    '## 一、討論摘要 (Discussion Summary)\\\\n摘要\\\\n' +
+    '## 二、最終決議 (Final Decisions)\\\\n決議\\\\n' +
+    '## 三、待辦事項 (Action Items)\\\\n待辦\\\\n' +
+    '## 四、完整逐字稿 (Verbatim Transcript)\\\\n' +
+    '### 【第 4 段｜30:00 – 40:00】\\\\n' +
+    '**[發言者 A]**：因為我是結，所以我領車，這一句沒有時間戳。\\\\n' +
+    '**[發言者 B]**：後續正常討論。\\\\n'
+}};
+noTimestamp = fallbackQualityReportFromMeeting(noTimestampMeeting);
 `, sandbox);
 if (!sandbox.report?.warnings?.[0]?.includes('問題位置：第 8 段 70:01-80:01：疑似連續重複轉錄')) {{
   console.error(JSON.stringify(sandbox.report));
@@ -10106,6 +10118,18 @@ if (!sandbox.inferred.warnings[0].includes('重複時間：70:00-70:30')) {{
 if (!sandbox.inferred.warnings[0].includes('因為我是結，所以我領車')) {{
   console.error(JSON.stringify(sandbox.inferred));
   process.exit(12);
+}}
+if (sandbox.noTimestamp.review_segments[0].index !== 3) {{
+  console.error(JSON.stringify(sandbox.noTimestamp));
+  process.exit(13);
+}}
+if (!sandbox.noTimestamp.warnings[0].includes('問題位置：第 4 段 30:00-40:00')) {{
+  console.error(JSON.stringify(sandbox.noTimestamp));
+  process.exit(14);
+}}
+if (sandbox.noTimestamp.warnings[0].includes('重複時間：')) {{
+  console.error(JSON.stringify(sandbox.noTimestamp));
+  process.exit(15);
 }}
 console.log('fallback_location_warning_ok');
 """

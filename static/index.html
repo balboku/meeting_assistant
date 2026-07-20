@@ -4365,15 +4365,20 @@ function transcriptReviewSegmentsFromWarning(warning = '', fullContent = '') {
   if (!transcript) return [];
   const details = new Map();
   let currentSegment = null;
-  const issueByRange = (startSeconds, endSeconds) => {
+  const issueByRange = (startSeconds = null, endSeconds = null) => {
     const repeatText = phraseInfo.count
       ? `同一句連續重複 ${phraseInfo.count} 次：${phraseInfo.phrase}`
       : `同一句連續重複：${phraseInfo.phrase}`;
-    return [
+    const parts = [
       '疑似連續重複轉錄',
       repeatText,
-      `重複時間：${clockText(startSeconds)}-${clockText(endSeconds)}`,
-    ].join('；');
+    ];
+    const hasTimeRange = startSeconds !== null && startSeconds !== undefined
+      && endSeconds !== null && endSeconds !== undefined
+      && Number.isFinite(Number(startSeconds))
+      && Number.isFinite(Number(endSeconds));
+    if (hasTimeRange) parts.push(`重複時間：${clockText(startSeconds)}-${clockText(endSeconds)}`);
+    return parts.join('；');
   };
 
   for (const rawLine of transcript.split(/\r?\n/)) {
@@ -4385,15 +4390,20 @@ function transcriptReviewSegmentsFromWarning(warning = '', fullContent = '') {
     const timeMatch = String(rawLine || '').match(/\[(\d{1,3}:[0-5]\d)\]/);
     const lineSeconds = parseClockSeconds(timeMatch?.[1]);
     const lineText = transcriptLineTextForLookup(rawLine);
-    if (lineSeconds === null || !lineText) continue;
+    if (lineSeconds === null && !currentSegment) continue;
+    if (!lineText) continue;
     if (!(lineText.includes(phraseInfo.normalized) || phraseInfo.normalized.includes(lineText))) continue;
-    const fallbackIndex = Math.floor(lineSeconds / REVIEW_SEGMENT_SECONDS);
-    const segment = currentSegment || {
-      index: fallbackIndex,
-      label: `第 ${fallbackIndex + 1} 段`,
-      start_seconds: fallbackIndex * REVIEW_SEGMENT_SECONDS,
-      end_seconds: (fallbackIndex + 1) * REVIEW_SEGMENT_SECONDS,
-    };
+    const segment = lineSeconds !== null
+      ? currentSegment || (() => {
+          const fallbackIndex = Math.floor(lineSeconds / REVIEW_SEGMENT_SECONDS);
+          return {
+            index: fallbackIndex,
+            label: `第 ${fallbackIndex + 1} 段`,
+            start_seconds: fallbackIndex * REVIEW_SEGMENT_SECONDS,
+            end_seconds: (fallbackIndex + 1) * REVIEW_SEGMENT_SECONDS,
+          };
+        })()
+      : currentSegment;
     const existing = details.get(segment.index) || {
       index: segment.index,
       label: segment.label || `第 ${segment.index + 1} 段`,
@@ -4403,8 +4413,16 @@ function transcriptReviewSegmentsFromWarning(warning = '', fullContent = '') {
       _last_match_seconds: lineSeconds,
       issues: [],
     };
-    existing._first_match_seconds = Math.min(existing._first_match_seconds, lineSeconds);
-    existing._last_match_seconds = Math.max(existing._last_match_seconds, lineSeconds);
+    if (lineSeconds !== null) {
+      const firstSeconds = Number(existing._first_match_seconds);
+      const lastSeconds = Number(existing._last_match_seconds);
+      existing._first_match_seconds = Number.isFinite(firstSeconds)
+        ? Math.min(firstSeconds, lineSeconds)
+        : lineSeconds;
+      existing._last_match_seconds = Number.isFinite(lastSeconds)
+        ? Math.max(lastSeconds, lineSeconds)
+        : lineSeconds;
+    }
     existing.start_seconds = segment.start_seconds;
     existing.end_seconds = segment.end_seconds;
     details.set(segment.index, existing);
@@ -4413,9 +4431,13 @@ function transcriptReviewSegmentsFromWarning(warning = '', fullContent = '') {
   return Array.from(details.values())
     .sort((a, b) => a.index - b.index)
     .map(detail => {
+      const hasFirstSeconds = detail._first_match_seconds !== null && detail._first_match_seconds !== undefined;
+      const hasLastSeconds = detail._last_match_seconds !== null && detail._last_match_seconds !== undefined;
       const firstSeconds = Number(detail._first_match_seconds);
       const lastSeconds = Number(detail._last_match_seconds);
-      const issue = issueByRange(firstSeconds, lastSeconds);
+      const issue = hasFirstSeconds && hasLastSeconds && Number.isFinite(firstSeconds) && Number.isFinite(lastSeconds)
+        ? issueByRange(firstSeconds, lastSeconds)
+        : issueByRange();
       delete detail._first_match_seconds;
       delete detail._last_match_seconds;
       detail.issues = [issue];
