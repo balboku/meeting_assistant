@@ -7630,6 +7630,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("if (fallbackSeconds === null || fallbackSeconds === undefined || fallbackSeconds === '') return null;", html)
         self.assertIn("function qualityWarningSegmentTargets", html)
         self.assertIn("function qualityWarningSegmentIndices", html)
+        self.assertIn("function orderedReviewIssues", html)
+        self.assertIn("function reviewIssueDisplay", html)
         self.assertIn("function reviewSegmentIssueSummary", html)
         self.assertIn("function clearTranscriptFocusHighlights", html)
         self.assertIn("function transcriptSegmentHeadingIndex", html)
@@ -7671,8 +7673,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const focusArgs = hasFocusSeconds ? `${index}, ${focusSeconds}` : `${index}`;", html)
         self.assertIn("quality-review-segment unavailable", html)
         self.assertIn("quality-review-segment media-only", html)
-        self.assertIn('title="此舊紀錄沒有可定位的分段控制"', html)
-        self.assertIn('title="此舊紀錄沒有可重跑的分段控制，可定位原始檔時間"', html)
+        self.assertIn('此舊紀錄沒有可定位的分段控制；${reviewSegmentTitle}', html)
+        self.assertIn('此舊紀錄沒有可重跑的分段控制，可定位原始檔時間；${reviewSegmentTitle}', html)
         self.assertIn("const titleText = reviewCount ? `問題分段 ${reviewCount} 段` : '問題分段';", html)
         self.assertIn('aria-label="${escapeHtml(titleText)}"', html)
         self.assertIn("onclick=\"focusQualitySegment(${focusArgs})\"", html)
@@ -7821,15 +7823,16 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("if (hasRecordingWarning && hasRecordId)", html)
         self.assertIn("重整摘要：${escapeHtml(record?.title || `#${recordId}`)}", html)
         self.assertIn("const reviewSegmentDetails = (record?.quality_review_segment_details || [])", html)
-        self.assertIn("const reviewSegmentSummary = String(record?.quality_review_segment_summary || '').trim();", html)
+        self.assertIn("const reviewSegmentSummary = String(record?.quality_review_segment_summary || '').trim()", html)
+        self.assertIn("|| reviewSegmentIssueSummary(record?.quality_review_segment_details || []);", html)
         self.assertIn("function reviewIssuePriority", html)
         self.assertIn("function preferredReviewIssue", html)
         self.assertIn("const issues = (segment?.issues || [])", html)
-        self.assertIn("const issue = preferredReviewIssue(issues);", html)
+        self.assertIn("const issue = reviewIssueDisplay(issues);", html)
         self.assertIn("const focusSeconds = reviewIssueFocusSeconds(issues, segment?.start_seconds);", html)
         self.assertIn("focus_seconds: hasFocusSeconds ? focusSeconds : null", html)
         self.assertIn("issue,", html)
-        self.assertIn("reason: issue ? `${display}：${issue}` : ''", html)
+        self.assertIn("reason: issue.all ? `${display}：${issue.all}` : ''", html)
         self.assertIn("const reviewSegmentTitles = (reviewSegmentDetails.length ? reviewSegmentDetails : reviewSegments)", html)
         self.assertIn("const groupedReasonMap = new Map();", html)
         self.assertIn("if (!groupedReasonMap.has(issue)) groupedReasonMap.set(issue, []);", html)
@@ -8216,7 +8219,9 @@ function grab(name) {{
 const code = [
   grab('clockText'),
   grab('reviewIssuePriority'),
+  grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
+  grab('reviewIssueDisplay'),
   grab('reviewSegmentIssueSummary'),
   grab('isRecordingQualityWarning'),
   grab('isTranscriptQualityWarning'),
@@ -8321,7 +8326,10 @@ const code = [
   grab('contextualCardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
+  grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
+  grab('reviewIssueDisplay'),
+  grab('reviewSegmentIssueSummary'),
   grab('reviewIssueFocusSeconds'),
   grab('renderCardQuality')
 ].join('\\n');
@@ -8367,11 +8375,11 @@ if (sandbox.result.includes('>逐字稿警示 1<')) {{
   console.error(sandbox.result);
   process.exit(12);
 }}
-if (!sandbox.result.includes('title="逐字稿警示：第 1 段 09:59-10:00：疑似連續重複轉錄')) {{
+if (!sandbox.result.includes('title="逐字稿警示：第 1 段 09:59-10:00、第 2 段 10:00-10:02：疑似連續重複轉錄')) {{
   console.error(sandbox.result);
   process.exit(13);
 }}
-if (sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
+if (!sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
   console.error(sandbox.result);
   process.exit(14);
 }}
@@ -8432,7 +8440,10 @@ const code = [
   grab('contextualCardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
+  grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
+  grab('reviewIssueDisplay'),
+  grab('reviewSegmentIssueSummary'),
   grab('reviewIssueFocusSeconds'),
   grab('renderCardQuality')
 ].join('\\n');
@@ -8516,7 +8527,10 @@ const code = [
   grab('contextualCardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
+  grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
+  grab('reviewIssueDisplay'),
+  grab('reviewSegmentIssueSummary'),
   grab('reviewIssueFocusSeconds'),
   grab('renderCardQuality')
 ].join('\\n');
@@ -8667,7 +8681,10 @@ const code = [
   grab('contextualCardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
+  grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
+  grab('reviewIssueDisplay'),
+  grab('reviewSegmentIssueSummary'),
   grab('reviewIssueFocusSeconds'),
   grab('renderCardQuality')
 ].join('\\n');
@@ -8742,7 +8759,10 @@ const code = [
   grab('contextualCardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
+  grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
+  grab('reviewIssueDisplay'),
+  grab('reviewSegmentIssueSummary'),
   grab('reviewIssueFocusSeconds'),
   grab('renderCardQuality')
 ].join('\\n');
@@ -8814,7 +8834,9 @@ const code = [
   grab('reviewIssueFocusSeconds'),
   grab('qualityWarningSegmentTargets'),
   grab('reviewIssuePriority'),
+  grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
+  grab('reviewIssueDisplay'),
   grab('reviewSegmentIssueSummary'),
   grab('reviewSummaryFromWarningText'),
   grab('compactQualityWarningBody'),
@@ -8919,7 +8941,7 @@ if (!sandbox.segmentOnlyLocation.includes('定位第 5 段')) {{
   console.error(sandbox.segmentOnlyLocation);
   process.exit(19);
 }}
-if (sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
+if (!sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
   console.error(sandbox.result);
   process.exit(20);
 }}
@@ -8964,7 +8986,9 @@ const code = [
   grab('effectiveQualityStatus'),
   grab('clockText'),
   grab('reviewIssuePriority'),
+  grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
+  grab('reviewIssueDisplay'),
   grab('reviewSegmentIssueSummary'),
   grab('isReviewLocationWarning'),
   grab('isProblemLocationWarning'),
@@ -9038,7 +9062,10 @@ const code = [
   grab('parseClockSeconds'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
+  grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
+  grab('reviewIssueDisplay'),
+  grab('reviewSegmentIssueSummary'),
   grab('reviewIssueFocusSeconds'),
   grab('renderQualityReviewSegments')
 ].join('\\n');
@@ -9068,11 +9095,15 @@ if (!sandbox.unavailable.includes('同一句連續重複 22 次：台語這樣�
   console.error(sandbox.unavailable);
   process.exit(11);
 }}
+if (!sandbox.unavailable.includes('（另 1 項）')) {{
+  console.error(sandbox.unavailable);
+  process.exit(18);
+}}
 if (!sandbox.unavailable.includes('focusQualitySegment(10, 6184)')) {{
   console.error(sandbox.unavailable);
   process.exit(13);
 }}
-if (sandbox.unavailable.includes('分段疑似重複轉錄幻覺')) {{
+if (!sandbox.unavailable.includes('分段疑似重複轉錄幻覺')) {{
   console.error(sandbox.unavailable);
   process.exit(12);
 }}

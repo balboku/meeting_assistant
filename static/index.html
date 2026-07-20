@@ -3144,10 +3144,28 @@ function reviewIssuePriority(issue = '') {
 }
 
 function preferredReviewIssue(issues = []) {
+  return orderedReviewIssues(issues)[0] || '';
+}
+
+function orderedReviewIssues(issues = []) {
   return (issues || [])
     .map(issue => String(issue || '').trim())
     .filter(Boolean)
-    .sort((a, b) => reviewIssuePriority(b) - reviewIssuePriority(a))[0] || '';
+    .filter((issue, index, all) => all.indexOf(issue) === index)
+    .sort((a, b) => reviewIssuePriority(b) - reviewIssuePriority(a));
+}
+
+function reviewIssueDisplay(issues = [], fallback = '需複核') {
+  const ordered = orderedReviewIssues(issues);
+  const primary = ordered[0] || fallback;
+  const all = ordered.length ? ordered.join('；') : fallback;
+  const extraCount = Math.max(0, ordered.length - 1);
+  return {
+    primary,
+    all,
+    compact: extraCount ? `${primary}（另 ${extraCount} 項）` : primary,
+    extraCount,
+  };
 }
 
 function renderCardQuality(record, qualityType = 'all') {
@@ -3168,13 +3186,13 @@ function renderCardQuality(record, qualityType = 'all') {
       const issues = (segment?.issues || [])
         .map(issue => String(issue || '').trim())
         .filter(Boolean);
-      const issue = preferredReviewIssue(issues);
+      const issue = reviewIssueDisplay(issues);
       const hasTimeRange = segment.start_seconds !== undefined || segment.end_seconds !== undefined;
       const timeText = hasTimeRange
         ? ` ${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)}`
         : '';
       const display = `${label}${timeText}`;
-      const issueText = issue ? `：${issue}` : '';
+      const issueText = issue.all ? `：${issue.all}` : '';
       const focusSeconds = reviewIssueFocusSeconds(issues, segment?.start_seconds);
       const hasFocusSeconds = focusSeconds !== null;
       return {
@@ -3182,8 +3200,8 @@ function renderCardQuality(record, qualityType = 'all') {
         start_seconds: segment?.start_seconds,
         focus_seconds: hasFocusSeconds ? focusSeconds : null,
         display,
-        issue,
-        reason: issue ? `${display}：${issue}` : '',
+        issue: issue.compact,
+        reason: issue.all ? `${display}：${issue.all}` : '',
         title: `${display}${issueText}`,
       };
     })
@@ -3194,7 +3212,8 @@ function renderCardQuality(record, qualityType = 'all') {
   const reviewSegmentTitles = (reviewSegmentDetails.length ? reviewSegmentDetails : reviewSegments)
     .map(segment => String(segment?.title || segment || '').trim())
     .filter(Boolean);
-  const reviewSegmentSummary = String(record?.quality_review_segment_summary || '').trim();
+  const reviewSegmentSummary = String(record?.quality_review_segment_summary || '').trim()
+    || reviewSegmentIssueSummary(record?.quality_review_segment_details || []);
   const warningLines = [...new Set(
     [warningText, warningPreview]
       .flatMap(value => String(value || '').split(/\r?\n/))
@@ -3863,9 +3882,9 @@ function reviewSegmentIssueSummary(reviewSegments = [], limit = 5) {
     const issues = (segment?.issues || [])
       .map(issue => String(issue || '').trim())
       .filter(Boolean);
-    const issue = preferredReviewIssue(issues) || '需複核';
-    if (!grouped.has(issue)) grouped.set(issue, []);
-    grouped.get(issue).push(`${label}${timeText}`);
+    const issue = reviewIssueDisplay(issues);
+    if (!grouped.has(issue.all)) grouped.set(issue.all, []);
+    grouped.get(issue.all).push(`${label}${timeText}`);
   });
   const summaries = Array.from(grouped.entries())
     .map(([issue, segments]) => `${segments.join('、')}：${issue}`);
@@ -4080,10 +4099,15 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
       const issues = (segment.issues || [])
         .map(issue => String(issue || '').trim())
         .filter(Boolean);
-      const issueText = preferredReviewIssue(issues) || '需複核';
+      const issue = reviewIssueDisplay(issues);
+      const issueText = issue.compact;
+      const allIssueText = issue.all || issueText;
       const hasTimeRange = segment.start_seconds !== undefined || segment.end_seconds !== undefined;
       const timeText = hasTimeRange
         ? `${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)} · `
+        : '';
+      const plainTimeText = hasTimeRange
+        ? ` ${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)}`
         : '';
       const startSeconds = Number(segment.start_seconds);
       const hasStartSeconds = Number.isFinite(startSeconds) && startSeconds >= 0;
@@ -4092,22 +4116,23 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
       const canCueSource = hasFocusSeconds;
       const focusArgs = hasFocusSeconds ? `${index}, ${focusSeconds}` : `${index}`;
       const rerunButtonId = `quality-rerun-review-segment-${index}`;
+      const reviewSegmentTitle = `第 ${index + 1} 段${plainTimeText}：${allIssueText}`;
       const rerunControl = canFocusSegment
         ? `<button id="${rerunButtonId}" type="button" class="quality-review-segment-rerun" aria-describedby="detail-status" aria-busy="false" title="只重跑第 ${index + 1} 段，其他分段沿用快取" onclick="rerunMeeting(${Number(meetingId) || 0}, ${index}, false, false, '${rerunButtonId}')">↻ 重跑</button>`
         : '';
       if (!canFocusSegment) {
         if (canCueSource) {
-          return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment media-only" aria-describedby="detail-status" title="此舊紀錄沒有可重跑的分段控制，可定位原始檔時間" onclick="focusQualitySegment(${focusArgs})">
+          return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment media-only" aria-describedby="detail-status" title="${escapeHtml(`此舊紀錄沒有可重跑的分段控制，可定位原始檔時間；${reviewSegmentTitle}`)}" onclick="focusQualitySegment(${focusArgs})">
             <span class="quality-review-segment-label">第 ${index + 1} 段</span>
             <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
           </button></span>`;
         }
-        return `<span class="quality-review-segment-wrap"><span class="quality-review-segment unavailable" aria-disabled="true" title="此舊紀錄沒有可定位的分段控制">
+        return `<span class="quality-review-segment-wrap"><span class="quality-review-segment unavailable" aria-disabled="true" title="${escapeHtml(`此舊紀錄沒有可定位的分段控制；${reviewSegmentTitle}`)}">
           <span class="quality-review-segment-label">第 ${index + 1} 段</span>
           <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
         </span></span>`;
       }
-      return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment" aria-describedby="detail-status" title="定位第 ${index + 1} 段問題逐字稿與原始檔時間" onclick="focusQualitySegment(${focusArgs})">
+      return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment" aria-describedby="detail-status" title="${escapeHtml(`定位第 ${index + 1} 段問題逐字稿與原始檔時間；${reviewSegmentTitle}`)}" onclick="focusQualitySegment(${focusArgs})">
         <span class="quality-review-segment-label">第 ${index + 1} 段</span>
         <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
       </button>${rerunControl}</span>`;
