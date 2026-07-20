@@ -8784,6 +8784,75 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(len(revisions), 1)
         self.assertEqual(revisions[0]["content"], original)
 
+    def test_manual_summary_edit_reinserts_transcript_quality_note(self):
+        import backend.database as database
+        import backend.main as main
+
+        original = (
+            "---\ntitle: 需複核測試\n---\n\n"
+            "## 一、討論摘要 (Discussion Summary)\n\n### D1. 原始摘要\n- 摘要：AI 原稿\n\n"
+            "## 二、最終決議 (Final Decisions)\n\n| # | 關聯討論 | 決議 | 依據 | 狀態 |\n|---|---|---|---|---|\n| R1 | D1 | 未提及 | 未提及 | pending |\n\n"
+            "## 三、待辦事項 (Action Items)\n\n| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n|---|---|---|---|---|---|---|\n| A1 | D1 | R1 | 未提及 | 未提及 | 未提及 | 中 |\n\n"
+            "## 四、完整逐字稿 (Verbatim Transcript)\n"
+            "### 【第 1 段｜00:00 – 10:00】\n[00:00] **[發言者 A]**：第一段正常。\n\n"
+            "### 【第 2 段｜10:00 – 20:00】\n[10:00] **[發言者 A]**：第二段需複核。\n"
+        )
+        edited_summary = (
+            "## 一、討論摘要 (Discussion Summary)\n\n### D1. 人工修訂\n- 摘要：修訂後摘要\n\n"
+            "## 二、最終決議 (Final Decisions)\n\n| # | 關聯討論 | 決議 | 依據 | 狀態 |\n|---|---|---|---|---|\n| R1 | D1 | 維持測試 | 00:00 | confirmed |\n\n"
+            "## 三、待辦事項 (Action Items)\n\n| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n|---|---|---|---|---|---|---|\n| A1 | D1 | R1 | 整理紀錄 | 發言者 A | 未提及 | 中 |"
+        )
+        quality_report = {
+            "score": 95,
+            "label": "可用，建議抽查",
+            "warnings": ["逐字稿品質警示：需抽查"],
+            "review_segments": [
+                {
+                    "index": 1,
+                    "label": "第 2 段",
+                    "start_seconds": 600,
+                    "end_seconds": 1200,
+                    "issues": ["疑似連續重複轉錄"],
+                },
+            ],
+            "segments": [
+                {"index": 1, "start_seconds": 600, "end_seconds": 1200, "issues": ["疑似連續重複轉錄"]},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_path = root / "meeting.md"
+            output_path.write_text(original, encoding="utf-8")
+            with mock.patch.object(database, "DB_PATH", root / "meetings.db"):
+                database.init_db()
+                meeting_id = database.save_meeting(
+                    "品質提示編輯測試",
+                    "2026/07/12",
+                    "meeting.webm",
+                    str(output_path),
+                    "AI 原稿",
+                    quality_report=quality_report,
+                )
+                response = asgi_request(
+                    main.app,
+                    "PUT",
+                    f"/meetings/{meeting_id}/summary",
+                    json={"summary_markdown": edited_summary},
+                )
+                revisions = database.list_meeting_revisions(meeting_id)
+
+            saved = output_path.read_text(encoding="utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("逐字稿品質複核提示", saved)
+        self.assertIn("第 2 段 10:00-20:00", saved)
+        self.assertIn("疑似連續重複轉錄", saved)
+        self.assertIn("逐字稿品質複核提示", payload["full_content"])
+        self.assertEqual(len(revisions), 1)
+        self.assertEqual(revisions[0]["content"], original)
+
     def test_manual_transcript_edit_preserves_summary_and_revision_history(self):
         import backend.database as database
         import backend.main as main

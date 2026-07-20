@@ -2945,11 +2945,17 @@ async def update_meeting_summary(meeting_id: int, request_body: MeetingSummaryUp
             detail="修訂內容格式不完整：" + "；".join(dict.fromkeys(issues)),
         )
 
+    summary_preview = _extract_summary_preview(edited_content)
+    edited_content = content_with_quality_review_note({
+        **record,
+        "summary": summary_preview,
+        "full_content": edited_content,
+    })
     try:
         revision_id = update_meeting_content_with_revision(
             meeting_id,
             edited_content,
-            _extract_summary_preview(edited_content),
+            summary_preview,
             source="manual_edit",
         )
     except (ValueError, FileNotFoundError) as exc:
@@ -2999,11 +3005,17 @@ async def update_meeting_transcript(meeting_id: int, request_body: MeetingTransc
             detail="逐字稿內容格式不完整：" + "；".join(dict.fromkeys(issues)),
         )
 
+    summary_preview = _extract_summary_preview(edited_content)
+    edited_content = content_with_quality_review_note({
+        **record,
+        "summary": summary_preview,
+        "full_content": edited_content,
+    })
     try:
         revision_id = update_meeting_content_with_revision(
             meeting_id,
             edited_content,
-            _extract_summary_preview(edited_content),
+            summary_preview,
             source="manual_transcript_edit",
         )
     except (ValueError, FileNotFoundError) as exc:
