@@ -1533,6 +1533,55 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertEqual(report["review_segments"][0]["index"], 0)
         self.assertTrue(any("逐字稿品質警示" in warning for warning in report["warnings"]))
 
+    def test_audio_task_persists_client_recording_warning_in_quality_report(self):
+        import backend.tasks as tasks
+
+        warning = "錄影品質警示：錄製期間預覽畫面曾連續幾乎全黑，請確認是否選到正確螢幕、視窗或分頁；此原始錄影請人工抽查。"
+        summary_content = (
+            "## 📋 一、討論摘要 (Discussion Summary)\n"
+            "D1. 已確認測試會議內容。\n\n"
+            "## ✅ 二、最終決議 (Final Decisions)\n"
+            "R1（關聯 D1）：維持既有流程。\n\n"
+            "## 📌 三、待辦事項 (Action Items)\n\n"
+            "| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---------|---------|---------|--------|------|--------|\n"
+            "| A1 | D1 | R1 | 抽查原始錄影 | 測試人員 | 未提及 | 中 |\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "output"
+            output_dir.mkdir()
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", return_value=object()), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {"warnings": []})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=[audio_path]), \
+                 mock.patch.object(tasks, "_transcribe_segment", return_value="[00:00] **[發言者 A]**：逐字稿內容。"), \
+                 mock.patch.object(tasks, "_generate_meeting_content_from_transcript", return_value=(summary_content, "summary-test")), \
+                 mock.patch.object(tasks, "_repair_meeting_content_if_needed", side_effect=lambda **kwargs: kwargs["meeting_content"]), \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting") as save_meeting_mock:
+                output_path = tasks.process_audio_task(
+                    job_id="client-recording-warning-job",
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    model="gemini-test",
+                    recording_profile="video_balanced",
+                    client_recording_warning=warning,
+                )
+
+        self.assertIsNotNone(output_path)
+        quality_report = save_meeting_mock.call_args.kwargs["quality_report"]
+        self.assertIn(warning, quality_report["warnings"])
+        self.assertEqual(quality_report["recording"]["client_recording_warning"], warning)
+        self.assertEqual(quality_report["recording"]["profile"], "video_balanced")
+        self.assertEqual(quality_report["score"], 95)
+        self.assertEqual(quality_report["label"], "可用，建議抽查")
+
     def test_quality_report_score_reflects_multiple_review_segments(self):
         import backend.tasks as tasks
 
@@ -2142,7 +2191,10 @@ class UploadQueueRegressionTests(unittest.TestCase):
                     "POST",
                     "/upload-media",
                     files={"file": ("meeting.mp3", BytesIO(b"ID3" + b"\0" * 32), "audio/mpeg")},
-                    data={"recording_profile": "audio_compact"},
+                    data={
+                        "recording_profile": "audio_compact",
+                        "recording_warning": "錄影品質警示：錄製期間預覽畫面曾連續幾乎全黑，請確認是否選到正確攝影機；此原始錄影請人工抽查。",
+                    },
                 )
 
             self.assertEqual(response.status_code, 202)
@@ -2152,6 +2204,7 @@ class UploadQueueRegressionTests(unittest.TestCase):
             self.assertEqual(captured["audio_path"], saved_audio[0])
             self.assertEqual(captured["output_dir"], output_dir)
             self.assertEqual(captured["recording_profile"], "audio_compact")
+            self.assertIn("預覽畫面", captured["client_recording_warning"])
             self.assertTrue(saved_audio[0].read_bytes().startswith(b"ID3"))
 
     def test_upload_route_reuses_existing_audio_with_same_sha256(self):
@@ -5284,6 +5337,39 @@ class JobQueueWorkerRegressionTests(unittest.TestCase):
         self.assertEqual(database.get_job("worker-success-job")["status"], "done")
         self.assertTrue(audio_path.exists())
 
+    def test_audio_worker_passes_client_recording_warning_to_task(self):
+        database, tmpdir = self._isolated_database()
+        import backend.job_queue as job_queue
+
+        warning = "錄影品質警示：錄製期間預覽畫面曾連續幾乎全黑，請人工抽查。"
+        audio_path = tmpdir / "warning-source.webm"
+        output_path = tmpdir / "meeting.md"
+        audio_path.write_bytes(b"audio")
+        output_path.write_text("done", encoding="utf-8")
+        job_queue.enqueue_audio_job(
+            "worker-client-warning-job",
+            audio_path=audio_path,
+            output_dir=tmpdir,
+            model="test-model",
+            client_recording_warning=warning,
+        )
+        worker = job_queue.JobQueueWorker(poll_interval=0.01)
+        claim = database.claim_next_pending_job()
+
+        def mark_done(**kwargs):
+            database.update_job_status(
+                kwargs["job_id"],
+                "done",
+                "完成",
+                output_path=str(output_path),
+            )
+            return output_path
+
+        with mock.patch.object(job_queue, "process_audio_task", side_effect=mark_done) as process_mock:
+            worker.process_job(claim)
+
+        self.assertEqual(process_mock.call_args.kwargs["client_recording_warning"], warning)
+
 
 class LineRegressionTests(unittest.TestCase):
     def test_enqueue_line_audio_job_is_idempotent_by_message_id(self):
@@ -6217,6 +6303,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("activeRecordingProfileId = getRecordingProfileId();", html)
         self.assertIn("const completedProfileId = activeRecordingProfileId || getRecordingProfileId();", html)
         self.assertIn("formData.append('recording_profile', completedProfileId);", html)
+        self.assertIn("const recordingWarning = recordingPreviewQualityWarningText(completedMode);", html)
+        self.assertIn("formData.append('recording_warning', recordingWarning);", html)
         self.assertIn("setRecordingSubmissionLocked(true);", html)
         self.assertIn("setRecordingSubmissionLocked(false);", html)
         self.assertIn("setRecordingProgressBusy(true);", html)
@@ -6258,7 +6346,9 @@ const code = [
   grab('sourceVideoBlankFrameInfo'),
   grab('recordingModeLabel'),
   grab('recordingLiveStatusText'),
+  grab('clearRecordingPreviewQualityMonitor'),
   grab('setRecordingPreviewQualityWarning'),
+  grab('recordingPreviewQualityWarningText'),
   grab('checkRecordingPreviewQuality')
 ].join('\\n');
 const sandbox = {{
@@ -6282,8 +6372,10 @@ var mediaRecorder = {{ state: 'recording' }};
 var recMode = 'video';
 var recPreview = {{ tagName: 'VIDEO', readyState: 2, videoWidth: 1280, videoHeight: 720 }};
 var recStatusEl = {{ textContent: '' }};
+var recPreviewQualityTimer = null;
 var recPreviewBlankSamples = 0;
 var recPreviewQualityWarning = false;
+var recPreviewQualityWarningSeen = false;
 checkRecordingPreviewQuality();
 firstMessage = recStatusEl.textContent;
 checkRecordingPreviewQuality();
@@ -6293,6 +6385,11 @@ thirdMessage = recStatusEl.textContent;
 pixelData = new Uint8ClampedArray([255, 255, 255, 255, 120, 90, 60, 255, 80, 80, 80, 255, 40, 40, 40, 255]);
 checkRecordingPreviewQuality();
 recoveredMessage = recStatusEl.textContent;
+seenWarning = recordingPreviewQualityWarningText('screen');
+clearRecordingPreviewQualityMonitor(false);
+keptWarning = recordingPreviewQualityWarningText('screen');
+clearRecordingPreviewQualityMonitor();
+clearedWarning = recordingPreviewQualityWarningText('screen');
 `, sandbox);
 if (sandbox.firstMessage || sandbox.secondMessage) {{
   console.error({{ firstMessage: sandbox.firstMessage, secondMessage: sandbox.secondMessage }});
@@ -6313,6 +6410,18 @@ if (sandbox.recoveredMessage.includes('幾乎全黑')) {{
 if (!sandbox.recoveredMessage.includes('鏡頭錄影中')) {{
   console.error(sandbox.recoveredMessage);
   process.exit(8);
+}}
+if (!sandbox.seenWarning.includes('螢幕、視窗或分頁')) {{
+  console.error(sandbox.seenWarning);
+  process.exit(9);
+}}
+if (!sandbox.keptWarning.includes('錄影品質警示')) {{
+  console.error(sandbox.keptWarning);
+  process.exit(10);
+}}
+if (sandbox.clearedWarning) {{
+  console.error(sandbox.clearedWarning);
+  process.exit(11);
 }}
 console.log('recording_black_preview_warning_ok');
 """
@@ -9579,6 +9688,7 @@ const sandbox = {{}};
 vm.runInNewContext(code + `
 const summary = {{ quality_warning_count: 1, quality_warning_preview: '摘要品質警示：討論摘要未使用 D 編號' }};
 const recording = {{ quality_warning_count: 1, quality_warning_preview: '偵測到可能的爆音；原始媒體檔已保留。' }};
+const videoRecording = {{ quality_warning_count: 1, quality_warning_preview: '錄影品質警示：錄製期間預覽畫面曾連續幾乎全黑。' }};
 const transcript = {{ quality_warning_count: 0, quality_review_segment_count: 1, quality_review_segment_details: [{{ index: 0 }}] }};
 const rerunnable = {{ quality_warning_count: 0, quality_review_rerunnable_segments: [2] }};
 const legacyTranscript = {{ quality_warning_count: 1, quality_warning_text: '需複核分段：第 2 段 10:00-20:00：疑似連續重複轉錄' }};
@@ -9591,6 +9701,7 @@ const other = {{ quality_score: 80, quality_label: '需注意', quality_warning_
 result = [
   qualityTypeMatchesRecord(summary, 'summary'),
   qualityTypeMatchesRecord(recording, 'recording'),
+  qualityTypeMatchesRecord(videoRecording, 'recording'),
   qualityTypeMatchesRecord(transcript, 'transcript'),
   qualityTypeMatchesRecord(rerunnable, 'rerunnable'),
   qualityTypeMatchesRecord(rerunnable, 'transcript'),

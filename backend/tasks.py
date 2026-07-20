@@ -43,6 +43,18 @@ load_dotenv(dotenv_path=ROOT_DIR / ".env")
 logger = logging.getLogger("MeetingAssistant.Tasks")
 
 
+CLIENT_RECORDING_WARNING_TOKENS = ("錄影品質警示", "預覽畫面", "幾乎全黑", "黑畫面")
+
+
+def normalize_client_recording_warning(value: Optional[str]) -> Optional[str]:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return None
+    if not any(token in text for token in CLIENT_RECORDING_WARNING_TOKENS):
+        return None
+    return text[:300]
+
+
 def _env_model(name: str, default: str) -> str:
     value = os.getenv(name)
     if value is None:
@@ -2824,6 +2836,7 @@ def process_audio_task(
     summary_fallback_model: Optional[str] = None,
     summary_verifier_model: Optional[str] = None,
     recording_profile: Optional[str] = None,
+    client_recording_warning: Optional[str] = None,
     force_segment_indices: Optional[list[int]] = None,
     summary_source_path: Optional[Path] = None,
     transcript_reuse_source_path: Optional[Path] = None,
@@ -2850,6 +2863,7 @@ def process_audio_task(
     )
     summary_verifier_model = (summary_verifier_model or SUMMARY_VERIFIER_MODEL).strip()
     recording_profile = (recording_profile or "legacy_upload").strip()
+    client_recording_warning = normalize_client_recording_warning(client_recording_warning)
     summary_model_used = model
     actual_meeting_date = _infer_meeting_date(meeting_title, audio_path)
 
@@ -3177,6 +3191,17 @@ def process_audio_task(
         meeting_date_str = actual_meeting_date.strftime("%Y/%m/%d")
         output_filename = f"meeting_notes_{audio_path.stem}_{timestamp}.md"
         output_path = output_dir / output_filename
+        if client_recording_warning:
+            audio_report = dict(audio_report or {})
+            audio_warnings = [
+                str(warning).strip()
+                for warning in audio_report.get("warnings") or []
+                if str(warning).strip()
+            ]
+            if client_recording_warning not in audio_warnings:
+                audio_warnings.append(client_recording_warning)
+            audio_report["warnings"] = audio_warnings
+
         quality_report = _build_quality_report(audio_report, segment_report, full_transcript)
         quality_report["summary_quality_mode"] = "high" if high_quality_summary else "standard"
         try:
@@ -3192,6 +3217,8 @@ def process_audio_task(
             "source_audio_sha256": source_audio_sha256,
             "source_audio_suffix": audio_path.suffix.lower(),
         }
+        if client_recording_warning:
+            quality_report["recording"]["client_recording_warning"] = client_recording_warning
 
         seg_note = f"（分 {total_segs} 段處理）" if is_segmented else ""
         frontmatter = f"""---

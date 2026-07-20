@@ -3022,7 +3022,7 @@ function contextualCardWarningTypeLabel(defaultLabel = '品質警示', qualityTy
 }
 
 function isRecordingQualityWarning(warning = '') {
-  return /錄音|音檔|媒體|音量|爆音|靜音|聲道|取樣率/.test(String(warning || ''));
+  return /錄音|錄影|音檔|媒體|音量|爆音|靜音|聲道|取樣率|預覽畫面|黑畫面/.test(String(warning || ''));
 }
 
 function isTranscriptQualityWarning(warning = '') {
@@ -5748,6 +5748,7 @@ let recAnimFrame = null;
 let recPreviewQualityTimer = null;
 let recPreviewBlankSamples = 0;
 let recPreviewQualityWarning = false;
+let recPreviewQualityWarningSeen = false;
 let audioCtx = null;
 let analyser = null;
 let activeRecordingJobId = null;
@@ -5938,17 +5939,19 @@ function recordingLiveStatusText() {
     : `🔴 ${recordingModeLabel()}中...`;
 }
 
-function clearRecordingPreviewQualityMonitor() {
+function clearRecordingPreviewQualityMonitor(resetSeen = true) {
   if (recPreviewQualityTimer) {
     clearInterval(recPreviewQualityTimer);
     recPreviewQualityTimer = null;
   }
   recPreviewBlankSamples = 0;
   recPreviewQualityWarning = false;
+  if (resetSeen) recPreviewQualityWarningSeen = false;
 }
 
 function setRecordingPreviewQualityWarning(active) {
   recPreviewQualityWarning = Boolean(active);
+  if (recPreviewQualityWarning) recPreviewQualityWarningSeen = true;
   if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
   if (!recPreviewQualityWarning) {
     recStatusEl.textContent = recordingLiveStatusText();
@@ -5976,6 +5979,12 @@ function checkRecordingPreviewQuality() {
   }
 }
 
+function recordingPreviewQualityWarningText(mode = activeRecordingMode || recMode) {
+  if (!recPreviewQualityWarningSeen) return '';
+  const sourceLabel = mode === 'screen' ? '螢幕、視窗或分頁' : '攝影機';
+  return `錄影品質警示：錄製期間預覽畫面曾連續幾乎全黑，請確認是否選到正確${sourceLabel}；此原始錄影請人工抽查。`;
+}
+
 function startRecordingPreviewQualityMonitor() {
   clearRecordingPreviewQualityMonitor();
   if (recMode !== 'video' && recMode !== 'screen') return;
@@ -5984,7 +5993,7 @@ function startRecordingPreviewQualityMonitor() {
 }
 
 function releaseRecordingStreams() {
-  clearRecordingPreviewQualityMonitor();
+  clearRecordingPreviewQualityMonitor(false);
   stopStreamTracks(recStream);
   recStream = null;
   recSourceStreams.forEach(stopStreamTracks);
@@ -6347,6 +6356,7 @@ async function onRecordingStopped() {
   const completedMode = activeRecordingMode || recMode;
   const completedProfileId = activeRecordingProfileId || getRecordingProfileId();
   const completedModeLabel = recordingModeLabel(completedMode);
+  const recordingWarning = recordingPreviewQualityWarningText(completedMode);
   // 決定副檔名
   const ext = (completedMode === 'video' || completedMode === 'screen') ? 'webm' : 'webm';
   const title = document.getElementById('rec-title').value.trim()
@@ -6392,6 +6402,7 @@ async function onRecordingStopped() {
   formData.append('file', file);
   formData.append('title', title);
   formData.append('recording_profile', completedProfileId);
+  if (recordingWarning) formData.append('recording_warning', recordingWarning);
 
   try {
     const res = await fetch(`${API}/upload-media`, { method: 'POST', body: formData });

@@ -2290,7 +2290,7 @@ def _normalize_quality_filter_type(quality_type: Optional[str] = None) -> str:
 
 
 def _is_recording_quality_warning(warning: str) -> bool:
-    return bool(re.search(r"錄音|音檔|媒體|音量|爆音|靜音|聲道|取樣率", str(warning or "")))
+    return bool(re.search(r"錄音|錄影|音檔|媒體|音量|爆音|靜音|聲道|取樣率|預覽畫面|黑畫面", str(warning or "")))
 
 
 def _is_transcript_quality_warning(warning: str) -> bool:

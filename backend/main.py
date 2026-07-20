@@ -118,6 +118,7 @@ from backend.tasks import (
     _full_transcript_quality_issues,
     _extract_summary_preview,
     _meeting_content_quality_issues,
+    normalize_client_recording_warning,
     _replace_transcript_section,
     _transcript_integrity_issues,
     _transcript_segment_metadata,
@@ -1349,6 +1350,7 @@ async def upload_media(
     model: Optional[str] = Form(default=None, description=f"指定 Gemini 模型（預設：{GEMINI_MODEL}）"),
     title: Optional[str] = Form(default=None, description="自訂會議標題（預設使用檔案名稱）"),
     recording_profile: Optional[str] = Form(default=None, description="瀏覽器錄音品質 profile"),
+    recording_warning: Optional[str] = Form(default=None, description="瀏覽器錄製期間偵測到的非阻斷品質警示"),
     content_length: Optional[int] = Header(default=None, alias="Content-Length"),
 ):
     """
@@ -1438,6 +1440,7 @@ async def upload_media(
     selected_recording_profile = (recording_profile or "").strip()
     if selected_recording_profile not in RECORDING_PROFILES:
         selected_recording_profile = None
+    client_recording_warning = normalize_client_recording_warning(recording_warning)
     try:
         enqueue_audio_job(
             job_id=job_id,
@@ -1446,6 +1449,7 @@ async def upload_media(
             model=selected_model,
             meeting_title=title,
             recording_profile=selected_recording_profile,
+            client_recording_warning=client_recording_warning,
         )
     except Exception as e:
         if created_new_source_audio and source_audio_path.exists():
