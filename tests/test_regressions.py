@@ -3632,13 +3632,19 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(listed["quality_review_segments"], ["第 7 段", "第 8 段"])
         self.assertEqual(listed["quality_review_segment_count"], 2)
         self.assertEqual(listed["quality_review_rerunnable_segments"], [6, 7])
+        expected_preview = (
+            "逐字稿品質警示：問題位置：第 7 段 59:59-70:04、第 8 段 70:01-80:01："
+            "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:00-70:30"
+        )
+        self.assertEqual(listed["quality_warning_preview"], expected_preview)
         self.assertIn(
-            "第 7 段 59:59-70:04、第 8 段 70:01-80:01：疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:00-70:30",
+            expected_preview.replace("逐字稿品質警示：問題位置：", ""),
             listed["quality_review_segment_summary"],
         )
         self.assertIn("逐字稿品質警示：需複核分段：第 7 段", listed["quality_warning_text"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
         self.assertEqual(searched["quality_review_rerunnable_segments"], [6, 7])
+        self.assertEqual(searched["quality_warning_preview"], expected_preview)
 
     def test_list_and_search_infer_repeat_segments_from_generic_warning(self):
         database, tmp_path = self._isolated_database()

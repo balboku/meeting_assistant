@@ -284,6 +284,17 @@ def _append_uncovered_quality_previews(
         warning_text_items.append(cleaned)
 
 
+def _should_promote_review_summary_to_preview(warning_preview: Optional[str], review_summary: str) -> bool:
+    warning = str(warning_preview or "").strip()
+    if not warning or not str(review_summary or "").strip():
+        return False
+    if "疑似連續重複轉錄" not in warning and "重複轉錄" not in warning:
+        return False
+    if review_segment_details_from_text(warning):
+        return False
+    return True
+
+
 _TRANSCRIPT_SEGMENT_HEADING_PATTERN = re.compile(
     r"(?m)^#{1,6}\s*(?:"
     r"【第\s*(?P<zh_index>\d+)\s*段\s*[｜|]\s*"
@@ -1858,6 +1869,9 @@ def apply_quality_preview_fields(
     record["quality_review_segment_summary"] = _quality_review_segment_summary(
         record["quality_review_segment_details"]
     )
+    review_summary = str(record.get("quality_review_segment_summary") or "").strip()
+    if _should_promote_review_summary_to_preview(warning_preview, review_summary):
+        warning_preview = f"逐字稿品質警示：問題位置：{review_summary}"
     record["quality_warning_count"] = warning_count
     record["quality_warning_preview"] = warning_preview
     warning_text_items = [
@@ -1873,7 +1887,6 @@ def apply_quality_preview_fields(
     if not warning_text_items and warning_preview:
         warning_text_items.append(str(warning_preview).strip())
     combined_warning_text = "\n".join(dict.fromkeys(warning_text_items))
-    review_summary = str(record.get("quality_review_segment_summary") or "").strip()
     has_segment_label_in_warning = any(
         label and label in combined_warning_text
         for label in sorted_review_segment_labels
