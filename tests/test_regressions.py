@@ -867,7 +867,9 @@ class TaskRegressionTests(unittest.TestCase):
 
         self.assertIsNotNone(diagnostic)
         self.assertIn("同一句連續重複 31 次：因為我是結所以我領車", diagnostic["warning"])
+        self.assertIn("問題位置：第 4 段｜30:00-40:00", diagnostic["warning"])
         self.assertIn("第 4 段｜30:00-40:00", diagnostic["warning"])
+        self.assertNotIn("疑似分段", diagnostic["warning"])
         self.assertEqual(diagnostic["segment_indices"], [3])
 
     def test_finalize_meeting_content_restores_transcript_and_validates(self):
@@ -2740,6 +2742,24 @@ class SearchRegressionTests(unittest.TestCase):
             review_segment_details_from_text(phrase_text)[0]["issues"],
             ["疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：31:00-31:03"],
         )
+        problem_location_text = (
+            "逐字稿品質警示：疑似連續重複轉錄；"
+            "問題位置：第 4 段｜30:00-40:00："
+            "同一句連續重複 31 次：因為我是結所以我領車；重複時間：31:00-31:03。"
+            "建議重跑上述分段或複核相關內容。"
+        )
+        self.assertEqual(
+            review_segment_details_from_text(problem_location_text),
+            [
+                {
+                    "index": 3,
+                    "label": "第 4 段",
+                    "issues": ["疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：31:00-31:03"],
+                    "start_seconds": 1800,
+                    "end_seconds": 2400,
+                },
+            ],
+        )
         boundary_text = "逐字稿品質警示：疑似連續重複轉錄（重複時間：09:59-10:02）"
         self.assertEqual(review_segment_indices_from_text(boundary_text), [0, 1])
         self.assertEqual(
@@ -3563,6 +3583,60 @@ class SearchRegressionTests(unittest.TestCase):
         )
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
         self.assertEqual(searched["quality_warning_text"], listed["quality_warning_text"])
+
+    def test_list_and_search_locate_phrase_only_repeat_warning_from_transcript(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "phrase-only-repeat-warning.md"
+        repeated_turns = "\n".join(
+            f"[70:{index:02d}] **[發言者 A]**：因為我是結，所以我領車。"
+            for index in range(31)
+        )
+        output_path.write_text(
+            "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+            "## 二、最終決議 (Final Decisions)\n決議\n"
+            "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "### 【第 7 段｜59:59 – 70:04】\n"
+            "[69:59] **[發言者 B]**：前一句正常。\n"
+            f"{repeated_turns}\n"
+            "### 【第 8 段｜70:01 – 80:01】\n"
+            "[71:00] **[發言者 C]**：下一句正常內容。\n",
+            encoding="utf-8",
+        )
+        quality_report = {
+            "warnings": [
+                "逐字稿品質警示：疑似連續重複轉錄"
+                "（同一句連續重複 31 次：因為我是結所以我領車），"
+                "建議重跑或複核相關分段。"
+            ],
+            "segments": [
+                {"index": 6, "start_seconds": 3599, "end_seconds": 4204, "issues": []},
+                {"index": 7, "start_seconds": 4201, "end_seconds": 4801, "issues": []},
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Phrase Only Repeat Warning",
+            date="2026/07/12",
+            source_audio="phrase-only-repeat.webm",
+            output_path=str(output_path),
+            summary="phrase-only-repeat-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Phrase Only Repeat Warning")[0]
+
+        self.assertEqual(listed["quality_review_segments"], ["第 7 段", "第 8 段"])
+        self.assertEqual(listed["quality_review_segment_count"], 2)
+        self.assertEqual(listed["quality_review_rerunnable_segments"], [6, 7])
+        self.assertIn(
+            "第 7 段 59:59-70:04、第 8 段 70:01-80:01：疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:00-70:30",
+            listed["quality_review_segment_summary"],
+        )
+        self.assertIn("逐字稿品質警示：需複核分段：第 7 段", listed["quality_warning_text"])
+        self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
+        self.assertEqual(searched["quality_review_rerunnable_segments"], [6, 7])
 
     def test_list_and_search_infer_repeat_segments_from_generic_warning(self):
         database, tmp_path = self._isolated_database()

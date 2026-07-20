@@ -1694,6 +1694,19 @@ def _detail_transcript_repeated_turn_diagnostic(
     descriptions: list[str] = []
     all_segment_matches: list[dict] = []
     seen_match_keys: set[tuple[int, str]] = set()
+
+    def segment_location_text(matches: list[dict]) -> str:
+        labels = [
+            f"第 {match['index'] + 1} 段｜"
+            f"{_detail_format_clock(match['start_seconds'])}-{_detail_format_clock(match['end_seconds'])}"
+            for match in matches
+        ]
+        if not labels:
+            return ""
+        if len(labels) > 3:
+            return "、".join(labels[:3]) + f" 等 {len(labels)} 段"
+        return "、".join(labels)
+
     for run in runs:
         timestamps = run.get("timestamps") or []
         if not timestamps:
@@ -1701,9 +1714,16 @@ def _detail_transcript_repeated_turn_diagnostic(
         run_length = int(run.get("run") or 0)
         preview = str(run.get("text") or "")[:24]
         segment_matches = _detail_repetition_segment_matches(timestamps, segments)
-        location = _detail_repetition_location(timestamps, segments, segment_matches)
-        location_text = f"；{location}" if location else ""
-        descriptions.append(f"同一句連續重複 {run_length} 次：{preview}{location_text}")
+        repeat_text = f"同一句連續重複 {run_length} 次：{preview}"
+        time_text = (
+            f"重複時間：{_detail_format_clock(min(timestamps))}-"
+            f"{_detail_format_clock(max(timestamps))}"
+        )
+        location = segment_location_text(segment_matches)
+        if location:
+            descriptions.append(f"問題位置：{location}：{repeat_text}；{time_text}")
+        else:
+            descriptions.append(f"{repeat_text}；{time_text}")
         issue = (
             f"疑似連續重複轉錄；同一句連續重複 {run_length} 次：{preview}"
             f"；重複時間：{_detail_format_clock(min(timestamps))}-{_detail_format_clock(max(timestamps))}"
@@ -1721,8 +1741,8 @@ def _detail_transcript_repeated_turn_diagnostic(
     if len(descriptions) > 5:
         warning_descriptions.append(f"另有 {len(descriptions) - 5} 處")
     warning = (
-        "逐字稿品質警示：疑似連續重複轉錄"
-        f"（{'；'.join(warning_descriptions)}），"
+        "逐字稿品質警示：疑似連續重複轉錄；"
+        f"{'；'.join(warning_descriptions)}。"
         "建議重跑上述分段或複核相關內容。"
     )
     issue = (
