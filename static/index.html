@@ -3253,7 +3253,7 @@ function renderCardQuality(record, qualityType = 'all') {
     const rerunnableSegmentIndices = normalizeSegmentIndices(record?.quality_review_rerunnable_segments || []);
     if (!hasTranscriptWarningChip) {
       const transcriptTitle = reviewSegmentSummary || reviewSegmentTitles.join('、') || reviewSegments.join('、');
-      chips.push(`<span class="card-quality-chip needs-review transcript-review" title="逐字稿需複核分段：${escapeHtml(transcriptTitle)}">逐字稿警示 ${reviewSegments.length} 段</span>`);
+      chips.push(`<span class="card-quality-chip needs-review transcript-review" title="逐字稿問題分段：${escapeHtml(transcriptTitle)}">逐字稿警示 ${reviewSegments.length} 段</span>`);
     }
     const segmentText = reviewSegments.length > 3
       ? `${reviewSegments.slice(0, 3).join('、')} 等 ${reviewSegments.length} 段`
@@ -3270,12 +3270,12 @@ function renderCardQuality(record, qualityType = 'all') {
       const focusArgs = hasFocusSeconds
         ? `${recordId}, ${focusSegment.index}, ${focusSeconds}`
         : `${recordId}, ${focusSegment.index}`;
-      chips.push(`<button type="button" class="card-quality-chip needs-review review-segments card-quality-action" title="開啟會議並定位需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}" aria-label="開啟會議並定位${escapeHtml(focusLabel)}" onclick="openDetailAndFocusSegment(event, ${focusArgs})">問題分段：${escapeHtml(segmentText)}</button>`);
+      chips.push(`<button type="button" class="card-quality-chip needs-review review-segments card-quality-action" title="開啟會議並定位問題分段：${escapeHtml(reviewSegmentTitles.join('、'))}" aria-label="開啟會議並定位${escapeHtml(focusLabel)}" onclick="openDetailAndFocusSegment(event, ${focusArgs})">問題分段：${escapeHtml(segmentText)}</button>`);
     } else {
-      chips.push(`<span class="card-quality-chip needs-review review-segments" title="需複核分段：${escapeHtml(reviewSegmentTitles.join('、'))}">問題分段：${escapeHtml(segmentText)}</span>`);
+      chips.push(`<span class="card-quality-chip needs-review review-segments" title="問題分段：${escapeHtml(reviewSegmentTitles.join('、'))}">問題分段：${escapeHtml(segmentText)}</span>`);
     }
     if (hasRecordId && rerunnableSegmentIndices.length) {
-      chips.push(`<button type="button" id="card-rerun-review-segments-${recordId}" class="card-quality-chip needs-review card-quality-action" title="只重跑已標記需複核的分段，其他分段沿用快取" aria-label="重跑需複核分段：${escapeHtml(record?.title || `#${recordId}`)}" onclick="rerunReviewSegmentsFromCard(event, ${recordId}, [${rerunnableSegmentIndices.join(',')}])">↻ 重跑問題分段</button>`);
+      chips.push(`<button type="button" id="card-rerun-review-segments-${recordId}" class="card-quality-chip needs-review card-quality-action" title="只重跑已標記的問題分段，其他分段沿用快取" aria-label="重跑問題分段：${escapeHtml(record?.title || `#${recordId}`)}" onclick="rerunReviewSegmentsFromCard(event, ${recordId}, [${rerunnableSegmentIndices.join(',')}])">↻ 重跑問題分段</button>`);
     } else if (hasRecordId) {
       chips.push(`<span class="card-quality-chip needs-review review-segment-note" title="此紀錄缺少可直接重跑的分段資料；請開啟問題分段後依原始檔時間複核">需詳情複核</span>`);
     }
@@ -3603,7 +3603,7 @@ async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQu
     : summaryOnly
     ? '只重整摘要、決議與待辦（沿用既有逐字稿）'
     : segmentIndices.length > 1
-    ? `只重跑 ${segmentIndices.length} 個需複核分段（第 ${segmentListText} 段）`
+    ? `只重跑 ${segmentIndices.length} 個問題分段（第 ${segmentListText} 段）`
     : segmentIndices.length === 1
     ? `只重跑第 ${segmentLabels[0]} 段`
     : '完整重跑';
@@ -4069,7 +4069,7 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
     .join('');
   if (!items) return '';
   const rerunButton = rerunnableSegmentIndices.length
-    ? `<button id="quality-rerun-review-segments-button" type="button" class="quality-rerun-review-segments" aria-describedby="detail-status" aria-busy="false" title="只重跑已標記需複核且可定位的分段" onclick="rerunMeeting(${Number(meetingId) || 0}, [${rerunnableSegmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')">↻ 重跑全部問題分段</button>`
+    ? `<button id="quality-rerun-review-segments-button" type="button" class="quality-rerun-review-segments" aria-describedby="detail-status" aria-busy="false" title="只重跑已標記且可定位的問題分段" onclick="rerunMeeting(${Number(meetingId) || 0}, [${rerunnableSegmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')">↻ 重跑全部問題分段</button>`
     : '';
   const fallbackNote = !rerunnableSegmentIndices.length
     ? `<span class="quality-review-note">此紀錄缺少可直接重跑的分段資料；可定位原始檔時間複核，必要時使用完整重跑。<button id="quality-rerun-review-full-button" type="button" class="quality-rerun-review-segments" aria-describedby="detail-status" aria-busy="false" title="重新轉錄並重新產生完整會議紀錄" onclick="rerunMeeting(${Number(meetingId) || 0}, null, false, false, 'quality-rerun-review-full-button')">🔁 完整重跑</button></span>`
