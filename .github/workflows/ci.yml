@@ -32,6 +32,11 @@ jobs:
       - name: Quality consistency audit
         run: python scripts/audit_quality_consistency.py
 
+      - name: Quality review backfill dry-run
+        run: |
+          python scripts/backfill_quality_review_segments.py > backfill.json
+          python -c "import json; payload = json.load(open('backfill.json', encoding='utf-8')); assert payload['would_update'] == 0, payload"
+
       - name: Unit tests
         run: python -m unittest discover -v
 

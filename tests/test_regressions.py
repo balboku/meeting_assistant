@@ -447,10 +447,38 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
             ".venv/bin/python -m compileall -q backend gui tests meeting_assistant.py start.py test_regex.py test_gemini.py scripts",
             ".venv/bin/python scripts/security_scan.py",
             ".venv/bin/python scripts/audit_quality_consistency.py",
+            "scripts/backfill_quality_review_segments.py",
+            "would_update",
             ".venv/bin/python -m pip check",
             "node --check static/index.html",
         ):
             self.assertIn(command, script)
+
+    def test_windows_verify_script_covers_core_local_checks(self):
+        verify_script = ROOT / "scripts" / "verify.ps1"
+
+        self.assertTrue(verify_script.is_file())
+
+        script = verify_script.read_text(encoding="utf-8")
+        for command in (
+            "-m unittest discover -v",
+            "-m compileall -q backend gui tests meeting_assistant.py start.py test_regex.py test_gemini.py scripts",
+            "scripts/security_scan.py",
+            "scripts/audit_quality_consistency.py",
+            "scripts/backfill_quality_review_segments.py",
+            "would_update",
+            "-m pip check",
+            "node --check $tempJs",
+            "node --check static/index.html",
+        ):
+            self.assertIn(command, script)
+
+    def test_ci_runs_quality_backfill_dry_run(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("Quality review backfill dry-run", workflow)
+        self.assertIn("python scripts/backfill_quality_review_segments.py", workflow)
+        self.assertIn("payload['would_update'] == 0", workflow)
 
     def test_quality_benchmark_example_runs_without_ai_calls(self):
         result = subprocess.run(
