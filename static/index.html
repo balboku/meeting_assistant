@@ -3392,10 +3392,15 @@ function renderCardQuality(record, qualityType = 'all') {
       const focusLabel = hasFocusSeconds
         ? `${focusSegment.display} ${clockText(focusSeconds)}`
         : focusSegment.display;
+      const focusHint = hasFocusSeconds
+        ? reviewSegments.length > 1
+          ? ` 先看 ${clockText(focusSeconds)}`
+          : ` ${clockText(focusSeconds)}`
+        : '';
       const focusArgs = hasFocusSeconds
         ? `${recordId}, ${focusSegment.index}, ${focusSeconds}`
         : `${recordId}, ${focusSegment.index}`;
-      chips.push(`<button type="button" class="card-quality-chip needs-review review-segments card-quality-action" title="開啟會議並定位問題分段：${escapeHtml(reviewSegmentTitles.join('、'))}" aria-label="開啟會議並定位${escapeHtml(focusLabel)}" onclick="openDetailAndFocusSegment(event, ${focusArgs})">問題分段：${escapeHtml(segmentText)}</button>`);
+      chips.push(`<button type="button" class="card-quality-chip needs-review review-segments card-quality-action" title="開啟會議並定位問題分段：${escapeHtml(reviewSegmentTitles.join('、'))}" aria-label="開啟會議並定位${escapeHtml(focusLabel)}" onclick="openDetailAndFocusSegment(event, ${focusArgs})">問題分段：${escapeHtml(segmentText)}${escapeHtml(focusHint)}</button>`);
     } else {
       chips.push(`<span class="card-quality-chip needs-review review-segments" title="問題分段：${escapeHtml(reviewSegmentTitles.join('、'))}">問題分段：${escapeHtml(segmentText)}</span>`);
     }

@@ -8630,9 +8630,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("card-quality-chip needs-review review-segments", html)
         self.assertIn("const focusSeconds = Number(focusSegment.focus_seconds);", html)
         self.assertIn("const focusLabel = hasFocusSeconds", html)
+        self.assertIn("const focusHint = hasFocusSeconds", html)
         self.assertIn("card-quality-chip needs-review transcript-review", html)
         self.assertIn("card-quality-chip needs-review review-segment-note", html)
-        self.assertIn("問題分段：${escapeHtml(segmentText)}", html)
+        self.assertIn("問題分段：${escapeHtml(segmentText)}${escapeHtml(focusHint)}", html)
         self.assertIn("${escapeHtml(reasonPrefix)}：${escapeHtml(visibleReason)}", html)
         self.assertIn("逐字稿警示 ${reviewSegments.length} 段", html)
         self.assertIn("const rerunnableSegmentIndices = normalizeSegmentIndices(record?.quality_review_rerunnable_segments || []);", html)
@@ -9270,6 +9271,10 @@ if (!sandbox.result.includes('開啟會議並定位第 1 段 09:59-10:00')) {{
   console.error(sandbox.result);
   process.exit(7);
 }}
+if (!sandbox.result.includes('問題分段：第 1 段 09:59-10:00、第 2 段 10:00-10:02 先看 09:59')) {{
+  console.error(sandbox.result);
+  process.exit(17);
+}}
 if (!sandbox.result.includes('逐字稿警示 2 段')) {{
   console.error(sandbox.result);
   process.exit(8);
@@ -9507,6 +9512,10 @@ if (!sandbox.result.includes('問題分段：第 8 段 70:00-80:00')) {{
   console.error(sandbox.result);
   process.exit(6);
 }}
+if (!sandbox.result.includes('問題分段：第 8 段 70:00-80:00 70:01')) {{
+  console.error(sandbox.result);
+  process.exit(21);
+}}
 if (!sandbox.result.includes('需複核：第 8 段 70:00-80:00：疑似連續重複轉錄（70:01-73:00）')) {{
   console.error(sandbox.result);
   process.exit(7);
@@ -9701,6 +9710,10 @@ result = renderCardQuality({{
 if (!sandbox.result.includes('問題分段：第 1 段 00:00-10:00')) {{
   console.error(sandbox.result);
   process.exit(4);
+}}
+if (!sandbox.result.includes('問題分段：第 1 段 00:00-10:00 00:00')) {{
+  console.error(sandbox.result);
+  process.exit(8);
 }}
 if (sandbox.result.includes('rerunReviewSegmentsFromCard')) {{
   console.error(sandbox.result);
