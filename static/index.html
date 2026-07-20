@@ -3148,11 +3148,45 @@ function preferredReviewIssue(issues = []) {
 }
 
 function orderedReviewIssues(issues = []) {
-  return (issues || [])
+  const timeRange = issue => {
+    const match = String(issue || '').match(/(?:重複時間[：:]\s*)?(\d{1,3}:[0-5]\d)\s*(?:-|–|—|~|至|到)\s*(\d{1,3}:[0-5]\d)/);
+    return match ? `${match[1]}-${match[2]}` : '';
+  };
+  const isActionableRepeat = issue => {
+    const text = String(issue || '');
+    return text.includes('疑似連續重複轉錄')
+      && text.includes('同一句連續重複')
+      && (text.includes('重複時間') || Boolean(timeRange(text)));
+  };
+  const isGenericRepeat = issue => {
+    const text = String(issue || '');
+    return text.includes('重複轉錄幻覺')
+      && !text.includes('同一句連續重複')
+      && !text.includes('重複時間');
+  };
+  const isTimeOnlyRepeat = issue => {
+    const text = String(issue || '');
+    return text.includes('疑似連續重複轉錄')
+      && !text.includes('同一句連續重複')
+      && Boolean(timeRange(text));
+  };
+  let ordered = (issues || [])
     .map(issue => String(issue || '').trim())
     .filter(Boolean)
-    .filter((issue, index, all) => all.indexOf(issue) === index)
-    .sort((a, b) => reviewIssuePriority(b) - reviewIssuePriority(a));
+    .filter((issue, index, all) => all.indexOf(issue) === index);
+  if (ordered.some(isActionableRepeat)) {
+    ordered = ordered.filter(issue => !isGenericRepeat(issue));
+  }
+  const actionableRanges = new Set(
+    ordered
+      .filter(isActionableRepeat)
+      .map(timeRange)
+      .filter(Boolean)
+  );
+  if (actionableRanges.size) {
+    ordered = ordered.filter(issue => !(isTimeOnlyRepeat(issue) && actionableRanges.has(timeRange(issue))));
+  }
+  return ordered.sort((a, b) => reviewIssuePriority(b) - reviewIssuePriority(a));
 }
 
 function reviewIssueDisplay(issues = [], fallback = '需複核') {

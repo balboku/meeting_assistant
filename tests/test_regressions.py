@@ -8991,7 +8991,7 @@ if (!sandbox.segmentOnlyLocation.includes('定位第 5 段')) {{
   console.error(sandbox.segmentOnlyLocation);
   process.exit(19);
 }}
-if (!sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
+if (sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
   console.error(sandbox.result);
   process.exit(20);
 }}
@@ -9123,8 +9123,9 @@ const sandbox = {{}};
 vm.runInNewContext(code + `
 const genericIssue = '分段疑似重複轉錄幻覺';
 const actionableIssue = '疑似連續重複轉錄；同一句連續重複 22 次：台語這樣比較好這樣比較好；重複時間：103:04-105:14';
+const recoveryIssue = '曾觸發轉錄補救：非最後分段含自動過濾/截斷提示';
 const reviewSegments = [
-  {{ index: 10, label: '第 11 段', start_seconds: 6000, end_seconds: 6600, issues: [genericIssue, actionableIssue] }}
+  {{ index: 10, label: '第 11 段', start_seconds: 6000, end_seconds: 6600, issues: [genericIssue, recoveryIssue, actionableIssue] }}
 ];
 unavailable = renderQualityReviewSegments(31, reviewSegments, []);
 available = renderQualityReviewSegments(43, [{{ index: 7, start_seconds: 4200, end_seconds: 4800, issues: ['疑似連續重複轉錄'] }}], [{{ index: 7 }}]);
@@ -9149,11 +9150,15 @@ if (!sandbox.unavailable.includes('（另 1 項）')) {{
   console.error(sandbox.unavailable);
   process.exit(18);
 }}
+if (!sandbox.unavailable.includes('曾觸發轉錄補救')) {{
+  console.error(sandbox.unavailable);
+  process.exit(19);
+}}
 if (!sandbox.unavailable.includes('focusQualitySegment(10, 6184)')) {{
   console.error(sandbox.unavailable);
   process.exit(13);
 }}
-if (!sandbox.unavailable.includes('分段疑似重複轉錄幻覺')) {{
+if (sandbox.unavailable.includes('分段疑似重複轉錄幻覺')) {{
   console.error(sandbox.unavailable);
   process.exit(12);
 }}
