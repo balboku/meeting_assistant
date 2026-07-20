@@ -2447,6 +2447,24 @@ def _detail_has_review_location_warning(warning: str) -> bool:
     return bool(re.search(r"逐字稿品質警示[：:]\s*(?:問題位置|需複核分段)[：:]", text))
 
 
+def _detail_is_redundant_unlocated_transcript_warning(warning: str) -> bool:
+    text = str(warning or "").strip()
+    if not _detail_is_transcript_quality_warning(text) or _detail_has_review_location_warning(text):
+        return False
+    if any(token in text for token in ("省略", "截斷", "自動過濾", "缺漏", "內容空白")):
+        return False
+    return any(
+        token in text
+        for token in (
+            "疑似連續重複轉錄",
+            "重複轉錄幻覺",
+            "同一句連續重複",
+            "舊版未定位",
+            "完整逐字稿區塊第",
+        )
+    )
+
+
 def _merge_detail_quality_warnings(primary_warnings: list[object], fallback_warnings: list[str]) -> list[str]:
     primary = [
         str(warning).strip()
@@ -2489,10 +2507,7 @@ def _merge_detail_quality_warnings(primary_warnings: list[object], fallback_warn
         primary = [
             warning
             for warning in primary
-            if not (
-                _detail_is_transcript_quality_warning(warning)
-                and not _detail_has_review_location_warning(warning)
-            )
+            if not _detail_is_redundant_unlocated_transcript_warning(warning)
         ]
     return list(dict.fromkeys([*located_fallbacks, *primary, *trailing_fallbacks]))
 

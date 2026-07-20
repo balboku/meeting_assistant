@@ -465,6 +465,20 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .card-source-duplicate {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      max-width: 100%;
+      padding: 3px 8px;
+      border: 1px solid rgba(224,175,104,0.35);
+      border-radius: 6px;
+      background: rgba(224,175,104,0.08);
+      color: var(--yellow);
+      font-size: 12px;
+      line-height: 1.25;
+      white-space: nowrap;
+    }
     .card-preview {
       margin-top: 10px; font-size: 13px; color: var(--text-mid);
       line-height: 1.6; display: -webkit-box;
@@ -3381,6 +3395,34 @@ function renderCardSourceMedia(record) {
                   onclick="openDetailAndFocusSourceMedia(event, ${recordId})">${body}</button>`;
 }
 
+function sourceMediaDuplicateKey(record) {
+  const rawSource = String(record?.source_audio || '').trim();
+  if (!rawSource) return '';
+  const cleanSource = rawSource.split(/[?#]/)[0].replace(/\\/g, '/');
+  const filename = cleanSource.split('/').pop()?.trim() || '';
+  return filename.toLowerCase();
+}
+
+function sourceMediaDuplicateCounts(records = []) {
+  const counts = new Map();
+  (records || []).forEach(record => {
+    const key = sourceMediaDuplicateKey(record);
+    if (!key) return;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  return counts;
+}
+
+function renderSourceDuplicateChip(record, duplicateCounts) {
+  const key = sourceMediaDuplicateKey(record);
+  if (!key) return '';
+  const count = Number(duplicateCounts?.get?.(key) || 0);
+  if (count <= 1) return '';
+  const sourceName = String(record?.source_audio || '').trim() || '原始檔';
+  const safeName = escapeHtml(sourceName);
+  return `<span class="card-source-duplicate" title="目前清單有 ${count} 份會議紀錄使用同一個原始檔：${safeName}">同原始檔 ${count} 份</span>`;
+}
+
 function renderDetailSourceMediaChip(meeting) {
   const sourceName = String(meeting?.source_audio || '').trim() || '原始檔';
   const mediaKind = sourceMediaKindLabel(meeting);
@@ -3502,6 +3544,7 @@ async function loadMeetings(query = '') {
       return;
     }
 
+    const duplicateCounts = sourceMediaDuplicateCounts(records);
     listEl.innerHTML = records.map(r => `
       <div class="card ${r.id === currentId ? 'active' : ''}"
            data-id="${r.id}" data-title="${escapeHtml(r.title)}" role="button" tabindex="0"
@@ -3523,6 +3566,7 @@ async function loadMeetings(query = '') {
           <span>📅 ${r.date}</span>
           <span class="dot"></span>
           ${renderCardSourceMedia(r)}
+          ${renderSourceDuplicateChip(r, duplicateCounts)}
         </div>
         ${renderCardQuality(r, qualityType)}
         <div class="card-preview">${escapeHtml(r.summary_preview || '（無摘要）')}</div>
@@ -3718,8 +3762,9 @@ function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegment
   const targets = [];
   const text = String(warning || '');
   const segmentTimeRangeMatcher = /(\d{1,3}:[0-5]\d)\s*(?:-|–|—|~|至|到)\s*(\d{1,3}:[0-5]\d)/;
-  const addTarget = (index, sourceSegment = null) => {
+  const addTarget = (index, sourceSegment = null, options = {}) => {
     if (!Number.isInteger(index) || index < 0) return;
+    const allowWithoutFocus = Boolean(options.allowWithoutFocus);
     const startSeconds = Number(sourceSegment?.start_seconds);
     const hasStartSeconds = Number.isFinite(startSeconds) && startSeconds >= 0;
     const issueFocusSeconds = reviewIssueFocusSeconds(sourceSegment?.issues || [], null);
@@ -3728,8 +3773,8 @@ function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegment
       ? issueFocusSeconds
       : reviewIssueFocusSeconds([], hasStartSeconds ? startSeconds : null);
     const hasFocusSeconds = focusSeconds !== null;
-    if (knownIndices.size && !knownIndices.has(index) && !hasFocusSeconds) return;
-    if (!knownIndices.size && !hasFocusSeconds) return;
+    if (knownIndices.size && !knownIndices.has(index) && !hasFocusSeconds && !allowWithoutFocus) return;
+    if (!knownIndices.size && !hasFocusSeconds && !allowWithoutFocus) return;
     const suppliedPrecision = Number(sourceSegment?.focus_precision);
     const focusPrecision = Number.isFinite(suppliedPrecision)
       ? suppliedPrecision
@@ -3759,7 +3804,7 @@ function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegment
     const sourceSegment = startSeconds !== null
       ? { start_seconds: startSeconds }
       : reviewSegmentByIndex.get(index);
-    addTarget(index, sourceSegment);
+    addTarget(index, sourceSegment, { allowWithoutFocus: true });
   };
   const addTimeRangeTarget = (startSeconds, endSeconds = startSeconds) => {
     if (!Number.isFinite(startSeconds) || startSeconds < 0) return;
@@ -3790,7 +3835,7 @@ function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegment
   }
   const isTranscriptWarning = isTranscriptQualityWarning(text);
   if (isTranscriptWarning) {
-    (reviewSegments || []).forEach(segment => addTarget(Number(segment?.index), segment));
+    (reviewSegments || []).forEach(segment => addTarget(Number(segment?.index), segment, { allowWithoutFocus: true }));
   }
   return targets
     .sort((a, b) => a.index - b.index)

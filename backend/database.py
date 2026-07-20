@@ -432,14 +432,7 @@ def _timestamp_segment_indices(transcript: str, segment_seconds: int = 600) -> s
     return indices
 
 
-def _markdown_transcript_segment_indices(output_path: str) -> set[int]:
-    path = Path(output_path or "")
-    if not path.is_file():
-        return set()
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return set()
+def _markdown_transcript_segment_indices_from_text(text: str) -> set[int]:
     indices: set[int] = set()
     for match in _TRANSCRIPT_SEGMENT_HEADING_PATTERN.finditer(text):
         raw_index = match.group("zh_index") or match.group("en_index")
@@ -453,6 +446,17 @@ def _markdown_transcript_segment_indices(output_path: str) -> set[int]:
         return indices
     transcript = _markdown_section(text, ("完整逐字稿", "Verbatim Transcript"), ())
     return _timestamp_segment_indices(transcript)
+
+
+def _markdown_transcript_segment_indices(output_path: str) -> set[int]:
+    path = Path(output_path or "")
+    if not path.is_file():
+        return set()
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return set()
+    return _markdown_transcript_segment_indices_from_text(text)
 
 
 def _repeated_transcript_turn_review_segments(
@@ -725,6 +729,12 @@ def _transcript_segment_spans(transcript: str) -> list[dict[str, int]]:
     return spans
 
 
+def _markdown_repeated_turn_review_segments_from_text(text: str) -> list[dict[str, Any]]:
+    transcript = _markdown_section(text, ("完整逐字稿", "Verbatim Transcript"), ())
+    segments = _transcript_segment_spans(transcript)
+    return _repeated_transcript_turn_review_segments(transcript, segments=segments)
+
+
 def _legacy_markdown_repeated_turn_review_segments(output_path: str) -> list[dict[str, Any]]:
     path = Path(output_path or "")
     if not path.is_file():
@@ -733,9 +743,7 @@ def _legacy_markdown_repeated_turn_review_segments(output_path: str) -> list[dic
         text = path.read_text(encoding="utf-8")
     except OSError:
         return []
-    transcript = _markdown_section(text, ("完整逐字稿", "Verbatim Transcript"), ())
-    segments = _transcript_segment_spans(transcript)
-    return _repeated_transcript_turn_review_segments(transcript, segments=segments)
+    return _markdown_repeated_turn_review_segments_from_text(text)
 
 
 LEGACY_TRANSCRIPT_OMISSION_PATTERNS = (
@@ -2040,8 +2048,13 @@ def apply_quality_preview_fields(
                 add_review_segment_labels_from_text(warning)
     output_path_text = str(record.get("output_path") or "")
     legacy_repeated_details = _legacy_markdown_repeated_turn_review_segments(output_path_text)
+    full_content_text = str(record.get("full_content") or "")
+    if not legacy_repeated_details and full_content_text.strip():
+        legacy_repeated_details = _markdown_repeated_turn_review_segments_from_text(full_content_text)
     if legacy_repeated_details:
         known_segment_indices.update(_markdown_transcript_segment_indices(output_path_text))
+        if not known_segment_indices and full_content_text.strip():
+            known_segment_indices.update(_markdown_transcript_segment_indices_from_text(full_content_text))
     for detail in legacy_repeated_details:
         segment_issues = [
             _normalize_quality_review_issue_text(str(issue).strip())
@@ -2120,6 +2133,8 @@ def apply_quality_preview_fields(
     record["quality_review_segment_count"] = len(sorted_review_segment_labels)
     if not known_segment_indices and record["quality_review_segment_details"]:
         known_segment_indices = _markdown_transcript_segment_indices(str(record.get("output_path") or ""))
+        if not known_segment_indices and full_content_text.strip():
+            known_segment_indices = _markdown_transcript_segment_indices_from_text(full_content_text)
     record["quality_review_rerunnable_segments"] = [
         detail["index"]
         for detail in record["quality_review_segment_details"]

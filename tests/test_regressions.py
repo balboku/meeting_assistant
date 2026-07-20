@@ -4275,6 +4275,66 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(searched["quality_review_rerunnable_segments"], [6])
         self.assertEqual(searched["quality_warning_preview"], expected_preview)
 
+    def test_quality_preview_locates_repeat_from_full_content_when_output_file_missing(self):
+        from backend.database import apply_quality_preview_fields
+
+        _database, tmp_path = self._isolated_database()
+        repeated_turns = "\n".join(
+            f"[70:{index:02d}] **[發言者 A]**：因為我是結，所以我領車。"
+            for index in range(31)
+        )
+        full_content = (
+            "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+            "## 二、最終決議 (Final Decisions)\n決議\n"
+            "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "### 【第 7 段｜59:59 – 70:04】\n"
+            "[69:59] **[發言者 B]**：前一句正常。\n"
+            f"{repeated_turns}\n"
+            "### 【第 8 段｜70:01 – 80:01】\n"
+            "[71:00] **[發言者 C]**：下一句正常內容。\n"
+        )
+
+        listed = apply_quality_preview_fields(
+            {
+                "title": "Missing Markdown Path",
+                "date": "2026/07/20",
+                "source_audio": "missing-markdown.webm",
+                "output_path": str(tmp_path / "missing-markdown.md"),
+                "summary_preview": "summary",
+                "full_content": full_content,
+                "quality_report": {
+                    "warnings": [
+                        "逐字稿品質警示：疑似連續重複轉錄"
+                        "（同一句連續重複 31 次：因為我是結所以我領車），"
+                        "建議重跑或複核相關分段。"
+                    ],
+                },
+            },
+            quality_report={
+                "warnings": [
+                    "逐字稿品質警示：疑似連續重複轉錄"
+                    "（同一句連續重複 31 次：因為我是結所以我領車），"
+                    "建議重跑或複核相關分段。"
+                ],
+            },
+        )
+
+        expected_preview = (
+            "逐字稿品質警示：問題位置：第 7 段 59:59-70:04："
+            "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:00-70:30"
+        )
+        self.assertEqual(listed["quality_review_segments"], ["第 7 段"])
+        self.assertEqual(listed["quality_review_segment_count"], 1)
+        self.assertEqual(listed["quality_review_rerunnable_segments"], [6])
+        self.assertEqual(listed["quality_warning_preview"], expected_preview)
+        self.assertEqual(
+            listed["quality_warning_text"].splitlines()[0],
+            expected_preview + "。建議重跑上述分段或複核相關內容。",
+        )
+        self.assertIn("因為我是結所以我領車", listed["quality_review_segment_summary"])
+
     def test_list_and_search_prefers_primary_heading_segment_for_overlapped_repeat(self):
         database, tmp_path = self._isolated_database()
         output_path = tmp_path / "primary-overlap-repeat-warning.md"
@@ -7009,7 +7069,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("逐字稿品質警示", warnings)
         self.assertIn("省略", warnings)
         self.assertIn("重複", warnings)
-        self.assertIn("第 2 段｜10:00-20:00", warnings)
+        self.assertIn("第 2 段 10:00-20:00", warnings)
         self.assertIn("重複時間：10:00-10:03", warnings)
         self.assertNotIn("舊版未定位", warnings)
         segment_issues = report["segments"][1]["issues"]
@@ -7064,9 +7124,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         report = response.json()["quality_report"]
         warnings = "\n".join(report["warnings"])
-        self.assertIn("第 4 段｜30:00-40:00", warnings)
+        self.assertIn("第 4 段 30:00-40:00", warnings)
         self.assertIn("重複時間：31:00-31:03", warnings)
-        self.assertIn("第 6 段｜50:00-60:00", warnings)
+        self.assertIn("第 6 段 50:00-60:00", warnings)
         self.assertIn("重複時間：51:00-51:03", warnings)
         self.assertNotIn("舊版未定位", warnings)
         self.assertEqual([segment["index"] for segment in report["review_segments"]], [3, 5])
@@ -7498,7 +7558,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const reviewSegmentByIndex = new Map((reviewSegments || [])", html)
         self.assertIn("const isTranscriptWarning = isTranscriptQualityWarning(text);", html)
         self.assertIn("if (isTranscriptWarning)", html)
-        self.assertIn("(reviewSegments || []).forEach(segment => addTarget(Number(segment?.index), segment));", html)
+        self.assertIn("(reviewSegments || []).forEach(segment => addTarget(Number(segment?.index), segment, { allowWithoutFocus: true }));", html)
         self.assertIn("const issueFocusSeconds = reviewIssueFocusSeconds(sourceSegment?.issues || [], null);", html)
         self.assertIn("focusPrecision > (existing.focus_precision || 0)", html)
         self.assertIn(".map(({ index, start_seconds }) => ({ index, start_seconds }));", html)
@@ -7958,6 +8018,73 @@ if (!sandbox.player.includes('SHA256 abcdef012345')) {{
   process.exit(11);
 }}
 console.log('source_video_entry_points_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_web_ui_marks_duplicate_source_meeting_records(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function sourceMediaDuplicateCounts'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [
+  grab('escapeHtml'),
+  grab('sourceMediaDuplicateKey'),
+  grab('sourceMediaDuplicateCounts'),
+  grab('renderSourceDuplicateChip')
+].join('\\n');
+const sandbox = {{}};
+vm.runInNewContext(code + `
+const records = [
+  {{ id: 1, source_audio: 'C:/media/same.WEBM' }},
+  {{ id: 2, source_audio: 'same.webm?download=1' }},
+  {{ id: 3, source_audio: 'other.mp3' }},
+  {{ id: 4, source_audio: '' }}
+];
+counts = sourceMediaDuplicateCounts(records);
+duplicateChip = renderSourceDuplicateChip(records[0], counts);
+singleChip = renderSourceDuplicateChip(records[2], counts);
+blankChip = renderSourceDuplicateChip(records[3], counts);
+`, sandbox);
+if (sandbox.counts.get('same.webm') !== 2) {{
+  console.error([...sandbox.counts.entries()]);
+  process.exit(4);
+}}
+if (!sandbox.duplicateChip.includes('card-source-duplicate') || !sandbox.duplicateChip.includes('同原始檔 2 份')) {{
+  console.error(sandbox.duplicateChip);
+  process.exit(5);
+}}
+if (!sandbox.duplicateChip.includes('目前清單有 2 份會議紀錄使用同一個原始檔')) {{
+  console.error(sandbox.duplicateChip);
+  process.exit(6);
+}}
+if (sandbox.singleChip || sandbox.blankChip) {{
+  console.error({{ singleChip: sandbox.singleChip, blankChip: sandbox.blankChip }});
+  process.exit(7);
+}}
+console.log('source_duplicate_chip_ok');
 """
         try:
             result = subprocess.run(
@@ -8629,6 +8756,11 @@ warningOnlyPrecise = renderQualityWarning(
   [{{ index: 3 }}],
   []
 );
+segmentOnlyLocation = renderQualityWarning(
+  '逐字稿品質警示：問題位置：第 5 段：疑似連續重複轉錄。建議重跑上述分段或複核相關內容。',
+  [],
+  []
+);
 `, sandbox);
 if (!sandbox.result.includes('quality-warning-summary')) {{
   console.error(sandbox.result);
@@ -8682,9 +8814,17 @@ if (!sandbox.warningOnlyPrecise.includes('quality-warning-body') || !sandbox.war
   console.error(sandbox.warningOnlyPrecise);
   process.exit(17);
 }}
+if (!sandbox.segmentOnlyLocation.includes('focusQualitySegment(4)')) {{
+  console.error(sandbox.segmentOnlyLocation);
+  process.exit(18);
+}}
+if (!sandbox.segmentOnlyLocation.includes('定位第 5 段')) {{
+  console.error(sandbox.segmentOnlyLocation);
+  process.exit(19);
+}}
 if (sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
   console.error(sandbox.result);
-  process.exit(8);
+  process.exit(20);
 }}
 console.log('quality_warning_summary_ok');
 """
