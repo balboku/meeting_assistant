@@ -617,7 +617,7 @@
       max-width: min(100%, 620px);
     }
     .quality-review-segment {
-      display: inline-flex; align-items: center; gap: 6px;
+      display: inline-flex; align-items: flex-start; gap: 6px;
       min-height: 30px;
       padding: 5px 9px;
       border: 1px solid rgba(242, 213, 207, 0.36);
@@ -646,9 +646,15 @@
     .quality-review-segment-label { color: var(--yellow); font-weight: 700; white-space: nowrap; }
     .quality-review-segment-issue {
       color: var(--text-mid);
+      min-width: 0;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
       overflow: hidden;
       text-overflow: ellipsis;
-      white-space: nowrap;
+      white-space: normal;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
     }
     .quality-review-segment-rerun {
       min-height: 30px;
