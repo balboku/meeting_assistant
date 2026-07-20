@@ -37,6 +37,16 @@ Invoke-Check "Quality review backfill dry-run" {
     }
 }
 
+Invoke-Check "Markdown quality note backfill dry-run" {
+    $raw = & $Python scripts/backfill_markdown_quality_notes.py
+    $json = $raw -join "`n"
+    Write-Output $json
+    $payload = $json | ConvertFrom-Json
+    if ([int]$payload.would_update -gt 0) {
+        throw ("{0} Markdown meeting files still need quality note backfill; run scripts/backfill_markdown_quality_notes.py --apply first." -f $payload.would_update)
+    }
+}
+
 Invoke-Check "Dependency check" { & $Python -m pip check }
 
 if (Get-Command node -ErrorAction SilentlyContinue) {

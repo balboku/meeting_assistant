@@ -152,6 +152,13 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 .venv/bin/python scripts/backfill_quality_review_segments.py --apply
 ```
 
+若資料庫已能顯示問題分段，但實體 Markdown 檔案仍缺少「逐字稿品質複核提示」，可用另一個 dry-run 工具檢查並補回檔案提示；這會讓直接開啟或複製舊 Markdown 時也看得到第幾段需要複核：
+
+```bash
+.venv/bin/python scripts/backfill_markdown_quality_notes.py
+.venv/bin/python scripts/backfill_markdown_quality_notes.py --apply
+```
+
 離線會議紀錄品質基準不會呼叫 AI，也不會產生費用：
 
 ```bash

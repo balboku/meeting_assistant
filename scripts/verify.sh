@@ -27,6 +27,26 @@ if int(payload.get("would_update") or 0) > 0:
         ".venv/bin/python scripts/backfill_quality_review_segments.py --apply"
     )
 PY
+.venv/bin/python - <<'PY'
+import json
+import subprocess
+import sys
+
+result = subprocess.run(
+    [sys.executable, "scripts/backfill_markdown_quality_notes.py"],
+    check=True,
+    capture_output=True,
+    text=True,
+    encoding="utf-8",
+)
+print(result.stdout, end="")
+payload = json.loads(result.stdout)
+if int(payload.get("would_update") or 0) > 0:
+    raise SystemExit(
+        "舊 Markdown 仍缺少逐字稿品質複核提示；請先執行 "
+        ".venv/bin/python scripts/backfill_markdown_quality_notes.py --apply"
+    )
+PY
 .venv/bin/python -m pip check
 
 if command -v node >/dev/null 2>&1; then
