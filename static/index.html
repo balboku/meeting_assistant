@@ -3177,7 +3177,13 @@ function orderedReviewIssues(issues = []) {
     .map(issue => String(issue || '').trim())
     .filter(Boolean)
     .filter((issue, index, all) => all.indexOf(issue) === index);
-  if (ordered.some(isActionableRepeat)) {
+  const hasSpecificRepeatIssue = ordered.some(issue => {
+    const text = String(issue || '');
+    return isActionableRepeat(text)
+      || isTimeOnlyRepeat(text)
+      || (text.includes('疑似連續重複轉錄') && Boolean(timeRange(text)));
+  });
+  if (hasSpecificRepeatIssue) {
     ordered = ordered.filter(issue => !isGenericRepeat(issue));
   }
   const actionableRanges = new Set(
