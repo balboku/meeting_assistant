@@ -449,6 +449,8 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
             ".venv/bin/python scripts/audit_quality_consistency.py",
             "scripts/backfill_quality_review_segments.py",
             "scripts/backfill_markdown_quality_notes.py",
+            "scripts/prune_bad_segment_cache.py",
+            "would_delete",
             "would_update",
             ".venv/bin/python -m pip check",
             "node --check static/index.html",
@@ -468,6 +470,8 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
             "scripts/audit_quality_consistency.py",
             "scripts/backfill_quality_review_segments.py",
             "scripts/backfill_markdown_quality_notes.py",
+            "scripts/prune_bad_segment_cache.py",
+            "would_delete",
             "would_update",
             "-m pip check",
             "node --check $tempJs",
@@ -482,7 +486,10 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
         self.assertIn("python scripts/backfill_quality_review_segments.py", workflow)
         self.assertIn("Markdown quality note backfill dry-run", workflow)
         self.assertIn("python scripts/backfill_markdown_quality_notes.py", workflow)
+        self.assertIn("Unsafe segment cache prune dry-run", workflow)
+        self.assertIn("python scripts/prune_bad_segment_cache.py", workflow)
         self.assertIn("payload['would_update'] == 0", workflow)
+        self.assertIn("payload['would_delete'] == 0", workflow)
 
     def test_quality_benchmark_example_runs_without_ai_calls(self):
         result = subprocess.run(
@@ -1839,6 +1846,22 @@ class TaskRegressionTests(unittest.TestCase):
 
         self.assertTrue(any("短句重複轉錄幻覺" in issue for issue in issues))
 
+        user_reported_phrase = "\n".join(
+            f"[70:{index:02d}] **[發言者 A]**：因為我是結，所以我領車。"
+            for index in range(31)
+        )
+        user_reported_phrase += "\n[79:55] **[發言者 B]**：這段已接近段尾。"
+
+        user_phrase_issues = _segment_transcript_quality_issues(
+            user_reported_phrase,
+            segment_index=7,
+            total_segments=10,
+            segment_minutes=10,
+        )
+
+        self.assertTrue(any("短句重複轉錄幻覺" in issue for issue in user_phrase_issues))
+        self.assertTrue(any("因為我是結所以我領車" in issue for issue in user_phrase_issues))
+
     def test_segment_transcript_quality_rejects_structured_numeric_continuation(self):
         from backend.tasks import _segment_transcript_quality_issues
 
@@ -2035,6 +2058,93 @@ class TaskRegressionTests(unittest.TestCase):
 
             self.assertIsNone(_load_segment_transcript_cache(output_dir, "resume-job", 0, context))
             self.assertFalse(_segment_cache_file(output_dir, "resume-job", 0).exists())
+
+    def test_segment_transcript_cache_does_not_save_repeated_hallucination(self):
+        from backend.tasks import (
+            _save_segment_transcript_cache,
+            _segment_cache_context,
+            _segment_cache_file,
+            _shared_segment_cache_file,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "output"
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+
+            context = _segment_cache_context(
+                audio_path=audio_path,
+                model="gemini-test",
+                total_segments=2,
+                segment_minutes=10,
+            )
+            repeated_turns = "\n".join(
+                f"[00:{index:02d}] **[發言者 A]**：因為我是結，所以我領車。"
+                for index in range(31)
+            )
+
+            saved = _save_segment_transcript_cache(
+                output_dir=output_dir,
+                job_id="resume-job",
+                segment_index=0,
+                context=context,
+                transcript=repeated_turns,
+            )
+
+            self.assertIsNone(saved)
+            self.assertFalse(_segment_cache_file(output_dir, "resume-job", 0).exists())
+            shared_file = _shared_segment_cache_file(output_dir, context, 0)
+            self.assertIsNotNone(shared_file)
+            self.assertFalse(shared_file.exists())
+
+    def test_bad_segment_cache_prune_dry_run_then_apply(self):
+        import backend.tasks as tasks
+        from scripts.prune_bad_segment_cache import prune_bad_segment_cache
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "output"
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            context = tasks._segment_cache_context(
+                audio_path=audio_path,
+                model="gemini-test",
+                total_segments=2,
+                segment_minutes=10,
+            )
+            cache_file = tasks._segment_cache_file(output_dir, "resume-job", 0)
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            repeated_turns = "\n".join(
+                f"[00:{index:02d}] **[發言者 A]**：因為我是結，所以我領車。"
+                for index in range(31)
+            )
+            cache_file.write_text(
+                json.dumps(
+                    {
+                        **context,
+                        "segment_index": 0,
+                        "transcript": repeated_turns,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            dry_run = prune_bad_segment_cache(
+                cache_dir=output_dir / tasks.SEGMENT_CACHE_DIRNAME,
+                apply=False,
+            )
+            self.assertEqual(dry_run["would_delete"], 1)
+            self.assertTrue(cache_file.exists())
+            self.assertIn("疑似", "\n".join(dry_run["records"][0]["issues"]))
+
+            applied = prune_bad_segment_cache(
+                cache_dir=output_dir / tasks.SEGMENT_CACHE_DIRNAME,
+                apply=True,
+            )
+            self.assertEqual(applied["deleted"], 1)
+            self.assertFalse(cache_file.exists())
 
     def test_segmented_audio_task_reuses_cached_transcripts(self):
         import backend.tasks as tasks
@@ -4329,7 +4439,7 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertNotIn(secondary_issue, listed["quality_warning_text"])
         self.assertEqual(
             listed["quality_review_segment_details"][0]["issues"],
-            [secondary_issue, primary_issue],
+            [primary_issue, secondary_issue],
         )
 
     def test_list_and_search_include_review_segment_labels(self):
@@ -4622,7 +4732,6 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(
             listed["quality_review_segment_details"][0]["issues"],
             [
-                "分段疑似重複轉錄幻覺",
                 "疑似連續重複轉錄；同一句連續重複 4 次：因為我是結所以我領車；重複時間：70:01-70:04",
             ],
         )
@@ -4681,6 +4790,47 @@ class SearchRegressionTests(unittest.TestCase):
             listed["quality_review_segment_summary"],
             "第 11 段 100:00-110:00：疑似連續重複轉錄；同一句連續重複 4 次：台語這樣比較好這樣比較好；重複時間：103:04-103:07",
         )
+
+    def test_quality_review_issue_dedupes_generic_short_repeat_when_precise_repeat_exists(self):
+        from backend.database import apply_quality_preview_fields
+
+        quality_report = {
+            "review_segments": [
+                {
+                    "index": 7,
+                    "label": "第 8 段",
+                    "start_seconds": 4201,
+                    "end_seconds": 4801,
+                    "issues": [
+                        "分段疑似短句重複轉錄幻覺（「因為我是結所以我領車」連續重複 31 次）",
+                        "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:01-73:00",
+                    ],
+                },
+            ],
+            "segments": [
+                {"index": 7, "start_seconds": 4201, "end_seconds": 4801, "issues": []},
+            ],
+        }
+
+        record = apply_quality_preview_fields(
+            {
+                "title": "Generic Short Repeat",
+                "date": "2026/07/20",
+                "source_audio": "generic-short-repeat.webm",
+                "output_path": "generic-short-repeat.md",
+                "summary_preview": "summary",
+                "quality_report": quality_report,
+            },
+            quality_report=quality_report,
+        )
+
+        self.assertEqual(
+            record["quality_review_segment_details"][0]["issues"],
+            [
+                "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:01-73:00",
+            ],
+        )
+        self.assertNotIn("短句重複轉錄幻覺", record["quality_review_segment_summary"])
 
     def test_list_and_search_preserve_language_marker_in_markdown_repeat_preview(self):
         database, tmp_path = self._isolated_database()

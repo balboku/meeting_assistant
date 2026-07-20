@@ -2247,7 +2247,7 @@ def apply_quality_preview_fields(
                 for issue in unique_issues
                 if issue != repeated_hallucination_preview
             ]
-        return unique_issues
+        return _ordered_quality_review_issues(unique_issues)
 
     def add_review_segment_label(
         label: str,

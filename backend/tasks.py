@@ -105,7 +105,7 @@ SEGMENT_INCOMPLETE_MARKERS = (
 SEGMENT_REPETITION_MIN_LINES = 12
 SEGMENT_REPETITION_RUN_THRESHOLD = 8
 SEGMENT_REPETITION_RATIO_THRESHOLD = 0.5
-SEGMENT_SHORT_TURN_MAX_CHARS = 8
+SEGMENT_SHORT_TURN_MAX_CHARS = 12
 SEGMENT_SHORT_TURN_RUN_THRESHOLD = 20
 SEGMENT_LONG_TURN_CHARS = 1200
 SEGMENT_MAX_NORMALIZED_TURN_CHARS = 8000
@@ -1202,6 +1202,28 @@ def _segment_cache_matches(
     return all(payload.get(key) == value for key, value in expected.items())
 
 
+def _segment_cache_quality_issues(
+    transcript: str,
+    *,
+    segment_index: int,
+    context: dict[str, Any],
+) -> list[str]:
+    bounds = context.get("segment_bounds") or []
+    expected_start = None
+    expected_end = None
+    if segment_index < len(bounds) and len(bounds[segment_index]) >= 2:
+        expected_start = int(bounds[segment_index][0])
+        expected_end = int(bounds[segment_index][1])
+    return _segment_transcript_quality_issues(
+        transcript=transcript,
+        segment_index=segment_index,
+        total_segments=int(context.get("total_segments") or 1),
+        segment_minutes=int(context.get("segment_minutes") or SEGMENT_MINUTES),
+        expected_start_seconds=expected_start,
+        expected_end_seconds=expected_end,
+    )
+
+
 def _load_segment_transcript_cache(
     output_dir: Path,
     job_id: str,
@@ -1229,19 +1251,10 @@ def _load_segment_transcript_cache(
         transcript = payload.get("transcript")
         if not isinstance(transcript, str):
             continue
-        bounds = context.get("segment_bounds") or []
-        expected_start = None
-        expected_end = None
-        if segment_index < len(bounds) and len(bounds[segment_index]) >= 2:
-            expected_start = int(bounds[segment_index][0])
-            expected_end = int(bounds[segment_index][1])
-        issues = _segment_transcript_quality_issues(
+        issues = _segment_cache_quality_issues(
             transcript=transcript,
             segment_index=segment_index,
-            total_segments=int(context.get("total_segments") or 1),
-            segment_minutes=int(context.get("segment_minutes") or SEGMENT_MINUTES),
-            expected_start_seconds=expected_start,
-            expected_end_seconds=expected_end,
+            context=context,
         )
         if issues:
             logger.warning(
@@ -1267,7 +1280,21 @@ def _save_segment_transcript_cache(
     segment_index: int,
     context: dict[str, Any],
     transcript: str,
-) -> Path:
+) -> Optional[Path]:
+    issues = _segment_cache_quality_issues(
+        transcript=transcript,
+        segment_index=segment_index,
+        context=context,
+    )
+    if issues:
+        logger.warning(
+            "[%s] ⚠️  第 %s 段轉錄未寫入快取：%s",
+            job_id,
+            segment_index + 1,
+            "；".join(issues),
+        )
+        return None
+
     payload = {
         **context,
         "segment_index": segment_index,

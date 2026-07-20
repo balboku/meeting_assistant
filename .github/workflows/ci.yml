@@ -42,6 +42,11 @@ jobs:
           python scripts/backfill_markdown_quality_notes.py > markdown-backfill.json
           python -c "import json; payload = json.load(open('markdown-backfill.json', encoding='utf-8')); assert payload['would_update'] == 0, payload"
 
+      - name: Unsafe segment cache prune dry-run
+        run: |
+          python scripts/prune_bad_segment_cache.py > segment-cache-prune.json
+          python -c "import json; payload = json.load(open('segment-cache-prune.json', encoding='utf-8')); assert payload['would_delete'] == 0, payload"
+
       - name: Unit tests
         run: python -m unittest discover -v
 

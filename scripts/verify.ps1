@@ -47,6 +47,16 @@ Invoke-Check "Markdown quality note backfill dry-run" {
     }
 }
 
+Invoke-Check "Unsafe segment cache prune dry-run" {
+    $raw = & $Python scripts/prune_bad_segment_cache.py
+    $json = $raw -join "`n"
+    Write-Output $json
+    $payload = $json | ConvertFrom-Json
+    if ([int]$payload.would_delete -gt 0) {
+        throw ("{0} unsafe segment cache files remain; run scripts/prune_bad_segment_cache.py --apply first." -f $payload.would_delete)
+    }
+}
+
 Invoke-Check "Dependency check" { & $Python -m pip check }
 
 if (Get-Command node -ErrorAction SilentlyContinue) {
