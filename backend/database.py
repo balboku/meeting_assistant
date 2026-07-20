@@ -127,6 +127,26 @@ def _repeated_phrase_dedupe_key(value: str) -> str:
     return re.sub(r"^(?:台語|臺語|閩南語|英語|英文|日語|日文|中文|國語|普通話)", "", cleaned)
 
 
+_REPEATED_PHRASE_TERMINATOR_PATTERN = (
+    r"(?="
+    r"(?:[；;]\s*(?:重複時間|重複時段|問題時間|異常時間|疑似分段|第\s*\d+\s*段|Segment\b))"
+    r"|[）)\]】]"
+    r"|(?:[，,。．.]\s*(?:建議|需|請|可|應|若|如果))"
+    r"|$"
+    r")"
+)
+
+
+def _extract_repeated_phrase_clause(value: str) -> Optional[re.Match[str]]:
+    return re.search(
+        r"同一句連續重複\s*(?P<count>\d+)\s*次[：:]\s*"
+        r"(?P<phrase>[^\r\n]{1,120}?)"
+        + _REPEATED_PHRASE_TERMINATOR_PATTERN,
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+
+
 def _normalize_quality_review_issue_text(issue: str) -> str:
     cleaned = re.sub(r"\s+", " ", str(issue or "").strip())
     if not cleaned:
@@ -819,14 +839,11 @@ def _transcript_segment_spans(transcript: str) -> list[dict[str, int]]:
 
 
 def _repeated_phrase_from_warning(warning: str) -> Optional[dict[str, Any]]:
-    match = re.search(
-        r"同一句連續重複\s*(?P<count>\d+)\s*次[：:]\s*"
-        r"(?P<phrase>[^；;，,。)\]）]{4,80})",
-        str(warning or ""),
-    )
+    match = _extract_repeated_phrase_clause(warning)
     if not match:
         return None
     phrase = str(match.group("phrase") or "").strip()
+    phrase = phrase.strip("：:，,。．.、；;！!？?()（）[]【】「」『』")
     normalized = _normalize_turn_text(phrase)
     if len(normalized) < 4:
         return None

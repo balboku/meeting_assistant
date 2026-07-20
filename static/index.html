@@ -4255,11 +4255,13 @@ function normalizeTranscriptLookupText(value = '') {
 }
 
 function repeatedPhraseFromWarning(warning = '') {
-  const match = String(warning || '').match(/同一句連續重複\s*(\d+)\s*次[：:]\s*([^；;，,。)\]）]+)/);
+  const match = String(warning || '').match(
+    /同一句連續重複\s*(\d+)\s*次[：:]\s*([\s\S]{1,120}?)(?=(?:[；;]\s*(?:重複時間|重複時段|問題時間|異常時間|疑似分段|第\s*\d+\s*段|Segment\b))|[）)\]】]|(?:[，,。．.]\s*(?:建議|需|請|可|應|若|如果))|$)/i
+  );
   if (!match) return null;
   const phrase = String(match[2] || '')
     .trim()
-    .replace(/^[：:，,。；;、]+|[：:，,。；;、]+$/g, '');
+    .replace(/^[：:，,。；;、]+|[：:，,。．.；;、！？!?()（）\[\]【】「」『』]+$/g, '');
   const normalized = normalizeTranscriptLookupText(phrase);
   if (normalized.length < 4) return null;
   return {

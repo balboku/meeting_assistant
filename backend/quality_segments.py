@@ -28,6 +28,17 @@ _WARNING_TIME_RANGE_PATTERN = re.compile(
     r"\s*(?:-|–|—|~|至|到)\s*"
     r"(?P<end_minutes>\d{1,3}):(?P<end_seconds>[0-5]\d)"
 )
+_REPEATED_PHRASE_PATTERN = re.compile(
+    r"同一句連續重複\s*\d+\s*次[：:]\s*"
+    r"(?P<phrase>[^\r\n]{1,120}?)"
+    r"(?="
+    r"(?:[；;]\s*(?:重複時間|重複時段|問題時間|異常時間|疑似分段|第\s*\d+\s*段|Segment\b))"
+    r"|[）)\]】]"
+    r"|(?:[，,。．.]\s*(?:建議|需|請|可|應|若|如果))"
+    r"|$"
+    r")",
+    flags=re.IGNORECASE,
+)
 
 
 def _clock_seconds(minutes: str, seconds: str) -> int:
@@ -57,12 +68,10 @@ def _warning_issue_text(text: str) -> str:
         repeat_match = re.search(r"同一句連續重複\s*\d+\s*次", cleaned)
         if repeat_match:
             repeat_text = repeat_match.group(0)
-            phrase_match = re.search(
-                r"同一句連續重複\s*\d+\s*次[：:]\s*(?P<phrase>[^；;，,。)\]）]{1,60})",
-                cleaned,
-            )
+            phrase_match = _REPEATED_PHRASE_PATTERN.search(cleaned)
             if phrase_match:
                 phrase = phrase_match.group("phrase").strip()
+                phrase = phrase.strip("：:，,。．.、；;！!？?()（）[]【】「」『』")
                 if phrase:
                     repeat_text = f"{repeat_text}：{phrase}"
             parts.append(repeat_text)

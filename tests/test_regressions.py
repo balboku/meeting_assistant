@@ -3592,12 +3592,12 @@ class SearchRegressionTests(unittest.TestCase):
         )
         phrase_text = (
             "逐字稿品質警示：疑似連續重複轉錄"
-            "（同一句連續重複 31 次：因為我是結所以我領車；"
+            "（同一句連續重複 31 次：因為我是結，所以我領車；"
             "疑似分段：第 4 段｜30:00-40:00；重複時間：31:00-31:03）"
         )
         self.assertEqual(
             review_segment_details_from_text(phrase_text)[0]["issues"],
-            ["疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：31:00-31:03"],
+            ["疑似連續重複轉錄；同一句連續重複 31 次：因為我是結，所以我領車；重複時間：31:00-31:03"],
         )
         problem_location_text = (
             "逐字稿品質警示：疑似連續重複轉錄；"
@@ -4892,7 +4892,7 @@ class SearchRegressionTests(unittest.TestCase):
                 "quality_report": {
                     "warnings": [
                         "逐字稿品質警示：疑似連續重複轉錄"
-                        "（同一句連續重複 31 次：因為我是結所以我領車），"
+                        "（同一句連續重複 31 次：因為我是結，所以我領車），"
                         "建議重跑或複核相關分段。"
                     ],
                 },
@@ -4900,7 +4900,7 @@ class SearchRegressionTests(unittest.TestCase):
             quality_report={
                 "warnings": [
                     "逐字稿品質警示：疑似連續重複轉錄"
-                    "（同一句連續重複 31 次：因為我是結所以我領車），"
+                    "（同一句連續重複 31 次：因為我是結，所以我領車），"
                     "建議重跑或複核相關分段。"
                 ],
             },
@@ -9854,7 +9854,7 @@ const repeatedLines = Array.from({{ length: 31 }}, (_, index) =>
   '[70:' + String(index).padStart(2, '0') + '] **[發言者 A]**：因為我是結，所以我領車。'
 ).join('\\\\n');
 const inferredMeeting = {{
-  quality_warning_text: '逐字稿品質警示：疑似連續重複轉錄（同一句連續重複 31 次：因為我是結所以我領車），建議重跑或複核相關分段。',
+  quality_warning_text: '逐字稿品質警示：疑似連續重複轉錄（同一句連續重複 31 次：因為我是結，所以我領車），建議重跑或複核相關分段。',
   full_content:
     '## 一、討論摘要 (Discussion Summary)\\\\n摘要\\\\n' +
     '## 二、最終決議 (Final Decisions)\\\\n決議\\\\n' +
@@ -9899,6 +9899,10 @@ if (!sandbox.inferred.warnings[0].includes('問題位置：第 7 段 59:59-70:04
 if (!sandbox.inferred.warnings[0].includes('重複時間：70:00-70:30')) {{
   console.error(JSON.stringify(sandbox.inferred));
   process.exit(11);
+}}
+if (!sandbox.inferred.warnings[0].includes('因為我是結，所以我領車')) {{
+  console.error(JSON.stringify(sandbox.inferred));
+  process.exit(12);
 }}
 console.log('fallback_location_warning_ok');
 """
