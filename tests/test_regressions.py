@@ -2488,6 +2488,7 @@ class MetricsRegressionTests(unittest.TestCase):
     def test_metrics_endpoint_reports_storage_usage(self):
         database = self._isolated_database()
         import backend.main as main
+        import hashlib
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -2594,9 +2595,11 @@ class MetricsRegressionTests(unittest.TestCase):
         )
         self.assertEqual(storage["source_media_largest_files"][0]["bytes"], len(b"video-bb"))
         self.assertEqual(storage["source_media_largest_files"][0]["source_media_type"], "video")
+        self.assertEqual(storage["source_media_largest_files"][0]["source_media_sha256"], hashlib.sha256(b"video-bb").hexdigest())
         self.assertEqual(storage["source_media_largest_files"][0]["linked_meeting_id"], video_meeting_id)
         self.assertEqual(storage["source_media_largest_files"][0]["linked_meeting_title"], "Video B")
         self.assertEqual(storage["source_media_largest_files"][1]["source_media_type"], "audio")
+        self.assertEqual(storage["source_media_largest_files"][1]["source_media_sha256"], hashlib.sha256(b"audio-a").hexdigest())
         self.assertEqual(storage["source_media_largest_files"][1]["linked_meeting_id"], audio_meeting_id)
         self.assertIsNone(storage["source_media_largest_files"][2]["linked_meeting_id"])
         self.assertEqual(storage["meeting_markdown_files"], 2)
@@ -2786,17 +2789,29 @@ class MetricsRegressionTests(unittest.TestCase):
                  mock.patch.object(main, "OUTPUT_DIR", output_dir), \
                  mock.patch.object(main, "BACKUP_DIR", root / "backups"):
                 response = asgi_request(main.app, "GET", "/source-media/inventory?limit=10")
+                metrics_response = asgi_request(main.app, "GET", "/metrics")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
+        self.assertEqual(metrics_response.status_code, 200)
+        metrics_storage = metrics_response.json()["storage"]
         digest = hashlib.sha256(b"same-content").hexdigest()
         by_name = {item["name"]: item for item in payload["files"]}
+        metrics_by_name = {item["name"]: item for item in metrics_storage["source_media_largest_files"]}
         self.assertEqual(by_name["linked.mp3"]["source_media_sha256"], digest)
         self.assertEqual(by_name["orphan-copy.mp3"]["source_media_sha256"], digest)
+        self.assertEqual(metrics_by_name["linked.mp3"]["source_media_sha256"], digest)
+        self.assertEqual(metrics_by_name["orphan-copy.mp3"]["source_media_sha256"], digest)
         self.assertEqual(by_name["linked.mp3"]["duplicate_source_media_count"], 2)
         self.assertEqual(by_name["orphan-copy.mp3"]["duplicate_source_media_count"], 2)
+        self.assertEqual(metrics_by_name["linked.mp3"]["duplicate_source_media_count"], 2)
+        self.assertEqual(metrics_by_name["orphan-copy.mp3"]["duplicate_source_media_count"], 2)
         self.assertEqual(
             by_name["linked.mp3"]["duplicate_source_media_names"],
+            ["linked.mp3", "orphan-copy.mp3"],
+        )
+        self.assertEqual(
+            metrics_by_name["linked.mp3"]["duplicate_source_media_names"],
             ["linked.mp3", "orphan-copy.mp3"],
         )
         self.assertEqual(
@@ -4980,6 +4995,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("storage.source_media_archived_bytes", html)
         self.assertIn("storage.source_media_largest_files", html)
         self.assertIn("function sourceStorageTitle", html)
+        self.assertIn("const hashText = sourceHash ? ` · SHA ${sourceHash.slice(0, 12)}` : '';", html)
+        self.assertIn("const duplicateText = duplicateCount > 1 ? ` · 內容重複 ${duplicateCount} 個` : '';", html)
         self.assertIn("function sourceArchiveRetentionLabel", html)
         self.assertIn("runtimeConfig.source_media_archive_retention_days", html)
         self.assertIn("已移除備份保留", html)

@@ -456,6 +456,8 @@ def _directory_file_stats(
     active_count = 0
     active_bytes = 0
     files: list[StorageFileMetric] = []
+    source_media_paths: dict[str, Path] = {}
+    source_media_names_by_size: dict[int, list[str]] = {}
     try:
         entries = list(path.iterdir())
     except OSError:
@@ -488,6 +490,9 @@ def _directory_file_stats(
             unlinked_count += 1
             unlinked_bytes += int(stat.st_size)
         if largest_limit > 0:
+            if source_refs is not None:
+                source_media_paths[entry.name] = entry
+                source_media_names_by_size.setdefault(int(stat.st_size), []).append(entry.name)
             files.append(
                 StorageFileMetric(
                     name=entry.name,
@@ -502,6 +507,12 @@ def _directory_file_stats(
                 )
             )
     largest_files = sorted(files, key=lambda item: item.bytes, reverse=True)[:largest_limit]
+    if source_refs is not None and largest_files:
+        _annotate_source_media_metric_hashes(
+            largest_files,
+            source_media_paths,
+            source_media_names_by_size,
+        )
     return count, total_bytes, largest_files, unlinked_count, unlinked_bytes, active_count, active_bytes
 
 
@@ -531,6 +542,46 @@ def _source_media_sha256(entry: Path) -> Optional[str]:
     if len(SOURCE_MEDIA_SHA256_CACHE) > SOURCE_MEDIA_SHA256_CACHE_MAX:
         SOURCE_MEDIA_SHA256_CACHE.pop(next(iter(SOURCE_MEDIA_SHA256_CACHE)))
     return digest
+
+
+def _annotate_source_media_metric_hashes(
+    files: list[StorageFileMetric],
+    paths_by_name: dict[str, Path],
+    names_by_size: dict[int, list[str]],
+) -> None:
+    """Add SHA and duplicate groups to the small metrics largest-file sample."""
+    target_digests: set[str] = set()
+    digest_names: dict[str, list[str]] = {}
+    for item in files:
+        entry = paths_by_name.get(item.name)
+        if entry is None:
+            continue
+        digest = _source_media_sha256(entry)
+        if not digest:
+            continue
+        item.source_media_sha256 = digest
+        target_digests.add(digest)
+
+    for item in files:
+        digest = item.source_media_sha256
+        if not digest:
+            continue
+        for name in names_by_size.get(int(item.bytes), []):
+            entry = paths_by_name.get(name)
+            if entry is None:
+                continue
+            candidate_digest = _source_media_sha256(entry)
+            if candidate_digest == digest and name not in digest_names.setdefault(digest, []):
+                digest_names[digest].append(name)
+
+    for item in files:
+        digest = item.source_media_sha256
+        if not digest or digest not in target_digests:
+            continue
+        duplicate_names = sorted(digest_names.get(digest) or [])
+        if len(duplicate_names) > 1:
+            item.duplicate_source_media_count = len(duplicate_names)
+            item.duplicate_source_media_names = duplicate_names
 
 
 def _active_source_audio_refs_by_name(source_dir: Optional[Path] = None) -> dict[str, dict]:
