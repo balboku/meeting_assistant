@@ -3533,6 +3533,48 @@ class SearchRegressionTests(unittest.TestCase):
             "第 11 段 100:00-110:00：疑似連續重複轉錄；同一句連續重複 4 次：台語這樣比較好這樣比較好；重複時間：103:04-103:07",
         )
 
+    def test_list_and_search_preserve_language_marker_in_markdown_repeat_preview(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "language-marker-markdown-repeat.md"
+        output_path.write_text(
+            """
+# Meeting Notes
+
+## 完整逐字稿 (Verbatim Transcript)
+### 【第 11 段｜100:00 – 110:00】
+
+[103:04] **[發言者 A]**：[台語] 這樣比較好，這樣比較好
+[103:05] **[發言者 A]**：[台語] 這樣比較好，這樣比較好
+[103:06] **[發言者 A]**：[台語] 這樣比較好，這樣比較好
+[103:07] **[發言者 A]**：[台語] 這樣比較好，這樣比較好
+""".strip(),
+            encoding="utf-8",
+        )
+        quality_report = {
+            "score": 80,
+            "label": "需複核",
+            "warnings": ["逐字稿品質警示：疑似連續重複轉錄"],
+            "segments": [
+                {"index": 10, "start_seconds": 6000, "end_seconds": 6600, "issues": []},
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Language Marker Markdown Repeat",
+            date="2026/07/12",
+            source_audio="language-marker-markdown-repeat.webm",
+            output_path=str(output_path),
+            summary="language-marker-markdown-repeat-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Language Marker Markdown Repeat")[0]
+
+        self.assertIn("台語這樣比較好這樣比較好", listed["quality_review_segment_summary"])
+        self.assertIn("台語這樣比較好這樣比較好", listed["quality_warning_preview"])
+        self.assertEqual(searched["quality_warning_preview"], listed["quality_warning_preview"])
+        self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
+
     def test_needs_review_filter_includes_review_segments_without_warnings(self):
         database, tmp_path = self._isolated_database()
         output_path = tmp_path / "review-segment-only.md"
@@ -6855,6 +6897,58 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             "第 2 段 10:00-20:00、第 4 段 30:00-40:00：疑似連續重複轉錄；重複時間：10:00-10:03",
         )
 
+    def test_meeting_detail_merges_legacy_warning_fields_from_markdown(self):
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "legacy-omission-warning.md"
+            output_path.write_text(
+                "## 一、討論摘要 (Discussion Summary)\n"
+                "這是一段沒有 D 編號的摘要。\n"
+                "## 二、最終決議 (Final Decisions)\n"
+                "| 決議 |\n|---|\n| 先執行改善 |\n"
+                "## 三、待辦事項 (Action Items)\n"
+                "| 任務描述 | 負責人 |\n|---|---|\n| 整理追蹤表 | 發言者 A |\n"
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "為節省篇幅，後續逐字稿省略。\n",
+                encoding="utf-8",
+            )
+            record = {
+                "id": 18,
+                "title": "舊檔警示合併測試",
+                "date": "2026/07/08",
+                "source_audio": "legacy-warning.webm",
+                "output_path": str(output_path),
+                "summary": "摘要",
+                "job_id": None,
+                "quality_score": None,
+                "quality_label": None,
+                "created_at": "2026-07-08 10:00:00",
+                "quality_report": None,
+                "full_content": (
+                    "## 一、討論摘要 (Discussion Summary)\n"
+                    "這是一段沒有 D 編號的摘要。\n"
+                    "## 二、最終決議 (Final Decisions)\n"
+                    "| 決議 |\n|---|\n| 先執行改善 |\n"
+                    "## 三、待辦事項 (Action Items)\n"
+                    "| 任務描述 | 負責人 |\n|---|---|\n| 整理追蹤表 | 發言者 A |\n"
+                    "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                    "[00:00] **[發言者 A]**：逐字稿本身沒有重複。\n"
+                ),
+            }
+            with mock.patch.object(main, "get_meeting", return_value=record):
+                response = asgi_request(main.app, "GET", "/meetings/18")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("摘要品質警示：討論摘要未使用 D 編號", payload["quality_warning_text"])
+        self.assertIn("逐字稿品質警示：舊紀錄逐字稿疑似省略或自動過濾內容", payload["quality_warning_text"])
+        self.assertIn(
+            "逐字稿品質警示：舊紀錄逐字稿疑似省略或自動過濾內容",
+            payload["quality_report"]["warnings"],
+        )
+        self.assertGreaterEqual(payload["quality_warning_count"], 4)
+
     def test_meeting_detail_keeps_warning_segments_when_metadata_is_unavailable(self):
         import backend.main as main
 
@@ -7638,12 +7732,17 @@ function grab(name) {{
   return script.slice(start, next < 0 ? script.length : next);
 }}
 const code = [
+  grab('clockText'),
+  grab('reviewIssuePriority'),
+  grab('preferredReviewIssue'),
+  grab('reviewSegmentIssueSummary'),
   grab('isRecordingQualityWarning'),
   grab('isTranscriptQualityWarning'),
   grab('recordQualityWarningTypes'),
   grab('finiteQualityScore'),
   grab('effectiveQualityStatus'),
   grab('isReviewLocationWarning'),
+  grab('synthesizedReviewLocationWarning'),
   grab('mergeQualityReportWarnings'),
   grab('fallbackQualityReportFromMeeting'),
   grab('detailQualityReport')
@@ -7657,7 +7756,8 @@ const legacy = detailQualityReport({{
     {{ index: 7, label: '第 8 段', start_seconds: 4200, end_seconds: 4800, issues: ['疑似連續重複轉錄'] }}
   ]
 }});
-if (!legacy || legacy.warnings.length !== 2) process.exit(4);
+if (!legacy || legacy.warnings.length !== 3) process.exit(4);
+if (!legacy.warnings[0].includes('問題位置：第 8 段 70:00-80:00')) process.exit(14);
 if (legacy.review_segments[0].index !== 7) process.exit(5);
 if (legacy.score !== 82 || legacy.label !== '需複核逐字稿') process.exit(6);
 const merged = detailQualityReport({{
@@ -7665,7 +7765,8 @@ const merged = detailQualityReport({{
   quality_warning_text: '摘要品質警示：需補 D 編號',
   quality_review_segment_details: [{{ index: 2, label: '第 3 段', issues: ['需複核'] }}]
 }});
-if (merged.score !== 82 || merged.label !== '需複核逐字稿' || merged.warnings[0] !== '摘要品質警示：需補 D 編號') process.exit(7);
+if (merged.score !== 82 || merged.label !== '需複核逐字稿' || !merged.warnings[0].includes('問題位置：第 3 段')) process.exit(7);
+if (merged.warnings[1] !== '摘要品質警示：需補 D 編號') process.exit(15);
 if (merged.review_segments[0].label !== '第 3 段') process.exit(8);
 const oldLocated = detailQualityReport({{
   quality_report: {{
@@ -8313,6 +8414,75 @@ if (sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
   process.exit(8);
 }}
 console.log('quality_warning_summary_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_fallback_quality_report_synthesizes_review_location_warning(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function fallbackQualityReportFromMeeting'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [
+  'const REVIEW_SEGMENT_SECONDS = 600;',
+  grab('isTranscriptQualityWarning'),
+  grab('isRecordingQualityWarning'),
+  grab('recordQualityWarningTypes'),
+  grab('finiteQualityScore'),
+  grab('effectiveQualityStatus'),
+  grab('clockText'),
+  grab('reviewIssuePriority'),
+  grab('preferredReviewIssue'),
+  grab('reviewSegmentIssueSummary'),
+  grab('isReviewLocationWarning'),
+  grab('synthesizedReviewLocationWarning'),
+  grab('fallbackQualityReportFromMeeting')
+].join('\\n');
+const sandbox = {{}};
+vm.runInNewContext(code + `
+const meeting = {{
+  quality_warning_text: '逐字稿品質警示：疑似連續重複轉錄（同一句連續重複 31 次：因為我是結所以我領車），建議重跑或複核相關分段。',
+  quality_review_segment_details: [
+    {{ index: 7, label: '第 8 段', start_seconds: 4201, end_seconds: 4801, issues: ['疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:01-73:00'] }}
+  ]
+}};
+report = fallbackQualityReportFromMeeting(meeting);
+`, sandbox);
+if (!sandbox.report?.warnings?.[0]?.includes('問題位置：第 8 段 70:01-80:01：疑似連續重複轉錄')) {{
+  console.error(JSON.stringify(sandbox.report));
+  process.exit(4);
+}}
+if (!sandbox.report.warnings[0].includes('重複時間：70:01-73:00')) {{
+  console.error(JSON.stringify(sandbox.report));
+  process.exit(5);
+}}
+if (!sandbox.report.warnings[1].includes('建議重跑或複核相關分段')) {{
+  console.error(JSON.stringify(sandbox.report));
+  process.exit(6);
+}}
+console.log('fallback_location_warning_ok');
 """
         try:
             result = subprocess.run(

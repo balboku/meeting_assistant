@@ -2363,6 +2363,76 @@ def _detail_summary_quality_issues(full_content: str) -> list[str]:
     return issues
 
 
+def _detail_quality_warning_lines(text: object) -> list[str]:
+    return [
+        line.strip()
+        for line in str(text or "").splitlines()
+        if line.strip()
+    ]
+
+
+def _detail_is_transcript_quality_warning(warning: str) -> bool:
+    text = str(warning or "").strip()
+    if not text:
+        return False
+    return bool(re.search(r"^(?:逐字稿品質警示|需複核分段)[：:]", text)) or "曾觸發轉錄補救" in text
+
+
+def _detail_has_review_location_warning(warning: str) -> bool:
+    text = str(warning or "")
+    return bool(re.search(r"逐字稿品質警示[：:]\s*(?:問題位置|需複核分段)[：:]", text))
+
+
+def _merge_detail_quality_warnings(primary_warnings: list[object], fallback_warnings: list[str]) -> list[str]:
+    primary = [
+        str(warning).strip()
+        for warning in primary_warnings
+        if str(warning or "").strip()
+    ]
+    fallback = [
+        str(warning).strip()
+        for warning in fallback_warnings
+        if str(warning or "").strip()
+    ]
+    if not primary:
+        return list(dict.fromkeys(fallback))
+
+    primary = list(dict.fromkeys(primary))
+    has_located_transcript = any(
+        _detail_is_transcript_quality_warning(warning)
+        and _detail_has_review_location_warning(warning)
+        for warning in primary
+    )
+    has_transcript = any(_detail_is_transcript_quality_warning(warning) for warning in primary)
+    located_fallbacks: list[str] = []
+    trailing_fallbacks: list[str] = []
+
+    for warning in fallback:
+        if warning in primary or warning in located_fallbacks or warning in trailing_fallbacks:
+            continue
+        if _detail_is_transcript_quality_warning(warning):
+            if _detail_has_review_location_warning(warning) and not has_located_transcript:
+                located_fallbacks.append(warning)
+                has_located_transcript = True
+                has_transcript = True
+            elif not has_transcript:
+                trailing_fallbacks.append(warning)
+                has_transcript = True
+            continue
+        trailing_fallbacks.append(warning)
+
+    if located_fallbacks:
+        primary = [
+            warning
+            for warning in primary
+            if not (
+                _detail_is_transcript_quality_warning(warning)
+                and not _detail_has_review_location_warning(warning)
+            )
+        ]
+    return list(dict.fromkeys([*located_fallbacks, *primary, *trailing_fallbacks]))
+
+
 # =============================================================================
 # 會議記錄查詢端點
 # =============================================================================
@@ -2427,6 +2497,17 @@ async def get_meeting_detail(meeting_id: int):
     full_content = record.get("full_content") or ""
     transcript = _extract_transcript_section_body(full_content) or ""
     quality_report = dict(record.get("quality_report") or {})
+    base_quality_fields = apply_quality_preview_fields(
+        {
+            **record,
+            "summary_preview": record.get("summary", "")[:200],
+            "quality_report": quality_report or record.get("quality_report"),
+        },
+        quality_report=quality_report if quality_report else None,
+    )
+    base_warning_lines = _detail_quality_warning_lines(
+        base_quality_fields.get("quality_warning_text")
+    )
     if not quality_report.get("segments"):
         recovered_segments = _transcript_segment_metadata(transcript)
         if recovered_segments:
@@ -2501,6 +2582,20 @@ async def get_meeting_detail(meeting_id: int):
             "timestamp_count": quality_report.get("timestamp_count") or len(re.findall(r"\[\d{1,3}:[0-5]\d\]", transcript)),
             "speaker_labels": quality_report.get("speaker_labels") or [],
         })
+
+    if base_warning_lines:
+        merged_warnings = _merge_detail_quality_warnings(
+            list(quality_report.get("warnings") or []),
+            base_warning_lines,
+        )
+        if merged_warnings:
+            quality_report.update({
+                "score": quality_report.get("score"),
+                "label": quality_report.get("label") or "需複核",
+                "warnings": merged_warnings,
+                "timestamp_count": quality_report.get("timestamp_count") or len(re.findall(r"\[\d{1,3}:[0-5]\d\]", transcript)),
+                "speaker_labels": quality_report.get("speaker_labels") or [],
+            })
 
     if quality_report:
         _refresh_quality_report_review_segments(quality_report)

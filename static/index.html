@@ -3981,6 +3981,13 @@ function isReviewLocationWarning(value = '') {
   return text.includes('問題位置：') || text.includes('需複核分段：');
 }
 
+function synthesizedReviewLocationWarning(reviewSegments = []) {
+  const reviewSummary = reviewSegmentIssueSummary(reviewSegments);
+  return reviewSummary
+    ? `逐字稿品質警示：問題位置：${reviewSummary}。建議重跑上述分段或複核相關內容。`
+    : '';
+}
+
 function mergeQualityReportWarnings(reportWarnings = [], fallbackWarnings = []) {
   const primaryWarnings = (Array.isArray(reportWarnings) ? reportWarnings : [])
     .map(warning => String(warning || '').trim())
@@ -3996,13 +4003,17 @@ function mergeQualityReportWarnings(reportWarnings = [], fallbackWarnings = []) 
 
 function fallbackQualityReportFromMeeting(meeting) {
   const warningText = String(meeting?.quality_warning_text || meeting?.quality_warning_preview || '').trim();
-  const warnings = warningText
+  let warnings = warningText
     .split(/\r?\n/)
     .map(item => item.trim())
     .filter(Boolean);
   const reviewSegments = Array.isArray(meeting?.quality_review_segment_details)
     ? meeting.quality_review_segment_details
     : [];
+  const locationWarning = synthesizedReviewLocationWarning(reviewSegments);
+  if (locationWarning && !warnings.some(isReviewLocationWarning)) {
+    warnings = [locationWarning, ...warnings];
+  }
   const hasQualityFields = warnings.length
     || reviewSegments.length
     || Number(meeting?.quality_warning_count || 0) > 0

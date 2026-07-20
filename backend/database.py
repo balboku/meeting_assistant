@@ -103,6 +103,15 @@ def _quality_review_issue_priority(issue: str) -> tuple[int, int]:
 def _normalize_repeated_phrase_preview(value: str) -> str:
     cleaned = re.sub(r"\s+", " ", str(value or "").strip())
     cleaned = re.sub(
+        r"^(?:\[(台語|臺語|閩南語|英語|英文|日語|日文|中文|國語|普通話)\]"
+        r"|【(台語|臺語|閩南語|英語|英文|日語|日文|中文|國語|普通話)】"
+        r"|（(台語|臺語|閩南語|英語|英文|日語|日文|中文|國語|普通話)）"
+        r"|\((台語|臺語|閩南語|英語|英文|日語|日文|中文|國語|普通話)\))\s*",
+        lambda match: next(group for group in match.groups() if group),
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
         r"^(?:\[[^\]]{1,12}\]|【[^】]{1,12}】|（[^）]{1,12}）|\([^)]{1,12}\))\s*",
         "",
         cleaned,
@@ -2066,7 +2075,9 @@ def apply_quality_preview_fields(
         record["quality_review_segment_details"]
     )
     review_summary = str(record.get("quality_review_segment_summary") or "").strip()
-    if _should_promote_review_summary_to_preview(warning_preview, review_summary):
+    if review_summary and _has_standard_review_location_warning(str(warning_preview or "")):
+        warning_preview = f"逐字稿品質警示：問題位置：{review_summary}"
+    elif _should_promote_review_summary_to_preview(warning_preview, review_summary):
         warning_preview = f"逐字稿品質警示：問題位置：{review_summary}"
     record["quality_warning_preview"] = warning_preview
     warning_text_items = [
