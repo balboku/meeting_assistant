@@ -3990,7 +3990,10 @@ class SearchRegressionTests(unittest.TestCase):
         listed = database.list_meetings()[0]
 
         self.assertEqual(listed["id"], mixed_id)
-        self.assertEqual(listed["quality_warning_preview"], "偵測到可能的爆音；原始媒體檔已保留。")
+        self.assertEqual(
+            listed["quality_warning_preview"],
+            "逐字稿品質警示：問題位置：第 2 段 10:00-10:03：疑似連續重複轉錄；重複時間：10:00-10:03",
+        )
         self.assertIn("摘要品質警示：討論摘要未使用 D 編號", listed["quality_warning_text"])
         self.assertIn("逐字稿品質警示：疑似連續重複轉錄", listed["quality_warning_text"])
         self.assertEqual([row["id"] for row in database.list_meetings(quality_type="recording")], [mixed_id])
@@ -4018,6 +4021,43 @@ class SearchRegressionTests(unittest.TestCase):
         )
         self.assertEqual(search_response.status_code, 200)
         self.assertEqual([row["id"] for row in search_response.json()], [mixed_id])
+
+    def test_recording_warning_preview_promotes_actionable_review_segments(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "recording-and-segment-warning.md"
+        output_path.write_text("recording-and-segment-warning", encoding="utf-8")
+        segment_issue = "曾觸發轉錄補救：非最後分段含自動過濾/截斷提示"
+        meeting_id = database.save_meeting(
+            title="Recording Plus Segment Warning",
+            date="2026/07/20",
+            source_audio="recording-plus-segment.webm",
+            output_path=str(output_path),
+            summary="recording-and-segment-warning",
+            quality_report={
+                "warnings": ["偵測到可能的爆音；原始媒體檔已保留。"],
+                "segments": [
+                    {
+                        "index": 1,
+                        "start_seconds": 600,
+                        "end_seconds": 1200,
+                        "status": "recovered",
+                        "issues": [segment_issue],
+                    }
+                ],
+            },
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+
+        expected_preview = (
+            "逐字稿品質警示：問題位置："
+            f"第 2 段 10:00-20:00：{segment_issue}"
+        )
+        self.assertEqual(listed["quality_warning_preview"], expected_preview)
+        self.assertIn("偵測到可能的爆音；原始媒體檔已保留。", listed["quality_warning_text"])
+        self.assertEqual(listed["quality_review_segments"], ["第 2 段"])
+        self.assertEqual([row["id"] for row in database.list_meetings(quality_type="recording")], [meeting_id])
+        self.assertEqual([row["id"] for row in database.list_meetings(quality_type="transcript")], [meeting_id])
 
     def test_quality_type_filter_treats_review_segment_note_as_transcript_warning(self):
         database, tmp_path = self._isolated_database()

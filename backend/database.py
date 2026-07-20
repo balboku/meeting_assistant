@@ -284,15 +284,38 @@ def _append_uncovered_quality_previews(
         warning_text_items.append(cleaned)
 
 
+TRANSCRIPT_REVIEW_SUMMARY_TOKENS = (
+    "疑似連續重複轉錄",
+    "重複轉錄",
+    "曾觸發轉錄補救",
+    "轉錄內容為空",
+    "自動過濾",
+    "截斷提示",
+)
+
+
+def _has_transcript_review_signal(text: str) -> bool:
+    return any(token in str(text or "") for token in TRANSCRIPT_REVIEW_SUMMARY_TOKENS)
+
+
+def _is_recording_warning_preview(text: str) -> bool:
+    return bool(re.search(r"錄音|音檔|媒體|音量|爆音|靜音|聲道|取樣率", str(text or "")))
+
+
 def _should_promote_review_summary_to_preview(warning_preview: Optional[str], review_summary: str) -> bool:
     warning = str(warning_preview or "").strip()
-    if not warning or not str(review_summary or "").strip():
-        return False
-    if "疑似連續重複轉錄" not in warning and "重複轉錄" not in warning:
+    review = str(review_summary or "").strip()
+    if not warning or not review:
         return False
     if review_segment_details_from_text(warning):
         return False
-    return True
+    if _has_transcript_review_signal(warning):
+        return True
+    if _is_recording_warning_preview(warning) and _has_transcript_review_signal(review):
+        return True
+    if warning.startswith("品質分數") and _has_transcript_review_signal(review):
+        return True
+    return False
 
 
 _TRANSCRIPT_SEGMENT_HEADING_PATTERN = re.compile(
