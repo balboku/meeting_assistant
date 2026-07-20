@@ -2748,6 +2748,53 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual(delete_response.status_code, 409)
         self.assertIn("使用中", delete_response.json()["detail"])
 
+    def test_source_media_inventory_reports_sha256_duplicate_groups(self):
+        database = self._isolated_database()
+        import backend.main as main
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_dir = root / "source_audio"
+            output_dir = root / "output"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            (source_dir / "linked.mp3").write_bytes(b"same-content")
+            (source_dir / "orphan-copy.mp3").write_bytes(b"same-content")
+            (source_dir / "different.mp3").write_bytes(b"different-content")
+            output_path = output_dir / "linked.md"
+            output_path.write_text("linked", encoding="utf-8")
+            database.save_meeting(
+                title="Linked Source",
+                date="2026/07/20",
+                source_audio="linked.mp3",
+                output_path=str(output_path),
+                summary="linked",
+            )
+
+            with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
+                 mock.patch.object(main, "OUTPUT_DIR", output_dir), \
+                 mock.patch.object(main, "BACKUP_DIR", root / "backups"):
+                response = asgi_request(main.app, "GET", "/source-media/inventory?limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        digest = hashlib.sha256(b"same-content").hexdigest()
+        by_name = {item["name"]: item for item in payload["files"]}
+        self.assertEqual(by_name["linked.mp3"]["source_media_sha256"], digest)
+        self.assertEqual(by_name["orphan-copy.mp3"]["source_media_sha256"], digest)
+        self.assertEqual(by_name["linked.mp3"]["duplicate_source_media_count"], 2)
+        self.assertEqual(by_name["orphan-copy.mp3"]["duplicate_source_media_count"], 2)
+        self.assertEqual(
+            by_name["linked.mp3"]["duplicate_source_media_names"],
+            ["linked.mp3", "orphan-copy.mp3"],
+        )
+        self.assertEqual(
+            by_name["orphan-copy.mp3"]["duplicate_source_media_names"],
+            ["linked.mp3", "orphan-copy.mp3"],
+        )
+        self.assertEqual(by_name["different.mp3"]["duplicate_source_media_count"], 0)
+
     def test_source_media_archive_preserves_webm_video_metadata_for_preview(self):
         self._isolated_database()
         import backend.main as main
@@ -3782,6 +3829,10 @@ class SearchRegressionTests(unittest.TestCase):
             "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:00-70:30"
         )
         self.assertEqual(listed["quality_warning_preview"], expected_preview)
+        self.assertEqual(
+            listed["quality_warning_text"].splitlines()[0],
+            expected_preview + "。建議重跑上述分段或複核相關內容。",
+        )
         self.assertIn(
             expected_preview.replace("逐字稿品質警示：問題位置：", ""),
             listed["quality_review_segment_summary"],
@@ -4969,6 +5020,14 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("normalizeMediaKind(file.source_media_type || file.media_type || file.content_type)", html)
         self.assertIn("if (VIDEO_FILE_EXTENSIONS.has(extension)) return 'video';", html)
         self.assertIn("source-storage-badge media-type", html)
+        self.assertIn(".source-storage-badge.hash", html)
+        self.assertIn(".source-storage-badge.duplicate", html)
+        self.assertIn("file.source_media_sha256", html)
+        self.assertIn("file.duplicate_source_media_count", html)
+        self.assertIn("file.duplicate_source_media_names", html)
+        self.assertIn("SHA ${escapeHtml(sourceHash.slice(0, 12))}", html)
+        self.assertIn("內容重複 ${duplicateCount} 個", html)
+        self.assertIn("相同內容檔案：${escapeHtml(duplicateNames.join('、'))}", html)
         self.assertIn("/source-media/inventory?limit=${SOURCE_STORAGE_FETCH_LIMIT}&offset=${liveOffset}", html)
         self.assertIn("/source-media/archive?limit=${SOURCE_STORAGE_FETCH_LIMIT}&offset=${archiveOffset}", html)
         self.assertIn("/source-media/archive/file?archive_id=", html)
@@ -6690,6 +6749,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("AbortController", html)
         self.assertIn("找到 ${records.length} 筆${reviewOnly ? `需複核${filterSuffix}且相關` : '相關'}會議記錄", html)
         self.assertIn("function renderQualityReport", html)
+        self.assertIn("function isReviewLocationWarning", html)
+        self.assertIn("function mergeQualityReportWarnings", html)
         self.assertIn("function fallbackQualityReportFromMeeting", html)
         self.assertIn("function detailQualityReport", html)
         self.assertIn("const report = detailQualityReport(meeting);", html)
@@ -6737,6 +6798,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function focusTranscriptLocation", html)
         self.assertIn("function focusQualitySegment", html)
         self.assertIn("function renderQualityWarning", html)
+        self.assertIn("report.warnings = mergeQualityReportWarnings(report.warnings, fallback.warnings);", html)
         self.assertIn("function renderQualityReviewSegments", html)
         self.assertIn("const reviewSegmentByIndex = new Map((reviewSegments || [])", html)
         self.assertIn("const isTranscriptWarning = isTranscriptQualityWarning(text);", html)
@@ -7108,7 +7170,12 @@ function grab(name) {{
   const next = script.indexOf('\\n\\nfunction ', start + 1);
   return script.slice(start, next < 0 ? script.length : next);
 }}
-const code = [grab('fallbackQualityReportFromMeeting'), grab('detailQualityReport')].join('\\n');
+const code = [
+  grab('isReviewLocationWarning'),
+  grab('mergeQualityReportWarnings'),
+  grab('fallbackQualityReportFromMeeting'),
+  grab('detailQualityReport')
+].join('\\n');
 const sandbox = {{}};
 vm.runInNewContext(code + `
 const legacy = detailQualityReport({{
@@ -7128,6 +7195,23 @@ const merged = detailQualityReport({{
 }});
 if (merged.score !== 95 || merged.warnings[0] !== '摘要品質警示：需補 D 編號') process.exit(7);
 if (merged.review_segments[0].label !== '第 3 段') process.exit(8);
+const oldLocated = detailQualityReport({{
+  quality_report: {{
+    score: 80,
+    label: '需複核',
+    warnings: ['逐字稿品質警示：疑似連續重複轉錄（同一句連續重複 31 次：因為我是結所以我領車），建議重跑或複核相關分段。'],
+    segments: [{{ index: 7 }}],
+    review_segments: []
+  }},
+  quality_warning_text: '逐字稿品質警示：問題位置：第 8 段 70:01-80:01：疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:01-73:00。建議重跑上述分段或複核相關內容。\\\\n逐字稿品質警示：需複核分段：第 8 段 70:01-80:01：疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:01-73:00',
+  quality_review_segment_details: [
+    {{ index: 7, label: '第 8 段', start_seconds: 4201, end_seconds: 4801, issues: ['疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:01-73:00'] }}
+  ]
+}});
+if (!oldLocated.warnings[0].includes('問題位置：第 8 段')) process.exit(10);
+if (!oldLocated.warnings[1].includes('需複核分段：第 8 段')) process.exit(11);
+if (!oldLocated.warnings[2].includes('建議重跑或複核相關分段')) process.exit(12);
+if (oldLocated.review_segments[0].index !== 7) process.exit(13);
 result = 'detail_quality_fallback_ok';
 `, sandbox);
 if (sandbox.result !== 'detail_quality_fallback_ok') process.exit(9);

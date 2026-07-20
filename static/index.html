@@ -1068,6 +1068,17 @@
       border-color: rgba(125,166,255,0.45);
       background: rgba(125,166,255,0.12);
     }
+    .source-storage-badge.hash {
+      font-family: Consolas, monospace;
+      color: var(--cyan);
+      border-color: rgba(125,207,255,0.35);
+      background: rgba(125,207,255,0.08);
+    }
+    .source-storage-badge.duplicate {
+      color: var(--yellow);
+      border-color: rgba(224,175,104,0.45);
+      background: rgba(224,175,104,0.12);
+    }
     .source-storage-badge.warning {
       color: var(--yellow);
       border-color: rgba(224,175,104,0.42);
@@ -2276,8 +2287,19 @@ function renderSourceStorageFile(file) {
   const activeJobId = String(file.active_job_id || '').trim();
   const activeJobStatus = String(file.active_job_status || '').trim();
   const active = activeJobCount > 0 || Boolean(activeJobId);
+  const sourceHash = String(file.source_media_sha256 || '').trim();
+  const duplicateCount = Number(file.duplicate_source_media_count || 0);
+  const duplicateNames = Array.isArray(file.duplicate_source_media_names)
+    ? file.duplicate_source_media_names.map(name => String(name || '').trim()).filter(Boolean)
+    : [];
   const activeBadge = active
     ? `<span class="source-storage-badge warning" title="此原始檔正在被任務使用，完成前不建議刪除">任務使用中${activeJobId ? ` ${escapeHtml(activeJobId.slice(0, 8))}` : ''}${activeJobCount > 1 ? ` 等 ${activeJobCount} 筆` : ''}</span>`
+    : '';
+  const hashBadge = sourceHash
+    ? `<span class="source-storage-badge hash" title="SHA256：${escapeHtml(sourceHash)}">SHA ${escapeHtml(sourceHash.slice(0, 12))}</span>`
+    : '';
+  const duplicateBadge = duplicateCount > 1
+    ? `<span class="source-storage-badge duplicate" title="相同內容檔案：${escapeHtml(duplicateNames.join('、'))}">內容重複 ${duplicateCount} 個</span>`
     : '';
   const meetingBadge = linked
     ? `<span class="source-storage-badge">會議 #${meetingId} ${escapeHtml(file.linked_meeting_title)}</span>`
@@ -2299,6 +2321,8 @@ function renderSourceStorageFile(file) {
       <div class="source-storage-meta">
         <span class="source-storage-badge">${formatBytes(file.bytes)}</span>
         ${mediaTypeLabel ? `<span class="source-storage-badge media-type">${mediaTypeLabel}</span>` : ''}
+        ${hashBadge}
+        ${duplicateBadge}
         <span class="source-storage-badge">${formatDate(file.modified_at)}</span>
         ${meetingBadge}
         ${activeBadge}
@@ -3710,6 +3734,24 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
   </div>`;
 }
 
+function isReviewLocationWarning(value = '') {
+  const text = String(value || '');
+  return text.includes('問題位置：') || text.includes('需複核分段：');
+}
+
+function mergeQualityReportWarnings(reportWarnings = [], fallbackWarnings = []) {
+  const primaryWarnings = (Array.isArray(reportWarnings) ? reportWarnings : [])
+    .map(warning => String(warning || '').trim())
+    .filter(Boolean);
+  const fallbackItems = (Array.isArray(fallbackWarnings) ? fallbackWarnings : [])
+    .map(warning => String(warning || '').trim())
+    .filter(Boolean);
+  if (!primaryWarnings.length) return fallbackItems;
+  const locationSupplements = fallbackItems.filter(isReviewLocationWarning);
+  return [...locationSupplements, ...primaryWarnings]
+    .filter((warning, index, all) => all.indexOf(warning) === index);
+}
+
 function fallbackQualityReportFromMeeting(meeting) {
   const warningText = String(meeting?.quality_warning_text || meeting?.quality_warning_preview || '').trim();
   const warnings = warningText
@@ -3741,8 +3783,8 @@ function detailQualityReport(meeting) {
     : null;
   const fallback = fallbackQualityReportFromMeeting(meeting);
   if (!report) return fallback;
-  if ((!Array.isArray(report.warnings) || !report.warnings.length) && fallback?.warnings?.length) {
-    report.warnings = fallback.warnings;
+  if (fallback?.warnings?.length) {
+    report.warnings = mergeQualityReportWarnings(report.warnings, fallback.warnings);
   }
   if ((!Array.isArray(report.review_segments) || !report.review_segments.length) && fallback?.review_segments?.length) {
     report.review_segments = fallback.review_segments;

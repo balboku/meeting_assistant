@@ -103,7 +103,7 @@ from backend.maintenance import cleanup_source_media_archives, run_startup_healt
 from backend.media_validation import validate_media_magic
 from backend.ngrok_status import get_ngrok_status
 from backend.quality_segments import review_segment_details_from_text, review_segment_label
-from backend.source_audio import finalize_source_audio_upload
+from backend.source_audio import finalize_source_audio_upload, sha256_file
 from backend.tasks import (
     GEMINI_MODEL,
     SEGMENT_TARGET_SECONDS,
@@ -141,6 +141,8 @@ AUDIO_RECORDING_PROFILES = {"audio_standard", "audio_compact"}
 VIDEO_SOURCE_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".mpeg", ".mpg", ".wmv"}
 FFPROBE_STREAM_CACHE_MAX = 256
 FFPROBE_STREAM_CACHE: dict[tuple[str, int, int], set[str]] = {}
+SOURCE_MEDIA_SHA256_CACHE_MAX = 1000
+SOURCE_MEDIA_SHA256_CACHE: dict[tuple[str, int, int], str] = {}
 TRUSTED_LOCAL_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "10.0.0.0/8",
     "172.16.0.0/12",
@@ -509,6 +511,25 @@ def _source_audio_refs_by_name() -> dict[str, dict]:
     return refs
 
 
+def _source_media_sha256(entry: Path) -> Optional[str]:
+    try:
+        stat = entry.stat()
+        cache_key = (str(entry.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        return None
+    cached = SOURCE_MEDIA_SHA256_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        digest = sha256_file(entry)
+    except OSError:
+        return None
+    SOURCE_MEDIA_SHA256_CACHE[cache_key] = digest
+    if len(SOURCE_MEDIA_SHA256_CACHE) > SOURCE_MEDIA_SHA256_CACHE_MAX:
+        SOURCE_MEDIA_SHA256_CACHE.pop(next(iter(SOURCE_MEDIA_SHA256_CACHE)))
+    return digest
+
+
 def _active_source_audio_refs_by_name(source_dir: Optional[Path] = None) -> dict[str, dict]:
     refs: dict[str, dict] = {}
     source_dir = source_dir or SOURCE_AUDIO_DIR
@@ -588,6 +609,7 @@ def _source_media_inventory(limit: int = 100, offset: int = 0) -> SourceMediaInv
     active_count = 0
     active_bytes = 0
     files: list[StorageFileMetric] = []
+    digest_names: dict[str, list[str]] = {}
     source_refs = _source_audio_refs_by_name()
     active_refs = _active_source_audio_refs_by_name(SOURCE_AUDIO_DIR)
     normalized_suffixes = {suffix.lower() for suffix in SUPPORTED_MEDIA_FORMATS}
@@ -620,12 +642,16 @@ def _source_media_inventory(limit: int = 100, offset: int = 0) -> SourceMediaInv
         if linked_ref is None and active_ref is None:
             unlinked_count += 1
             unlinked_bytes += file_bytes
+        source_sha256 = _source_media_sha256(entry)
+        if source_sha256:
+            digest_names.setdefault(source_sha256, []).append(entry.name)
         files.append(
             StorageFileMetric(
                 name=entry.name,
                 bytes=file_bytes,
                 modified_at=datetime.fromtimestamp(stat.st_mtime),
                 source_media_type=_storage_source_media_type(entry, linked_ref),
+                source_media_sha256=source_sha256,
                 linked_meeting_id=int(linked_ref["id"]) if linked_ref else None,
                 linked_meeting_title=str(linked_ref["title"]) if linked_ref else None,
                 active_job_id=str(active_ref["job_id"]) if active_ref else None,
@@ -633,6 +659,15 @@ def _source_media_inventory(limit: int = 100, offset: int = 0) -> SourceMediaInv
                 active_job_count=int(active_ref.get("count", 0)) if active_ref else 0,
             )
         )
+
+    for item in files:
+        digest = item.source_media_sha256
+        if not digest:
+            continue
+        duplicate_names = sorted(digest_names.get(digest) or [])
+        if len(duplicate_names) > 1:
+            item.duplicate_source_media_count = len(duplicate_names)
+            item.duplicate_source_media_names = duplicate_names
 
     sorted_files = sorted(files, key=lambda item: item.bytes, reverse=True)
     if safe_limit > 0:

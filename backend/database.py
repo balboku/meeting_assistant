@@ -318,6 +318,13 @@ def _should_promote_review_summary_to_preview(warning_preview: Optional[str], re
     return False
 
 
+def _review_summary_location_warning(review_summary: str) -> str:
+    return (
+        f"逐字稿品質警示：問題位置：{review_summary}。"
+        "建議重跑上述分段或複核相關內容。"
+    )
+
+
 _TRANSCRIPT_SEGMENT_HEADING_PATTERN = re.compile(
     r"(?m)^#{1,6}\s*(?:"
     r"【第\s*(?P<zh_index>\d+)\s*段\s*[｜|]\s*"
@@ -1919,6 +1926,7 @@ def apply_quality_preview_fields(
         for label in sorted_review_segment_labels
     )
     if review_summary and not has_segment_label_in_warning:
+        warning_text_items.insert(0, _review_summary_location_warning(review_summary))
         warning_text_items.append(f"逐字稿品質警示：需複核分段：{review_summary}")
     record["quality_warning_text"] = "\n".join(dict.fromkeys(warning_text_items)) or None
     record["quality_review_segment_count"] = len(sorted_review_segment_labels)

@@ -125,6 +125,9 @@ class StorageFileMetric(BaseModel):
     bytes: int
     modified_at: Optional[datetime] = None
     source_media_type: Optional[str] = None
+    source_media_sha256: Optional[str] = None
+    duplicate_source_media_count: int = 0
+    duplicate_source_media_names: list[str] = Field(default_factory=list)
     linked_meeting_id: Optional[int] = None
     linked_meeting_title: Optional[str] = None
     active_job_id: Optional[str] = None
