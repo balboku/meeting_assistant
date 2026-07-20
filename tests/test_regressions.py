@@ -2013,6 +2013,41 @@ class UploadQueueRegressionTests(unittest.TestCase):
 
 
 class TempCleanupRegressionTests(unittest.TestCase):
+    def test_source_audio_temp_segment_cleanup_preserves_real_and_fresh_media(self):
+        from backend.cleanup import cleanup_stale_source_audio_temp_segments
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_dir = Path(tmpdir)
+            stale_segment = source_dir / "_seg_meeting_000.mp3"
+            stale_recovery = source_dir / "_sub__seg_meeting_000_300s_001.mp3"
+            fresh_recovery = source_dir / "_sub__seg_fresh_000.mp3"
+            active_recovery = source_dir / "_sub__seg_active_000.mp3"
+            retained_source = source_dir / "abc12345_20260720_100000.webm"
+
+            for path in (stale_segment, stale_recovery, fresh_recovery, active_recovery, retained_source):
+                path.write_bytes(b"audio")
+
+            old_time = 1_700_000_000
+            now = old_time + 7200
+            import os
+            for path in (stale_segment, stale_recovery, active_recovery, retained_source):
+                os.utime(path, (old_time, old_time))
+            os.utime(fresh_recovery, (now, now))
+
+            deleted = cleanup_stale_source_audio_temp_segments(
+                source_audio_dir=source_dir,
+                active_paths={active_recovery},
+                max_age_seconds=3600,
+                now=now,
+            )
+
+            self.assertEqual({path.name for path in deleted}, {stale_segment.name, stale_recovery.name})
+            self.assertFalse(stale_segment.exists())
+            self.assertFalse(stale_recovery.exists())
+            self.assertTrue(fresh_recovery.exists())
+            self.assertTrue(active_recovery.exists())
+            self.assertTrue(retained_source.exists())
+
     def test_stale_temp_cleanup_preserves_active_and_fresh_files(self):
         from backend.cleanup import cleanup_stale_temp_files
 
@@ -2055,8 +2090,13 @@ class TempCleanupRegressionTests(unittest.TestCase):
         ]
 
         self.assertIn("cleanup_stale_temp_files_for_jobs", lifespan_body)
+        self.assertIn("cleanup_stale_source_audio_temp_segments", lifespan_body)
         self.assertLess(
             lifespan_body.index("cleanup_stale_temp_files_for_jobs"),
+            lifespan_body.index("cleanup_stale_source_audio_temp_segments"),
+        )
+        self.assertLess(
+            lifespan_body.index("cleanup_stale_source_audio_temp_segments"),
             lifespan_body.index("job_worker.start()"),
         )
 

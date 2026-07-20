@@ -94,7 +94,11 @@ from backend.models import (
 )
 from backend.job_queue import enqueue_audio_job, enqueue_line_audio_job, job_worker
 from backend.auth import auth_config_payload
-from backend.cleanup import cleanup_stale_temp_files_for_jobs, cleanup_terminal_jobs
+from backend.cleanup import (
+    cleanup_stale_source_audio_temp_segments,
+    cleanup_stale_temp_files_for_jobs,
+    cleanup_terminal_jobs,
+)
 from backend.maintenance import cleanup_source_media_archives, run_startup_health_checks, run_startup_maintenance
 from backend.media_validation import validate_media_magic
 from backend.ngrok_status import get_ngrok_status
@@ -231,6 +235,7 @@ async def lifespan(app: FastAPI):
             archive_cleanup["deleted_bytes"],
         )
     cleanup_stale_temp_files_for_jobs(TEMP_DIR)
+    cleanup_stale_source_audio_temp_segments(SOURCE_AUDIO_DIR)
     cleanup_terminal_jobs(max_age_days=JOB_RETENTION_DAYS)
     job_worker.start()
     logger.info("✅ 後端服務就緒")

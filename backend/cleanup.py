@@ -18,6 +18,7 @@ from typing import Iterable
 from backend.database import delete_terminal_jobs_completed_before, get_db
 
 logger = logging.getLogger("MeetingAssistant.Cleanup")
+SOURCE_AUDIO_TEMP_PREFIXES = ("_seg_", "_sub__")
 
 
 def _resolved_paths(paths: Iterable[Path]) -> set[Path]:
@@ -100,6 +101,48 @@ def cleanup_stale_temp_files_for_jobs(
         active_paths=_active_audio_paths_from_jobs(),
         max_age_seconds=max_age_seconds,
     )
+
+
+def cleanup_stale_source_audio_temp_segments(
+    source_audio_dir: Path,
+    active_paths: Iterable[Path] | None = None,
+    max_age_seconds: int = 24 * 60 * 60,
+    now: float | None = None,
+) -> list[Path]:
+    """Delete leaked transcription split files from the retained source folder.
+
+    Retained source media names are generated from job ids or user filenames.
+    Files beginning with ``_seg_`` or ``_sub__`` are temporary transcription
+    chunks and should not remain mixed with original recordings after a job
+    exits.
+    """
+    if not source_audio_dir.exists():
+        return []
+
+    cutoff_now = time.time() if now is None else now
+    protected = _resolved_paths(active_paths or [])
+    deleted: list[Path] = []
+
+    for path in source_audio_dir.iterdir():
+        if not path.is_file() or not path.name.startswith(SOURCE_AUDIO_TEMP_PREFIXES):
+            continue
+        try:
+            resolved = path.resolve()
+            if resolved in protected:
+                continue
+
+            age_seconds = cutoff_now - path.stat().st_mtime
+            if age_seconds < max_age_seconds:
+                continue
+
+            path.unlink()
+            deleted.append(path)
+        except OSError as exc:
+            logger.warning("⚠️  原始檔目錄暫存分段清理失敗：%s (%s)", path, exc)
+
+    if deleted:
+        logger.info("🧹 已清理 %s 個原始檔目錄暫存分段", len(deleted))
+    return deleted
 
 
 def cleanup_terminal_jobs(max_age_days: int = 30, now: datetime | None = None) -> int:
