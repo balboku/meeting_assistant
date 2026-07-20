@@ -5822,6 +5822,74 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(searched["quality_review_rerunnable_segments"], [2])
         self.assertEqual(searched["quality_warning_preview"], expected_preview)
 
+    def test_list_and_search_add_repeat_phrase_location_to_existing_review_segments(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "phrase-warning-with-existing-review.md"
+        output_path.write_text(
+            "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+            "## 二、最終決議 (Final Decisions)\n決議\n"
+            "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:30] **[發言者 A]**：第一段有其他品質問題。\n"
+            "### 【第 3 段｜20:00 – 30:00】\n"
+            "[24:12] **[發言者 B]**：因為我是結，所以我領車，這句話被品質警示指出。\n"
+            "[24:20] **[發言者 A]**：後續正常討論。\n",
+            encoding="utf-8",
+        )
+        existing_issue = "曾觸發轉錄補救：非最後分段含自動過濾/截斷提示"
+        quality_report = {
+            "warnings": [
+                "逐字稿品質警示：疑似連續重複轉錄"
+                "（同一句連續重複 31 次：因為我是結所以我領車），"
+                "建議重跑或複核相關分段。"
+            ],
+            "review_segments": [
+                {
+                    "index": 0,
+                    "label": "第 1 段",
+                    "start_seconds": 0,
+                    "end_seconds": 600,
+                    "issues": [existing_issue],
+                },
+            ],
+            "segments": [
+                {"index": 0, "start_seconds": 0, "end_seconds": 600, "issues": [existing_issue]},
+                {"index": 2, "start_seconds": 1200, "end_seconds": 1800, "issues": []},
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Phrase Warning With Existing Review",
+            date="2026/07/20",
+            source_audio="phrase-warning-existing-review.webm",
+            output_path=str(output_path),
+            summary="phrase-warning-existing-review-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Phrase Warning With Existing Review")[0]
+
+        repeat_issue = (
+            "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；"
+            "重複時間：24:12-24:12"
+        )
+        self.assertEqual(
+            [detail["index"] for detail in listed["quality_review_segment_details"]],
+            [0, 2],
+        )
+        self.assertIn(existing_issue, listed["quality_review_segment_details"][0]["issues"])
+        self.assertIn(repeat_issue, listed["quality_review_segment_details"][1]["issues"])
+        self.assertEqual(listed["quality_review_segment_count"], 2)
+        self.assertEqual(listed["quality_review_rerunnable_segments"], [0, 2])
+        self.assertIn("第 3 段 20:00-30:00", listed["quality_warning_preview"])
+        self.assertIn("因為我是結所以我領車", listed["quality_warning_text"])
+        self.assertNotIn("建議重跑或複核相關分段", listed["quality_warning_text"])
+        self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
+        self.assertEqual(searched["quality_review_rerunnable_segments"], [0, 2])
+        self.assertEqual(searched["quality_warning_preview"], listed["quality_warning_preview"])
+
     def test_list_and_search_locate_repeat_warning_by_phrase_without_line_timestamps(self):
         database, tmp_path = self._isolated_database()
         output_path = tmp_path / "phrase-located-no-timestamps.md"

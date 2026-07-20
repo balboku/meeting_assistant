@@ -2416,15 +2416,21 @@ def apply_quality_preview_fields(
     if not legacy_repeated_details and full_content_text.strip():
         legacy_repeated_details = _markdown_repeated_turn_review_segments_from_text(full_content_text)
     phrase_review_details: list[dict[str, Any]] = []
-    if not review_segment_labels and not legacy_repeated_details:
+    phrase_lookup_warnings = [
+        warning
+        for warning in quality_warning_lines_for_lookup
+        if _repeated_phrase_from_warning(warning)
+        and not review_segment_details_from_text(warning)
+    ]
+    if phrase_lookup_warnings and not legacy_repeated_details:
         phrase_review_details = _legacy_markdown_warning_phrase_review_segments(
             output_path_text,
-            quality_warning_lines_for_lookup,
+            phrase_lookup_warnings,
         )
         if not phrase_review_details and full_content_text.strip():
             phrase_review_details = _markdown_warning_phrase_review_segments_from_text(
                 full_content_text,
-                quality_warning_lines_for_lookup,
+                phrase_lookup_warnings,
             )
     if phrase_review_details:
         known_segment_indices.update(_markdown_transcript_segment_indices(output_path_text))
