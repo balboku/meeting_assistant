@@ -2973,7 +2973,7 @@ function preferredReviewIssue(issues = []) {
     .sort((a, b) => reviewIssuePriority(b) - reviewIssuePriority(a))[0] || '';
 }
 
-function renderCardQuality(record) {
+function renderCardQuality(record, qualityType = 'all') {
   const warningCount = Number(record?.quality_warning_count || 0);
   const qualityStatus = effectiveQualityStatus(record);
   const score = qualityStatus.score;
@@ -3102,13 +3102,60 @@ function renderCardQuality(record) {
     : reviewSegmentDetails
       .map(segment => String(segment.reason || '').trim())
       .filter(Boolean);
-  const visibleReason = reviewSegmentSummary || reviewSegmentReasons[0] || warningPreview;
+
+  const filterType = ['summary', 'recording', 'transcript', 'rerunnable', 'other'].includes(qualityType)
+    ? qualityType
+    : 'all';
+  const warningLines = [...new Set(
+    [warningText, warningPreview]
+      .flatMap(value => String(value || '').split(/\r?\n/))
+      .map(value => value.trim())
+      .filter(Boolean)
+  )];
+  const isTranscriptLine = line => isTranscriptQualityWarning(line)
+    || line.includes('需複核分段：')
+    || line.includes('問題位置：')
+    || line.includes('曾觸發轉錄補救');
+  const isRecordingLine = line => isRecordingQualityWarning(line)
+    && !isTranscriptLine(line)
+    && !line.includes('摘要品質警示');
+  const filteredWarningReason = (() => {
+    if (filterType === 'summary') {
+      return warningLines.find(line => line.includes('摘要品質警示')) || '';
+    }
+    if (filterType === 'recording') {
+      return warningLines.find(isRecordingLine)
+        || warningLines.find(line => isRecordingQualityWarning(line) && !line.includes('摘要品質警示'))
+        || '';
+    }
+    if (filterType === 'transcript' || filterType === 'rerunnable') {
+      return reviewSegmentSummary
+        || reviewSegmentReasons[0]
+        || warningLines.find(line => isTranscriptQualityWarning(line) || line.includes('需複核分段：'))
+        || '';
+    }
+    if (filterType === 'other') {
+      return warningLines.find(line => !line.includes('摘要品質警示') && !isRecordingQualityWarning(line) && !isTranscriptQualityWarning(line))
+        || '';
+    }
+    return '';
+  })();
+  const visibleReason = filteredWarningReason || reviewSegmentSummary || reviewSegmentReasons[0] || warningPreview;
   const extraReasonText = reviewSegmentReasons.length > 1
     ? `；另有 ${reviewSegmentReasons.length - 1} 項`
     : '';
   const reasonTitle = [...new Set([warningPreview, reviewSegmentSummary, ...reviewSegmentReasons].filter(Boolean))].join('\n');
+  const reasonPrefix = filteredWarningReason && filterType !== 'all'
+    ? ({
+        summary: '摘要警示',
+        recording: '錄音警示',
+        transcript: '逐字稿警示',
+        rerunnable: '可重跑分段',
+        other: '品質警示',
+      }[filterType] || '需複核')
+    : '需複核';
   const reason = visibleReason
-    ? `<div class="card-review-reason" title="${escapeHtml(reasonTitle || visibleReason)}">需複核：${escapeHtml(visibleReason)}${escapeHtml(extraReasonText)}</div>`
+    ? `<div class="card-review-reason" title="${escapeHtml(reasonTitle || visibleReason)}">${escapeHtml(reasonPrefix)}：${escapeHtml(visibleReason)}${escapeHtml(extraReasonText)}</div>`
     : '';
   return `${qualityRow}${reason}`;
 }
@@ -3262,7 +3309,7 @@ async function loadMeetings(query = '') {
             <span class="card-source-media-name">${escapeHtml(r.source_audio)}</span>
           </span>
         </div>
-        ${renderCardQuality(r)}
+        ${renderCardQuality(r, qualityType)}
         <div class="card-preview">${escapeHtml(r.summary_preview || '（無摘要）')}</div>
       </div>
     `).join('');

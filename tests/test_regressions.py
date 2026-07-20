@@ -7094,9 +7094,11 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const groupedReasons = Array.from(groupedReasonMap.entries())", html)
         self.assertIn("return `${displayText}：${issue}`;", html)
         self.assertIn("const reviewSegmentReasons = groupedReasons.length", html)
-        self.assertIn("const visibleReason = reviewSegmentSummary || reviewSegmentReasons[0] || warningPreview;", html)
+        self.assertIn("const filteredWarningReason = (() => {", html)
+        self.assertIn("const visibleReason = filteredWarningReason || reviewSegmentSummary || reviewSegmentReasons[0] || warningPreview;", html)
         self.assertIn("；另有 ${reviewSegmentReasons.length - 1} 項", html)
         self.assertIn("const reasonTitle = [...new Set([warningPreview, reviewSegmentSummary, ...reviewSegmentReasons].filter(Boolean))].join('\\n');", html)
+        self.assertIn("const reasonPrefix = filteredWarningReason && filterType !== 'all'", html)
         self.assertIn("clockText(segment.start_seconds)}-${clockText(segment.end_seconds)", html)
         self.assertIn("card-quality-chip needs-review review-segments", html)
         self.assertIn("const focusSeconds = Number(focusSegment.focus_seconds);", html)
@@ -7104,7 +7106,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("card-quality-chip needs-review transcript-review", html)
         self.assertIn("card-quality-chip needs-review review-segment-note", html)
         self.assertIn("問題分段：${escapeHtml(segmentText)}", html)
-        self.assertIn("需複核：${escapeHtml(visibleReason)}", html)
+        self.assertIn("${escapeHtml(reasonPrefix)}：${escapeHtml(visibleReason)}", html)
         self.assertIn("逐字稿警示 ${reviewSegments.length} 段", html)
         self.assertIn("const rerunnableSegmentIndices = normalizeSegmentIndices(record?.quality_review_rerunnable_segments || []);", html)
         self.assertIn("id=\"card-rerun-review-segments-${recordId}\"", html)
@@ -7118,7 +7120,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("分段：${escapeHtml(segmentText)}", html)
         self.assertIn("card-quality-chip", html)
         self.assertIn("card-review-reason", html)
-        self.assertIn("需複核：${escapeHtml(visibleReason)}${escapeHtml(extraReasonText)}", html)
+        self.assertIn("${escapeHtml(reasonPrefix)}：${escapeHtml(visibleReason)}${escapeHtml(extraReasonText)}", html)
         self.assertNotIn("需複核 ${warningCount}", html)
         self.assertIn("const reviewParam = reviewOnly ? '&needs_review=true' : ''", html)
         self.assertIn("/meetings/search?q=${encodeURIComponent(query)}&limit=100${reviewParam}", html)
@@ -7589,6 +7591,30 @@ result = renderCardQuality({{
     {{ index: 7, label: '第 8 段', start_seconds: 4200, end_seconds: 4800, issues: ['疑似連續重複轉錄；重複時間：70:01-73:00'] }}
   ]
 }});
+recordingResult = renderCardQuality({{
+  id: 43,
+  quality_score: 95,
+  quality_label: '良好',
+  quality_warning_count: 2,
+  quality_warning_preview: '逐字稿品質警示：問題位置：第 8 段 70:00-80:00：疑似連續重複轉錄',
+  quality_warning_text: '逐字稿品質警示：問題位置：第 8 段 70:00-80:00：疑似連續重複轉錄\\\\n偵測到可能的爆音；原始媒體檔已保留，重要內容請抽查。',
+  quality_review_rerunnable_segments: [7],
+  quality_review_segment_details: [
+    {{ index: 7, label: '第 8 段', start_seconds: 4200, end_seconds: 4800, issues: ['疑似連續重複轉錄；重複時間：70:01-73:00'] }}
+  ]
+}}, 'recording');
+rerunnableResult = renderCardQuality({{
+  id: 43,
+  quality_score: 95,
+  quality_label: '良好',
+  quality_warning_count: 2,
+  quality_warning_preview: '逐字稿品質警示：問題位置：第 8 段 70:00-80:00：疑似連續重複轉錄',
+  quality_warning_text: '逐字稿品質警示：問題位置：第 8 段 70:00-80:00：疑似連續重複轉錄\\\\n偵測到可能的爆音；原始媒體檔已保留，重要內容請抽查。',
+  quality_review_rerunnable_segments: [7],
+  quality_review_segment_details: [
+    {{ index: 7, label: '第 8 段', start_seconds: 4200, end_seconds: 4800, issues: ['疑似連續重複轉錄；重複時間：70:01-73:00'] }}
+  ]
+}}, 'rerunnable');
 `, sandbox);
 if (!sandbox.result.includes('錄音警示 1')) {{
   console.error(sandbox.result);
@@ -7629,6 +7655,18 @@ if (!sandbox.result.includes('openDetailAndFocusSourceMedia(event, 43)')) {{
 if (!sandbox.result.includes('rerunReviewSegmentsFromCard(event, 43, [7])')) {{
   console.error(sandbox.result);
   process.exit(9);
+}}
+if (!sandbox.recordingResult.includes('錄音警示：偵測到可能的爆音；原始媒體檔已保留，重要內容請抽查。')) {{
+  console.error(sandbox.recordingResult);
+  process.exit(15);
+}}
+if (sandbox.recordingResult.includes('錄音警示：第 8 段')) {{
+  console.error(sandbox.recordingResult);
+  process.exit(16);
+}}
+if (!sandbox.rerunnableResult.includes('可重跑分段：第 8 段 70:00-80:00：疑似連續重複轉錄；重複時間：70:01-73:00')) {{
+  console.error(sandbox.rerunnableResult);
+  process.exit(17);
 }}
 if (sandbox.result.includes('需詳情複核')) {{
   console.error(sandbox.result);
