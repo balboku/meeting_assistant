@@ -7992,6 +7992,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function mergeQualityReportWarnings", html)
         self.assertIn("function fallbackQualityReportFromMeeting", html)
         self.assertIn("function detailQualityReport", html)
+        self.assertIn("function repeatedPhraseFromWarning", html)
+        self.assertIn("function transcriptReviewSegmentsFromWarning", html)
+        self.assertIn("function mergeQualityReviewSegments", html)
+        self.assertIn("transcriptReviewSegmentsFromWarning(warning, meeting?.full_content || '')", html)
         self.assertIn("const report = detailQualityReport(meeting);", html)
         self.assertIn("meeting?.quality_warning_text || meeting?.quality_warning_preview", html)
         self.assertIn("function isProblemLocationWarning", html)
@@ -8730,7 +8734,9 @@ function grab(name) {{
   return script.slice(start, next < 0 ? script.length : next);
 }}
 const code = [
+  'const REVIEW_SEGMENT_SECONDS = 600;',
   grab('clockText'),
+  grab('parseClockSeconds'),
   grab('reviewIssuePriority'),
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
@@ -8747,6 +8753,13 @@ const code = [
   grab('isRedundantTranscriptWarning'),
   grab('compactQualityReportWarnings'),
   grab('synthesizedReviewLocationWarning'),
+  grab('normalizeTranscriptLookupText'),
+  grab('repeatedPhraseFromWarning'),
+  grab('parseTranscriptSegmentHeadingInfo'),
+  grab('transcriptLineTextForLookup'),
+  grab('extractTranscriptMarkdown'),
+  grab('transcriptReviewSegmentsFromWarning'),
+  grab('mergeQualityReviewSegments'),
   grab('mergeQualityReportWarnings'),
   grab('fallbackQualityReportFromMeeting'),
   grab('detailQualityReport')
@@ -9498,6 +9511,7 @@ const code = [
   grab('finiteQualityScore'),
   grab('effectiveQualityStatus'),
   grab('clockText'),
+  grab('parseClockSeconds'),
   grab('reviewIssuePriority'),
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
@@ -9509,6 +9523,13 @@ const code = [
   grab('isRedundantTranscriptWarning'),
   grab('compactQualityReportWarnings'),
   grab('synthesizedReviewLocationWarning'),
+  grab('normalizeTranscriptLookupText'),
+  grab('repeatedPhraseFromWarning'),
+  grab('parseTranscriptSegmentHeadingInfo'),
+  grab('transcriptLineTextForLookup'),
+  grab('extractTranscriptMarkdown'),
+  grab('transcriptReviewSegmentsFromWarning'),
+  grab('mergeQualityReviewSegments'),
   grab('fallbackQualityReportFromMeeting')
 ].join('\\n');
 const sandbox = {{}};
@@ -9520,6 +9541,23 @@ const meeting = {{
   ]
 }};
 report = fallbackQualityReportFromMeeting(meeting);
+const repeatedLines = Array.from({{ length: 31 }}, (_, index) =>
+  '[70:' + String(index).padStart(2, '0') + '] **[發言者 A]**：因為我是結，所以我領車。'
+).join('\\\\n');
+const inferredMeeting = {{
+  quality_warning_text: '逐字稿品質警示：疑似連續重複轉錄（同一句連續重複 31 次：因為我是結所以我領車），建議重跑或複核相關分段。',
+  full_content:
+    '## 一、討論摘要 (Discussion Summary)\\\\n摘要\\\\n' +
+    '## 二、最終決議 (Final Decisions)\\\\n決議\\\\n' +
+    '## 三、待辦事項 (Action Items)\\\\n待辦\\\\n' +
+    '## 四、完整逐字稿 (Verbatim Transcript)\\\\n' +
+    '### 【第 7 段｜59:59 – 70:04】\\\\n' +
+    '[69:59] **[發言者 B]**：前一句正常。\\\\n' +
+    repeatedLines + '\\\\n' +
+    '### 【第 8 段｜70:01 – 80:01】\\\\n' +
+    '[71:00] **[發言者 C]**：下一句正常內容。\\\\n'
+}};
+inferred = fallbackQualityReportFromMeeting(inferredMeeting);
 `, sandbox);
 if (!sandbox.report?.warnings?.[0]?.includes('問題位置：第 8 段 70:01-80:01：疑似連續重複轉錄')) {{
   console.error(JSON.stringify(sandbox.report));
@@ -9536,6 +9574,22 @@ if (sandbox.report.warnings.length !== 1) {{
 if (sandbox.report.warnings.some(warning => warning.includes('建議重跑或複核相關分段'))) {{
   console.error(JSON.stringify(sandbox.report));
   process.exit(7);
+}}
+if (!sandbox.inferred?.review_segments?.length) {{
+  console.error(JSON.stringify(sandbox.inferred));
+  process.exit(8);
+}}
+if (sandbox.inferred.review_segments[0].index !== 6) {{
+  console.error(JSON.stringify(sandbox.inferred));
+  process.exit(9);
+}}
+if (!sandbox.inferred.warnings[0].includes('問題位置：第 7 段 59:59-70:04')) {{
+  console.error(JSON.stringify(sandbox.inferred));
+  process.exit(10);
+}}
+if (!sandbox.inferred.warnings[0].includes('重複時間：70:00-70:30')) {{
+  console.error(JSON.stringify(sandbox.inferred));
+  process.exit(11);
 }}
 console.log('fallback_location_warning_ok');
 """

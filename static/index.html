@@ -4234,6 +4234,149 @@ function synthesizedReviewLocationWarning(reviewSegments = []) {
     : '';
 }
 
+function normalizeTranscriptLookupText(value = '') {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[，。,.、；;：:！!？?\-—~「」『』（）()\[\]【】"'`*_]+/g, '');
+}
+
+function repeatedPhraseFromWarning(warning = '') {
+  const match = String(warning || '').match(/同一句連續重複\s*(\d+)\s*次[：:]\s*([^；;，,。)\]）]+)/);
+  if (!match) return null;
+  const phrase = String(match[2] || '')
+    .trim()
+    .replace(/^[：:，,。；;、]+|[：:，,。；;、]+$/g, '');
+  const normalized = normalizeTranscriptLookupText(phrase);
+  if (normalized.length < 4) return null;
+  return {
+    count: Number(match[1]) || null,
+    phrase,
+    normalized,
+  };
+}
+
+function parseTranscriptSegmentHeadingInfo(line = '') {
+  const match = String(line || '').trim().match(
+    /(?:第\s*(\d+)\s*段\s*[｜|]\s*(\d{1,3}:[0-5]\d)\s*[–—-]\s*(\d{1,3}:[0-5]\d|end)|Segment\s+(\d+)(?:\/\d+)?\s*[｜|]\s*(\d{1,3}:[0-5]\d)\s*[–—-]\s*(\d{1,3}:[0-5]\d|end))/i
+  );
+  if (!match) return null;
+  const rawIndex = Number(match[1] || match[4]);
+  if (!Number.isInteger(rawIndex) || rawIndex <= 0) return null;
+  const startSeconds = parseClockSeconds(match[2] || match[5]);
+  const endText = match[3] || match[6];
+  const endSeconds = endText && endText.toLowerCase() !== 'end'
+    ? parseClockSeconds(endText)
+    : null;
+  const fallbackStart = (rawIndex - 1) * REVIEW_SEGMENT_SECONDS;
+  return {
+    index: rawIndex - 1,
+    label: `第 ${rawIndex} 段`,
+    start_seconds: startSeconds !== null ? startSeconds : fallbackStart,
+    end_seconds: endSeconds !== null ? endSeconds : fallbackStart + REVIEW_SEGMENT_SECONDS,
+  };
+}
+
+function transcriptLineTextForLookup(line = '') {
+  return normalizeTranscriptLookupText(
+    String(line || '')
+      .replace(/\[\d{1,3}:[0-5]\d\]/g, '')
+      .replace(/\*\*\[[^\]]+\]\*\*/g, '')
+      .replace(/\[[^\]]+\]/g, '')
+      .replace(/^[：:,\s]+/, '')
+  );
+}
+
+function transcriptReviewSegmentsFromWarning(warning = '', fullContent = '') {
+  const phraseInfo = repeatedPhraseFromWarning(warning);
+  if (!phraseInfo) return [];
+  const transcript = extractTranscriptMarkdown(fullContent);
+  if (!transcript) return [];
+  const details = new Map();
+  let currentSegment = null;
+  const issueByRange = (startSeconds, endSeconds) => {
+    const repeatText = phraseInfo.count
+      ? `同一句連續重複 ${phraseInfo.count} 次：${phraseInfo.phrase}`
+      : `同一句連續重複：${phraseInfo.phrase}`;
+    return [
+      '疑似連續重複轉錄',
+      repeatText,
+      `重複時間：${clockText(startSeconds)}-${clockText(endSeconds)}`,
+    ].join('；');
+  };
+
+  for (const rawLine of transcript.split(/\r?\n/)) {
+    const segmentInfo = parseTranscriptSegmentHeadingInfo(rawLine);
+    if (segmentInfo) {
+      currentSegment = segmentInfo;
+      continue;
+    }
+    const timeMatch = String(rawLine || '').match(/\[(\d{1,3}:[0-5]\d)\]/);
+    const lineSeconds = parseClockSeconds(timeMatch?.[1]);
+    const lineText = transcriptLineTextForLookup(rawLine);
+    if (lineSeconds === null || !lineText) continue;
+    if (!(lineText.includes(phraseInfo.normalized) || phraseInfo.normalized.includes(lineText))) continue;
+    const fallbackIndex = Math.floor(lineSeconds / REVIEW_SEGMENT_SECONDS);
+    const segment = currentSegment || {
+      index: fallbackIndex,
+      label: `第 ${fallbackIndex + 1} 段`,
+      start_seconds: fallbackIndex * REVIEW_SEGMENT_SECONDS,
+      end_seconds: (fallbackIndex + 1) * REVIEW_SEGMENT_SECONDS,
+    };
+    const existing = details.get(segment.index) || {
+      index: segment.index,
+      label: segment.label || `第 ${segment.index + 1} 段`,
+      start_seconds: segment.start_seconds,
+      end_seconds: segment.end_seconds,
+      _first_match_seconds: lineSeconds,
+      _last_match_seconds: lineSeconds,
+      issues: [],
+    };
+    existing._first_match_seconds = Math.min(existing._first_match_seconds, lineSeconds);
+    existing._last_match_seconds = Math.max(existing._last_match_seconds, lineSeconds);
+    existing.start_seconds = segment.start_seconds;
+    existing.end_seconds = segment.end_seconds;
+    details.set(segment.index, existing);
+  }
+
+  return Array.from(details.values())
+    .sort((a, b) => a.index - b.index)
+    .map(detail => {
+      const firstSeconds = Number(detail._first_match_seconds);
+      const lastSeconds = Number(detail._last_match_seconds);
+      const issue = issueByRange(firstSeconds, lastSeconds);
+      delete detail._first_match_seconds;
+      delete detail._last_match_seconds;
+      detail.issues = [issue];
+      return detail;
+    });
+}
+
+function mergeQualityReviewSegments(...groups) {
+  const merged = new Map();
+  groups.flat().forEach(segment => {
+    const index = Number(segment?.index);
+    if (!Number.isInteger(index) || index < 0) return;
+    const existing = merged.get(index) || {
+      index,
+      label: segment?.label || `第 ${index + 1} 段`,
+      issues: [],
+    };
+    ['label', 'start_seconds', 'end_seconds'].forEach(key => {
+      if ((existing[key] === undefined || existing[key] === null || existing[key] === '') && segment?.[key] !== undefined) {
+        existing[key] = segment[key];
+      }
+    });
+    const issues = (segment?.issues || [])
+      .map(issue => String(issue || '').trim())
+      .filter(Boolean);
+    existing.issues = [...existing.issues, ...issues]
+      .filter((issue, index, all) => all.indexOf(issue) === index);
+    merged.set(index, existing);
+  });
+  return Array.from(merged.values()).sort((a, b) => a.index - b.index);
+}
+
 function mergeQualityReportWarnings(reportWarnings = [], fallbackWarnings = []) {
   const primaryWarnings = (Array.isArray(reportWarnings) ? reportWarnings : [])
     .map(warning => String(warning || '').trim())
@@ -4247,14 +4390,21 @@ function mergeQualityReportWarnings(reportWarnings = [], fallbackWarnings = []) 
 }
 
 function fallbackQualityReportFromMeeting(meeting) {
-  const warningText = String(meeting?.quality_warning_text || meeting?.quality_warning_preview || '').trim();
+  const reportWarnings = Array.isArray(meeting?.quality_report?.warnings)
+    ? meeting.quality_report.warnings
+    : [];
+  const warningText = String(meeting?.quality_warning_text || meeting?.quality_warning_preview || reportWarnings.join('\n')).trim();
   let warnings = warningText
     .split(/\r?\n/)
     .map(item => item.trim())
     .filter(Boolean);
-  const reviewSegments = Array.isArray(meeting?.quality_review_segment_details)
+  const existingReviewSegments = Array.isArray(meeting?.quality_review_segment_details)
     ? meeting.quality_review_segment_details
     : [];
+  const transcriptReviewSegments = mergeQualityReviewSegments(
+    ...warnings.map(warning => transcriptReviewSegmentsFromWarning(warning, meeting?.full_content || ''))
+  );
+  const reviewSegments = mergeQualityReviewSegments(existingReviewSegments, transcriptReviewSegments);
   const locationWarning = synthesizedReviewLocationWarning(reviewSegments);
   if (locationWarning && !warnings.some(isReviewLocationWarning)) {
     warnings = [locationWarning, ...warnings];
