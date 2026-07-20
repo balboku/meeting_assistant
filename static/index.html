@@ -55,7 +55,7 @@
       flex-shrink: 0; display: block;
     }
     .logo { font-size: 22px; font-weight: 700; color: var(--blue);
-            letter-spacing: -0.5px; line-height: 1.2; }
+            letter-spacing: 0; line-height: 1.2; }
     .logo span { color: var(--text-dim); font-weight: 400; font-size: 14px; }
     .badge {
       background: var(--blue-dim); color: var(--blue);
@@ -390,16 +390,41 @@
       overflow-wrap: break-word;
       word-break: keep-all;
     }
+    .card-header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+    }
     .card-id {
       font-size: 11px; color: var(--text-dim);
       background: var(--bg-card2); padding: 2px 8px; border-radius: 4px;
       white-space: nowrap; flex-shrink: 0;
     }
+    .card-delete-button {
+      background: transparent;
+      border: 0;
+      color: var(--text-mid);
+      cursor: pointer;
+      font: inherit;
+      font-size: 16px;
+      line-height: 1;
+      opacity: 0.55;
+      padding: 3px;
+      transition: color 0.15s, opacity 0.15s;
+    }
+    .card-delete-button:hover,
+    .card-delete-button:focus-visible {
+      color: var(--red);
+      opacity: 1;
+      outline: none;
+    }
     .card-meta {
       display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px;
       margin-top: 8px; font-size: 12px; color: var(--text-dim);
     }
-    .card-meta span {
+    .card-meta span,
+    .card-meta button {
       min-width: 0;
       max-width: 100%;
       overflow-wrap: anywhere;
@@ -412,6 +437,22 @@
       gap: 6px;
       min-width: 0;
       max-width: 100%;
+      min-height: 26px;
+      padding: 3px 8px;
+      border: 1px solid rgba(122,162,247,0.22);
+      border-radius: 6px;
+      background: rgba(122,162,247,0.06);
+      color: var(--text-mid);
+      font: inherit;
+      text-align: left;
+    }
+    .card-source-media-button { cursor: pointer; }
+    .card-source-media-button:hover,
+    .card-source-media-button:focus-visible {
+      border-color: rgba(122,162,247,0.58);
+      background: rgba(122,162,247,0.14);
+      color: var(--text);
+      outline: none;
     }
     .card-source-media-kind {
       flex: 0 0 auto;
@@ -518,19 +559,20 @@
     .detail-title {
       width: 100%;
       min-width: 0;
-      font-size: clamp(20px, 2vw, 26px); font-weight: 700; color: var(--text);
+      font-size: 24px; font-weight: 700; color: var(--text);
       line-height: 1.3; margin-bottom: 0;
-      overflow-wrap: anywhere;
-      text-wrap: balance;
-      word-break: normal;
+      overflow-wrap: break-word;
+      text-wrap: pretty;
+      word-break: keep-all;
     }
     .detail-topline {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr);
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
       gap: 12px;
     }
     .detail-meta-row {
-      display: flex; flex-wrap: wrap; gap: 12px;
+      display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
     }
     .meta-chip {
       display: flex; align-items: center; gap: 6px;
@@ -542,6 +584,31 @@
       word-break: normal;
     }
     .meta-chip .icon { font-size: 14px; flex: 0 0 auto; }
+    .meta-chip-action {
+      border: 1px solid rgba(122,162,247,0.22);
+      cursor: pointer;
+      font-family: inherit;
+      text-align: left;
+    }
+    .meta-chip-action:hover,
+    .meta-chip-action:focus-visible {
+      border-color: rgba(122,162,247,0.58);
+      background: rgba(122,162,247,0.14);
+      color: var(--text);
+      outline: none;
+    }
+    .meta-chip-label {
+      flex: 0 0 auto;
+      color: var(--text);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .meta-chip-text {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .detail-actions {
       display: flex; align-items: center; justify-content: flex-start;
       gap: 10px; flex-wrap: wrap; width: 100%;
@@ -764,6 +831,8 @@
     }
     .audio-evidence video {
       max-height: min(52vh, 520px);
+      aspect-ratio: 16 / 9;
+      object-fit: contain;
     }
     .audio-evidence-header {
       display: flex;
@@ -1260,6 +1329,7 @@
       }
       .stats { display: none; }
       .detail-panel { padding: 16px; }
+      .detail-title { font-size: 21px; }
       .detail-actions { width: 100%; }
       .detail-actions .btn-primary,
       .detail-actions .btn-secondary {
@@ -3208,6 +3278,42 @@ function sourceMediaShortLabel(record) {
   return isVideoSource(record) ? '錄影' : '音訊';
 }
 
+function renderCardSourceMedia(record) {
+  const recordId = Number(record?.id);
+  const sourceName = String(record?.source_audio || '').trim() || '原始檔';
+  const mediaKind = sourceMediaKindLabel(record);
+  const safeName = escapeHtml(sourceName);
+  const safeKind = escapeHtml(mediaKind);
+  const safeTitle = escapeHtml(record?.title || `#${recordId || ''}`);
+  const body = `
+    <span class="card-source-media-kind">${sourceMediaIcon(record)} ${sourceMediaShortLabel(record)}</span>
+    <span class="card-source-media-name">${safeName}</span>`;
+  if (!Number.isInteger(recordId) || recordId <= 0) {
+    return `<span class="card-source-media" title="${safeKind}：${safeName}">${body}</span>`;
+  }
+  return `<button type="button"
+                  class="card-source-media card-source-media-button"
+                  title="開啟${safeKind}播放器：${safeName}"
+                  aria-label="開啟${safeKind}播放器：${safeTitle}"
+                  onclick="openDetailAndFocusSourceMedia(event, ${recordId})">${body}</button>`;
+}
+
+function renderDetailSourceMediaChip(meeting) {
+  const sourceName = String(meeting?.source_audio || '').trim() || '原始檔';
+  const mediaKind = sourceMediaKindLabel(meeting);
+  const safeName = escapeHtml(sourceName);
+  const safeKind = escapeHtml(mediaKind);
+  return `<button type="button"
+                  class="meta-chip meta-chip-action source-media-meta-chip"
+                  title="定位${safeKind}播放器：${safeName}"
+                  aria-label="定位${safeKind}播放器"
+                  onclick="focusSourceMediaEvidence()">
+    <span class="icon">${sourceMediaIcon(meeting)}</span>
+    <span class="meta-chip-label">${safeKind}</span>
+    <span class="meta-chip-text">${safeName}</span>
+  </button>`;
+}
+
 function handleMeetingCardKeydown(event, id) {
   if (event.target !== event.currentTarget) return;
   if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -3320,13 +3426,12 @@ async function loadMeetings(query = '') {
            onkeydown="handleMeetingCardKeydown(event, ${r.id})">
         <div class="card-header">
           <div class="card-title">${escapeHtml(r.title)}</div>
-          <div style="display: flex; gap: 8px; align-items: center;">
+          <div class="card-header-actions">
             <div class="card-id">#${r.id}</div>
             <button onclick="deleteMeeting(event, ${r.id})"
+                    class="card-delete-button"
                     title="刪除會議記錄"
-                    aria-label="刪除會議記錄 ${escapeHtml(r.title)}"
-                    style="background: transparent; border: none; cursor: pointer; font-size: 16px; opacity: 0.5; transition: opacity 0.2s;"
-                    onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.5">
+                    aria-label="刪除會議記錄 ${escapeHtml(r.title)}">
               🗑️
             </button>
           </div>
@@ -3334,10 +3439,7 @@ async function loadMeetings(query = '') {
         <div class="card-meta">
           <span>📅 ${r.date}</span>
           <span class="dot"></span>
-          <span class="card-source-media" title="${sourceMediaKindLabel(r)}：${escapeHtml(r.source_audio)}">
-            <span class="card-source-media-kind">${sourceMediaIcon(r)} ${sourceMediaShortLabel(r)}</span>
-            <span class="card-source-media-name">${escapeHtml(r.source_audio)}</span>
-          </span>
+          ${renderCardSourceMedia(r)}
         </div>
         ${renderCardQuality(r, qualityType)}
         <div class="card-preview">${escapeHtml(r.summary_preview || '（無摘要）')}</div>
@@ -4672,7 +4774,7 @@ async function openDetail(id) {
         </div>
         <div class="detail-meta-row" style="margin-top: 12px;">
           <div class="meta-chip"><span class="icon">📅</span>${r.date}</div>
-          <div class="meta-chip"><span class="icon">${sourceMediaIcon(r)}</span>${escapeHtml(r.source_audio)}</div>
+          ${renderDetailSourceMediaChip(r)}
           <div class="meta-chip"><span class="icon">⏰</span>${formatDate(r.created_at)}</div>
         </div>
       </div>

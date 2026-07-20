@@ -5567,12 +5567,13 @@ class UiRegressionTests(unittest.TestCase):
     def test_web_ui_prevents_detail_header_text_stacking(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
-        self.assertIn("grid-template-columns: minmax(0, 1fr);", html)
+        self.assertRegex(html, r"\.detail-topline \{[^}]*display: flex;[^}]*flex-direction: column;[^}]*align-items: stretch;")
+        self.assertRegex(html, r"\.detail-title \{[^}]*font-size: 24px;[^}]*overflow-wrap: break-word;[^}]*text-wrap: pretty;[^}]*word-break: keep-all;")
         self.assertIn("overflow-wrap: anywhere;", html)
-        self.assertIn("word-break: normal;", html)
-        self.assertIn("text-wrap: balance;", html)
+        self.assertIn("word-break: keep-all;", html)
+        self.assertIn("text-wrap: pretty;", html)
         self.assertIn("display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px;", html)
-        self.assertIn(".card-meta span", html)
+        self.assertIn(".card-meta span,\n    .card-meta button", html)
         self.assertIn("min-width: 0; max-width: 100%;", html)
         self.assertIn(".detail-actions .btn-primary", html)
         self.assertIn("white-space: normal;", html)
@@ -7247,13 +7248,24 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn(".quality-review-segment.media-only", html)
         self.assertIn(".quality-warning-jump:hover", html)
         self.assertIn("card-source-media", html)
+        self.assertIn("card-source-media-button", html)
         self.assertIn("card-source-media-kind", html)
         self.assertIn("card-source-media-name", html)
+        self.assertIn("card-header-actions", html)
+        self.assertIn("card-delete-button", html)
+        self.assertIn("meta-chip-action", html)
+        self.assertIn("meta-chip-label", html)
+        self.assertIn("meta-chip-text", html)
+        self.assertIn("source-media-meta-chip", html)
         self.assertIn("overflow-wrap: anywhere;", html)
         self.assertIn("text-overflow: ellipsis;", html)
-        self.assertIn("sourceMediaShortLabel(r)", html)
+        self.assertIn("function renderCardSourceMedia", html)
+        self.assertIn("function renderDetailSourceMediaChip", html)
         self.assertIn("function sourceMediaShortLabel", html)
-        self.assertIn("title=\"${sourceMediaKindLabel(r)}：${escapeHtml(r.source_audio)}\"", html)
+        self.assertIn('title="開啟${safeKind}播放器：${safeName}"', html)
+        self.assertIn('onclick="openDetailAndFocusSourceMedia(event, ${recordId})"', html)
+        self.assertIn('title="定位${safeKind}播放器：${safeName}"', html)
+        self.assertIn('onclick="focusSourceMediaEvidence()"', html)
         self.assertIn('id="needs-review-filter"', html)
         self.assertIn('id="quality-type-filter"', html)
         self.assertIn('aria-label="依品質警示類型篩選"', html)
@@ -7479,7 +7491,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("<video id=\"source-media-player\"", html)
         self.assertIn("playsinline", html)
         self.assertIn("display: grid;", html)
-        self.assertIn("grid-template-columns: minmax(0, 1fr);", html)
+        self.assertIn("align-items: stretch;", html)
+        self.assertIn("aspect-ratio: 16 / 9;", html)
         self.assertIn("function enhanceTranscriptTimecodes", html)
         self.assertIn("function seekSourceAudio", html)
         self.assertIn("/transcript", html)
@@ -7500,6 +7513,113 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("audioBitsPerSecond", html)
         self.assertIn("videoBitsPerSecond", html)
         self.assertIn("recording_profile", html)
+
+    def test_web_ui_source_video_entry_points_render_video_player(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function renderCardSourceMedia'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [
+  "const API = 'http://127.0.0.1:8001';",
+  "const DEFAULT_RECORDING_PROFILE_LABELS = {{ video_balanced: '錄影平衡', audio_standard: '標準語音', audio_compact: '省容量語音' }};",
+  "const runtimeConfig = {{ recording_profiles: {{ video_balanced: {{ label: '錄影平衡' }} }} }};",
+  "const VIDEO_FILE_EXTENSIONS = new Set(['.webm', '.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);",
+  "const BROWSER_VIDEO_PREVIEW_EXTENSIONS = new Set(['.webm', '.mp4']);",
+  "const AUDIO_FILE_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.flac', '.wma']);",
+  grab('escapeHtml'),
+  grab('formatBytes'),
+  grab('normalizeMediaKind'),
+  grab('sourceMediaExtension'),
+  grab('sourceMediaExplicitKind'),
+  grab('isVideoSource'),
+  grab('sourceMediaVideoPreviewCapable'),
+  grab('sourceMediaPlayerMode'),
+  grab('sourceMediaIcon'),
+  grab('sourceMediaShortLabel'),
+  grab('renderCardSourceMedia'),
+  grab('renderDetailSourceMediaChip'),
+  grab('sourceMediaKindLabel'),
+  grab('recordingProfileBaseLabel'),
+  grab('recordingProfileLabel'),
+  grab('sourceHashPreview'),
+  grab('renderSourceMediaFacts'),
+  grab('sourceMediaModePill'),
+  grab('sourceMediaModeFacts'),
+  grab('renderAudioEvidence')
+].join('\\n');
+const sandbox = {{}};
+vm.runInNewContext(code + `
+const meeting = {{
+  id: 33,
+  title: '[Gen2-Mercury] 週會20260709',
+  source_audio: '79506dff_20260709_132517.webm',
+  source_media_type: 'video',
+  recording_profile: 'video_balanced',
+  source_media_size_bytes: 1234567,
+  source_media_sha256: 'abcdef0123456789'
+}};
+card = renderCardSourceMedia(meeting);
+chip = renderDetailSourceMediaChip(meeting);
+player = renderAudioEvidence(meeting);
+`, sandbox);
+if (!sandbox.card.includes('card-source-media-button')) {{
+  console.error(sandbox.card);
+  process.exit(4);
+}}
+if (!sandbox.card.includes('openDetailAndFocusSourceMedia(event, 33)')) {{
+  console.error(sandbox.card);
+  process.exit(5);
+}}
+if (!sandbox.card.includes('開啟原始錄影播放器')) {{
+  console.error(sandbox.card);
+  process.exit(6);
+}}
+if (!sandbox.chip.includes('source-media-meta-chip') || !sandbox.chip.includes('定位原始錄影播放器')) {{
+  console.error(sandbox.chip);
+  process.exit(7);
+}}
+if (!sandbox.player.includes('原始錄影：79506dff_20260709_132517.webm')) {{
+  console.error(sandbox.player);
+  process.exit(8);
+}}
+if (!sandbox.player.includes('<video id="source-media-player"')) {{
+  console.error(sandbox.player);
+  process.exit(9);
+}}
+if (!sandbox.player.includes('data-source-mode="audio" onclick="switchSourceMediaPlayer(\\'audio\\')"')) {{
+  console.error(sandbox.player);
+  process.exit(10);
+}}
+if (!sandbox.player.includes('SHA256 abcdef012345')) {{
+  console.error(sandbox.player);
+  process.exit(11);
+}}
+console.log('source_video_entry_points_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_detail_quality_report_falls_back_to_top_level_review_fields(self):
         static_path = json.dumps(str(ROOT / "static" / "index.html"))
