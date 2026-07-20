@@ -869,6 +869,30 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertTrue(any("第 2 段｜10:00-20:00" in issue for issue in issues))
         self.assertTrue(any("重複轉錄幻覺" in issue for issue in issues))
 
+    def test_transcript_integrity_accepts_plain_segment_heading_for_repeat_location(self):
+        from backend.tasks import _replace_transcript_section, _transcript_integrity_issues
+
+        repeated_segment = "\n".join(
+            f"[10:{index:02d}] **[發言者 A]**：因為我是結所以我領車流程確認。"
+            for index in range(31)
+        )
+        full_transcript = (
+            "【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：第一段正常。\n"
+            "[09:55] **[發言者 B]**：第一段結尾。\n\n"
+            "【第 2 段｜10:00 – 20:00】\n"
+            f"{repeated_segment}\n"
+        )
+        content = _replace_transcript_section(
+            "## 📋 一、討論摘要 (Discussion Summary)\n摘要",
+            full_transcript,
+        )
+
+        issues = _transcript_integrity_issues(content, full_transcript)
+
+        self.assertTrue(any("第 2 段｜10:00-20:00" in issue for issue in issues))
+        self.assertTrue(any("重複轉錄幻覺" in issue for issue in issues))
+
     def test_detail_repeated_turn_warning_estimates_segment_when_metadata_has_no_range(self):
         from backend.main import _detail_transcript_repeated_turn_diagnostic
 
@@ -888,6 +912,34 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertIn("第 4 段｜30:00-40:00", diagnostic["warning"])
         self.assertNotIn("疑似分段", diagnostic["warning"])
         self.assertEqual(diagnostic["segment_indices"], [3])
+
+    def test_detail_repeated_turn_warning_uses_plain_segment_heading(self):
+        from backend.main import _detail_transcript_repeated_turn_diagnostic
+
+        repeated_segment = "\n".join(
+            f"[70:{index:02d}] **[發言者 A]**：因為我是結所以我領車。"
+            for index in range(31)
+        )
+        transcript = (
+            "【第 7 段｜59:59 – 70:04】\n"
+            "[69:59] **[發言者 B]**：前一句正常。\n"
+            f"{repeated_segment}\n"
+            "【第 8 段｜70:01 – 80:01】\n"
+            "[71:00] **[發言者 C]**：下一句正常內容。\n"
+        )
+
+        diagnostic = _detail_transcript_repeated_turn_diagnostic(
+            transcript,
+            segments=[
+                {"index": 6, "start_seconds": 3599, "end_seconds": 4204},
+                {"index": 7, "start_seconds": 4201, "end_seconds": 4801},
+            ],
+        )
+
+        self.assertIsNotNone(diagnostic)
+        self.assertIn("問題位置：第 7 段｜59:59-70:04", diagnostic["warning"])
+        self.assertNotIn("問題位置：第 8 段", diagnostic["warning"])
+        self.assertEqual(diagnostic["segment_indices"], [6])
 
     def test_finalize_meeting_content_restores_transcript_and_validates(self):
         from backend.tasks import _finalize_meeting_content, _meeting_content_quality_issues
@@ -4375,6 +4427,55 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(listed["quality_review_segments"], ["第 7 段"])
         self.assertEqual(listed["quality_review_rerunnable_segments"], [6])
         self.assertIn("第 7 段 59:59-70:04", listed["quality_warning_preview"])
+        self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
+        self.assertEqual(searched["quality_review_rerunnable_segments"], [6])
+
+    def test_list_and_search_trust_plain_repeat_segment_headings_when_report_segments_are_incomplete(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "plain-heading-repeat-warning.md"
+        repeated_turns = "\n".join(
+            f"[70:{index:02d}] **[發言者 A]**：因為我是結，所以我領車。"
+            for index in range(31)
+        )
+        output_path.write_text(
+            "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+            "## 二、最終決議 (Final Decisions)\n決議\n"
+            "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "【第 7 段｜59:59 – 70:04】\n"
+            "[69:59] **[發言者 B]**：前一句正常。\n"
+            f"{repeated_turns}\n"
+            "【第 8 段｜70:01 – 80:01】\n"
+            "[71:00] **[發言者 C]**：下一句正常內容。\n",
+            encoding="utf-8",
+        )
+        quality_report = {
+            "warnings": [
+                "逐字稿品質警示：疑似連續重複轉錄"
+                "（同一句連續重複 31 次：因為我是結所以我領車），"
+                "建議重跑或複核相關分段。"
+            ],
+            "segments": [
+                {"index": 0, "start_seconds": 0, "end_seconds": 600, "issues": []},
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Plain Heading Repeat Warning",
+            date="2026/07/12",
+            source_audio="plain-heading-repeat.webm",
+            output_path=str(output_path),
+            summary="plain-heading-repeat-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Plain Heading Repeat Warning")[0]
+
+        self.assertEqual(listed["quality_review_segments"], ["第 7 段"])
+        self.assertEqual(listed["quality_review_rerunnable_segments"], [6])
+        self.assertIn("第 7 段 59:59-70:04", listed["quality_warning_preview"])
+        self.assertNotIn("第 8 段", listed["quality_warning_preview"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
         self.assertEqual(searched["quality_review_rerunnable_segments"], [6])
 

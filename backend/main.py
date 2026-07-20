@@ -1793,7 +1793,7 @@ def _detail_format_clock(total_seconds: int) -> str:
 
 
 _DETAIL_TRANSCRIPT_SEGMENT_HEADING_PATTERN = re.compile(
-    r"^#{1,6}\s*(?:"
+    r"^(?:#{1,6}\s*)?(?:"
     r"【第\s*(?P<zh_index>\d+)\s*段\s*[｜|]\s*"
     r"(?P<zh_start>\d{1,3}:[0-5]\d)\s*[–—-]\s*(?P<zh_end>\d{1,3}:[0-5]\d|end)】"
     r"|\[?Segment\s+(?P<en_index>\d+)(?:/\d+)?\s*[|｜]\s*"

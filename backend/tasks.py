@@ -259,7 +259,7 @@ def _extract_transcript_section_body(meeting_content: str) -> Optional[str]:
 
 
 _TRANSCRIPT_SEGMENT_HEADING_PATTERN = re.compile(
-    r"(?m)^#{1,6}\s*(?:"
+    r"(?m)^(?:#{1,6}\s*)?(?:"
     r"【第\s*(?P<zh_index>\d+)\s*段\s*[｜|]\s*"
     r"(?P<zh_start>\d{1,3}:[0-5]\d)\s*[–—-]\s*(?P<zh_end>\d{1,3}:[0-5]\d|end)】"
     r"|\[?Segment\s+(?P<en_index>\d+)(?:/\d+)?\s*[|｜]\s*"
@@ -351,7 +351,7 @@ def _transcript_segments_by_index(transcript: str) -> dict[int, str]:
 def _transcript_segment_heading_count(transcript: str) -> int:
     return len(
         re.findall(
-            r"(?m)^#{1,6}\s*(?:【第\s*\d+\s*段|\[Segment\s+\d+/\d+)",
+            r"(?m)^(?:#{1,6}\s*)?(?:【第\s*\d+\s*段\s*[｜|]|\[?Segment\s+\d+(?:/\d+)?\s*[|｜])",
             transcript or "",
         )
     )
