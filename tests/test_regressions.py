@@ -5868,6 +5868,54 @@ title: 會議記錄 - 需複核會議
             self.assertNotIn(secondary_issue, content_text)
             self.assertLess(content_text.index("逐字稿品質複核提示"), content_text.index("一、討論摘要"))
 
+    def test_export_quality_note_falls_back_to_rerunnable_segment_indices(self):
+        from backend.exporter import content_with_quality_review_note
+
+        markdown = """---
+title: 會議記錄 - 可重跑分段
+---
+
+## 一、討論摘要 (Discussion Summary)
+
+摘要內容。
+"""
+
+        content = content_with_quality_review_note({
+            "full_content": markdown,
+            "quality_review_rerunnable_segments": [2, 0, 2],
+        })
+
+        self.assertIn("逐字稿品質複核提示", content)
+        self.assertIn("第 1 段、第 3 段", content)
+        self.assertIn("需複核或重跑問題分段", content)
+        self.assertLess(content.index("逐字稿品質複核提示"), content.index("一、討論摘要"))
+
+    def test_markdown_endpoint_adds_quality_review_note(self):
+        import backend.main as main
+
+        markdown = "## 一、討論摘要 (Discussion Summary)\n\n摘要內容。\n"
+        record = {
+            "id": 21,
+            "title": "Markdown 品質提示",
+            "date": "2026/07/20",
+            "source_audio": "meeting.webm",
+            "output_path": "meeting.md",
+            "summary": "摘要內容。",
+            "created_at": datetime(2026, 7, 20, 9, 0, 0),
+            "full_content": markdown,
+            "quality_review_rerunnable_segments": [4],
+        }
+
+        with mock.patch.object(main, "get_meeting", return_value=record):
+            response = asgi_request(main.app, "GET", "/meetings/21/markdown")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/plain", response.headers.get("content-type", ""))
+        text = response.text
+        self.assertIn("逐字稿品質複核提示", text)
+        self.assertIn("第 5 段", text)
+        self.assertEqual(text.count("逐字稿品質複核提示"), 1)
+
 
 class JobQueueWorkerRegressionTests(unittest.TestCase):
     def _isolated_database(self):

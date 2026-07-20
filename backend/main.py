@@ -38,7 +38,7 @@ from fastapi.staticfiles import StaticFiles
 # 載入 .env 環境變數
 load_dotenv()
 
-from backend.exporter import export_meeting_to_docx
+from backend.exporter import content_with_quality_review_note, export_meeting_to_docx
 from backend.evidence import SUPPORTED_EVIDENCE_EXTENSIONS, analyze_and_append_evidence
 
 from backend.database import (
@@ -3041,7 +3041,7 @@ async def get_meeting_markdown(meeting_id: int):
     record = get_meeting(meeting_id)
     if not record:
         raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
-    return record["full_content"]
+    return content_with_quality_review_note(record)
 
 
 @app.get(

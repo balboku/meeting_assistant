@@ -59,7 +59,7 @@ def export_meeting_to_docx(meeting_record: dict, output_filepath: str) -> bool:
 
         # 討論內容 (Row 5, Cell 0)
         if len(table.rows) > 5 and len(table.rows[5].cells) > 0:
-            content = _content_with_quality_review_note(meeting_record)
+            content = content_with_quality_review_note(meeting_record)
             _set_cell_markdown(table.cell(5, 0), content)
 
         doc.save(output_filepath)
@@ -84,7 +84,7 @@ def _set_cell_text(cell, text: str):
         cell.text = text
 
 
-def _content_with_quality_review_note(meeting_record: dict) -> str:
+def content_with_quality_review_note(meeting_record: dict) -> str:
     content = str(meeting_record.get("full_content") or "")
     summary = _quality_review_export_summary(meeting_record)
     if not summary or "逐字稿品質複核提示" in content[:1200]:
@@ -96,6 +96,10 @@ def _content_with_quality_review_note(meeting_record: dict) -> str:
     return _insert_after_frontmatter(content, note + "\n\n")
 
 
+def _content_with_quality_review_note(meeting_record: dict) -> str:
+    return content_with_quality_review_note(meeting_record)
+
+
 def _quality_review_export_summary(meeting_record: dict) -> str:
     summary = str(meeting_record.get("quality_review_segment_summary") or "").strip()
     if summary:
@@ -103,7 +107,7 @@ def _quality_review_export_summary(meeting_record: dict) -> str:
     try:
         from backend.database import apply_quality_preview_fields
     except Exception:
-        return ""
+        return _quality_review_rerunnable_summary(meeting_record)
     quality_report = meeting_record.get("quality_report")
     try:
         quality_fields = apply_quality_preview_fields(
@@ -112,8 +116,33 @@ def _quality_review_export_summary(meeting_record: dict) -> str:
         )
     except Exception:
         logger.exception("DOCX 匯出時重建品質複核摘要失敗")
+        return _quality_review_rerunnable_summary(meeting_record)
+    summary = str(quality_fields.get("quality_review_segment_summary") or "").strip()
+    if summary:
+        return summary
+    return _quality_review_rerunnable_summary(meeting_record)
+
+
+def _quality_review_rerunnable_summary(meeting_record: dict) -> str:
+    try:
+        from backend.quality_segments import review_segment_label
+    except Exception:
         return ""
-    return str(quality_fields.get("quality_review_segment_summary") or "").strip()
+    indices: list[int] = []
+    for value in meeting_record.get("quality_review_rerunnable_segments") or []:
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            continue
+        if index >= 0 and index not in indices:
+            indices.append(index)
+    if not indices:
+        return ""
+    labels = [review_segment_label(index) for index in sorted(indices)]
+    segment_text = "、".join(labels[:5])
+    if len(labels) > 5:
+        segment_text += f" 等 {len(labels)} 段"
+    return f"{segment_text}：需複核或重跑問題分段"
 
 
 def _insert_after_frontmatter(markdown: str, insertion: str) -> str:
