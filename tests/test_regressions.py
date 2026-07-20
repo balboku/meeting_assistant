@@ -8459,7 +8459,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, ${index}, false, false, '${rerunButtonId}')\"", html)
         self.assertIn("quality-review-title", html)
         self.assertIn('id="quality-rerun-review-segments-button"', html)
-        self.assertIn("↻ 重跑全部問題分段", html)
+        self.assertIn("↻ 重跑 ${rerunnableSegmentIndices.length} 段", html)
         self.assertIn("此紀錄缺少可直接重跑的分段資料；可定位原始檔時間複核，必要時使用完整重跑。", html)
         self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, null, false, false, 'quality-rerun-review-full-button')\"", html)
         self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, [${rerunnableSegmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')\"", html)
@@ -8639,7 +8639,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const rerunnableSegmentIndices = normalizeSegmentIndices(record?.quality_review_rerunnable_segments || []);", html)
         self.assertIn("id=\"card-rerun-review-segments-${recordId}\"", html)
         self.assertIn("onclick=\"rerunReviewSegmentsFromCard(event, ${recordId}, [${rerunnableSegmentIndices.join(',')}])\"", html)
-        self.assertIn("↻ 重跑問題分段", html)
+        self.assertIn("const rerunCountText = `${rerunnableSegmentIndices.length} 段`;", html)
+        self.assertIn("↻ 重跑 ${escapeHtml(rerunCountText)}", html)
         self.assertIn("需詳情複核", html)
         self.assertIn("card-quality-action", html)
         self.assertIn("onclick=\"openDetailAndFocusSegment(event, ${focusArgs})\"", html)
@@ -9305,7 +9306,7 @@ if (!sandbox.result.includes('rerunReviewSegmentsFromCard(event, 17, [0,1])')) {
   console.error(sandbox.result);
   process.exit(9);
 }}
-if (!sandbox.result.includes('↻ 重跑問題分段')) {{
+if (!sandbox.result.includes('↻ 重跑 2 段')) {{
   console.error(sandbox.result);
   process.exit(10);
 }}
@@ -9539,6 +9540,10 @@ if (!sandbox.result.includes('openDetailAndFocusSourceMedia(event, 43)')) {{
 if (!sandbox.result.includes('rerunReviewSegmentsFromCard(event, 43, [7])')) {{
   console.error(sandbox.result);
   process.exit(9);
+}}
+if (!sandbox.result.includes('↻ 重跑 1 段')) {{
+  console.error(sandbox.result);
+  process.exit(22);
 }}
 if (!sandbox.recordingResult.includes('錄音警示：偵測到可能的爆音；原始媒體檔已保留，重要內容請抽查。')) {{
   console.error(sandbox.recordingResult);
@@ -10181,6 +10186,10 @@ if (!sandbox.available.includes('quality-rerun-review-segment-7')) {{
 if (!sandbox.available.includes("rerunMeeting(43, 7, false, false, 'quality-rerun-review-segment-7')")) {{
   console.error(sandbox.available);
   process.exit(17);
+}}
+if (!sandbox.available.includes('↻ 重跑 1 段')) {{
+  console.error(sandbox.available);
+  process.exit(22);
 }}
 console.log('quality_review_segment_note_ok');
 """
