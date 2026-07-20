@@ -2907,6 +2907,89 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual(delete_response.status_code, 409)
         self.assertIn("使用中", delete_response.json()["detail"])
 
+    def test_source_media_bulk_archives_only_unlinked_live_files(self):
+        database = self._isolated_database()
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_dir = root / "source_audio"
+            output_dir = root / "output"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            (source_dir / "linked.mp3").write_bytes(b"linked")
+            (source_dir / "active.webm").write_bytes(b"active")
+            (source_dir / "orphan-a.m4a").write_bytes(b"orphan-a")
+            (source_dir / "orphan-b.webm").write_bytes(b"orphan-bb")
+            (source_dir / "_seg_old_000.mp3").write_bytes(b"temp")
+            (source_dir / "note.txt").write_text("ignored", encoding="utf-8")
+            output_path = output_dir / "linked.md"
+            output_path.write_text("linked meeting", encoding="utf-8")
+            database.save_meeting(
+                title="Linked",
+                date="2026/07/20",
+                source_audio="linked.mp3",
+                output_path=str(output_path),
+                summary="linked",
+            )
+            database.create_job(
+                "active-job",
+                payload={"audio_path": str(source_dir / "active.webm"), "output_dir": str(output_dir)},
+            )
+            database.update_job_status("active-job", "processing", "處理中")
+
+            with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
+                 mock.patch.object(main, "OUTPUT_DIR", output_dir), \
+                 mock.patch.object(main, "BACKUP_DIR", root / "backups"):
+                response = asgi_request(main.app, "POST", "/source-media/inventory/archive-unlinked")
+                inventory_response = asgi_request(main.app, "GET", "/source-media/inventory?limit=10")
+                archive_response = asgi_request(main.app, "GET", "/source-media/archive?limit=10")
+                metrics_response = asgi_request(main.app, "GET", "/metrics")
+                repeat_response = asgi_request(main.app, "POST", "/source-media/inventory/archive-unlinked")
+                orphan_a_exists = (source_dir / "orphan-a.m4a").exists()
+                orphan_b_exists = (source_dir / "orphan-b.webm").exists()
+                linked_exists = (source_dir / "linked.mp3").exists()
+                active_exists = (source_dir / "active.webm").exists()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["archived"], 2)
+        self.assertEqual(payload["archived_bytes"], len(b"orphan-a") + len(b"orphan-bb"))
+        self.assertEqual(payload["skipped"], 0)
+        self.assertEqual([item["name"] for item in payload["files"]], ["orphan-a.m4a", "orphan-b.webm"])
+        self.assertFalse(orphan_a_exists)
+        self.assertFalse(orphan_b_exists)
+        self.assertTrue(linked_exists)
+        self.assertTrue(active_exists)
+
+        self.assertEqual(inventory_response.status_code, 200)
+        inventory_payload = inventory_response.json()
+        self.assertEqual(inventory_payload["total_files"], 2)
+        self.assertEqual(inventory_payload["unlinked_files"], 0)
+        self.assertEqual(inventory_payload["active_job_files"], 1)
+        self.assertEqual(
+            sorted(item["name"] for item in inventory_payload["files"]),
+            ["active.webm", "linked.mp3"],
+        )
+
+        self.assertEqual(archive_response.status_code, 200)
+        archive_payload = archive_response.json()
+        self.assertEqual(archive_payload["total_files"], 2)
+        self.assertEqual(
+            sorted(item["name"] for item in archive_payload["files"]),
+            ["orphan-a.m4a", "orphan-b.webm"],
+        )
+        self.assertGreaterEqual(archive_payload["total_bytes"], payload["archived_bytes"])
+
+        self.assertEqual(metrics_response.status_code, 200)
+        storage = metrics_response.json()["storage"]
+        self.assertEqual(storage["source_media_files"], 2)
+        self.assertEqual(storage["source_media_unlinked_files"], 0)
+        self.assertEqual(storage["source_media_active_job_files"], 1)
+        self.assertEqual(storage["source_media_archived_files"], 2)
+        self.assertEqual(repeat_response.status_code, 200)
+        self.assertEqual(repeat_response.json()["archived"], 0)
+
     def test_source_media_inventory_reports_sha256_duplicate_groups(self):
         database = self._isolated_database()
         import backend.main as main
@@ -5249,17 +5332,20 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn('id="source-storage-sort"', html)
         self.assertIn('aria-label="原始檔排序方式"', html)
         self.assertIn('id="source-storage-refresh"', html)
+        self.assertIn('id="source-storage-archive-unlinked"', html)
         self.assertIn('id="source-storage-reset"', html)
         self.assertIn('id="source-storage-status"', html)
         self.assertIn('id="source-storage-more"', html)
         self.assertIn('id="source-storage-load-more"', html)
         self.assertIn('aria-label="關閉原始檔清單"', html)
         self.assertIn('aria-label="更新原始檔清單"', html)
+        self.assertIn('aria-label="封存所有未連結原始檔"', html)
         self.assertIn('aria-label="清除原始檔篩選條件"', html)
         self.assertIn('aria-label="原始檔預覽"', html)
         self.assertIn('aria-label="原始檔清單"', html)
         self.assertIn('aria-label="載入更多原始檔"', html)
         self.assertIn('id="source-storage-refresh" type="button" class="source-media-action source-storage-refresh" aria-label="更新原始檔清單" aria-busy="false"', html)
+        self.assertIn('id="source-storage-archive-unlinked" type="button" class="source-media-action warning source-storage-archive-unlinked" aria-label="封存所有未連結原始檔" aria-busy="false"', html)
         self.assertIn('id="source-storage-load-more" type="button" class="source-media-action source-storage-load-more" aria-label="載入更多原始檔" aria-busy="false"', html)
         self.assertIn('id="source-storage-status" class="source-storage-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"', html)
         self.assertIn('id="source-storage-list" class="source-storage-list" role="list" aria-label="原始檔清單" aria-live="polite" aria-busy="false"', html)
@@ -5295,7 +5381,7 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("payload.active_job_files", html)
         self.assertIn("file.active_job_id", html)
         self.assertIn("active_job_count", html)
-        self.assertIn("原始檔任務使用中，完成前不可刪除", html)
+        self.assertIn("原始檔任務使用中，完成前不可封存", html)
         self.assertIn("file.linked_meeting_title", html)
         self.assertIn("formatBytes(sourceBytes)", html)
         self.assertIn("原始檔", html)
@@ -5340,6 +5426,11 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("refresh.setAttribute('aria-busy', 'false');", html)
         self.assertIn("setSourceStorageStatus('正在載入更多原始檔...', false, true);", html)
         self.assertIn("async function refreshSourceStorageInventory", html)
+        self.assertIn("function syncSourceStorageArchiveUnlinkedButton", html)
+        self.assertIn("async function archiveUnlinkedSourceMedia", html)
+        self.assertIn("/source-media/inventory/archive-unlinked", html)
+        self.assertIn("sourceStorageInventoryState.archivingUnlinked", html)
+        self.assertIn(".source-media-action.warning", html)
         self.assertIn("function resetSourceStorageFilters", html)
         self.assertIn("function renderSourceStorageInventory", html)
         self.assertIn("function renderSourceStorageInventory() {\n  const list = document.getElementById('source-storage-list');\n  if (!list || !sourceStorageInventoryState.loaded) return;\n  closeSourceMediaPreview(false);", html)
@@ -5426,7 +5517,7 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn('aria-label="在新分頁開啟${mediaActionLabel}"', html)
         self.assertIn('aria-label="下載${mediaActionLabel}"', html)
         self.assertIn('aria-label="開啟連結會議"', html)
-        self.assertIn('aria-label="刪除未連結原始檔"', html)
+        self.assertIn('aria-label="封存未連結原始檔"', html)
         self.assertIn('aria-label="還原原始檔備份"', html)
         self.assertIn('data-source-mode="audio"', html)
         self.assertIn('data-source-mode="video"', html)
@@ -5450,7 +5541,7 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("method: 'DELETE'", html)
         self.assertIn("method: 'POST'", html)
         self.assertIn("payload.backup_path", html)
-        self.assertIn("已從清單移除", html)
+        self.assertIn("已封存並移至備份", html)
         self.assertIn("function restoreSourceMediaArchive", html)
         self.assertIn("已移除備份", html)
         self.assertIn('target="_blank"', html)
@@ -5458,7 +5549,7 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn('download aria-label="下載${mediaActionLabel}">下載</a>', html)
         self.assertIn("openMeetingFromSourceStorage", html)
         self.assertIn("未連結會議", html)
-        self.assertIn("請先確認這不是仍需保留的證據檔", html)
+        self.assertIn("請先確認這不是仍需保留在清單中的證據檔", html)
         self.assertIn("source-media-action danger", html)
         self.assertIn("function showNeedsReviewMeetings", html)
         self.assertIn("loadMeetings(search.value.trim())", html)

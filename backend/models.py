@@ -172,6 +172,15 @@ class SourceMediaDeleteResponse(BaseModel):
     backup_path: Optional[str] = None
 
 
+class SourceMediaBulkArchiveResponse(BaseModel):
+    """POST /source-media/inventory/archive-unlinked response payload."""
+    archived: int
+    archived_bytes: int = 0
+    files: list[SourceMediaDeleteResponse] = Field(default_factory=list)
+    skipped: int = 0
+    skipped_files: list[str] = Field(default_factory=list)
+
+
 class SourceMediaArchiveRecord(BaseModel):
     """A source media file that was removed from the live inventory and archived."""
     archive_id: str

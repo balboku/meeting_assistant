@@ -936,6 +936,15 @@
       border-color: var(--red);
       background: rgba(247,118,142,0.16);
     }
+    .source-media-action.warning {
+      color: var(--yellow);
+      border-color: rgba(224,175,104,0.42);
+      background: rgba(224,175,104,0.08);
+    }
+    .source-media-action.warning:hover {
+      border-color: var(--yellow);
+      background: rgba(224,175,104,0.16);
+    }
     .source-media-player-status {
       display: none;
       padding: 9px 10px;
@@ -1884,6 +1893,7 @@
         <option value="name_desc">檔名 Z-A</option>
       </select>
       <button id="source-storage-refresh" type="button" class="source-media-action source-storage-refresh" aria-label="更新原始檔清單" aria-busy="false" onclick="refreshSourceStorageInventory()">更新</button>
+      <button id="source-storage-archive-unlinked" type="button" class="source-media-action warning source-storage-archive-unlinked" aria-label="封存所有未連結原始檔" aria-busy="false" onclick="archiveUnlinkedSourceMedia()" disabled>封存未連結</button>
       <button id="source-storage-reset" type="button" class="source-media-action source-storage-reset" aria-label="清除原始檔篩選條件" onclick="resetSourceStorageFilters()">清除</button>
     </div>
     <div id="source-storage-status" class="source-storage-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></div>
@@ -2011,7 +2021,8 @@ let sourceStorageInventoryState = {
   payload: {},
   archivePayload: {},
   loadedAt: null,
-  loaded: false
+  loaded: false,
+  archivingUnlinked: false
 };
 let sourceMediaPreviewReturnFocus = null;
 const SOURCE_STORAGE_FETCH_LIMIT = 500;
@@ -2317,19 +2328,19 @@ function openMeetingFromSourceStorage(meetingId) {
 
 async function deleteUnlinkedSourceMedia(filename = '') {
   if (!filename) return;
-  if (!confirm(`刪除未連結原始檔「${filename}」？\n請先確認這不是仍需保留的證據檔。`)) return;
+  if (!confirm(`封存未連結原始檔「${filename}」？\n系統會移到已移除備份，請先確認這不是仍需保留在清單中的證據檔。`)) return;
 
   try {
     const res = await fetch(`${API}/source-media/inventory/${encodeURIComponent(filename)}`, { method: 'DELETE' });
     if (!res.ok) throw new Error(await apiErrorMessage(res));
     const payload = await res.json().catch(() => ({}));
     if (payload.backup_path) {
-      alert(`已從清單移除，並移至備份：\n${payload.backup_path}`);
+      alert(`已封存並移至備份：\n${payload.backup_path}`);
     }
     await openSourceStorageInventory();
     await loadMetrics();
   } catch (err) {
-    alert(`刪除原始檔失敗：${err.message}`);
+    alert(`封存原始檔失敗：${err.message}`);
   }
 }
 
@@ -2381,8 +2392,8 @@ function renderSourceStorageFile(file) {
   const deleteAction = linked
     ? `<button type="button" class="source-media-action" aria-label="開啟連結會議" onclick="openMeetingFromSourceStorage(${meetingId})">開會議</button>`
     : active
-      ? `<button type="button" class="source-media-action" aria-label="原始檔任務使用中，完成前不可刪除" title="任務 ${escapeHtml(activeJobId || activeJobStatus || '使用中')} 使用中，完成前不可刪除" disabled>使用中</button>`
-      : `<button type="button" class="source-media-action danger" aria-label="刪除未連結原始檔" data-source-file="${escapeHtml(filename)}" onclick="deleteUnlinkedSourceMedia(this.dataset.sourceFile)">刪除</button>`;
+      ? `<button type="button" class="source-media-action" aria-label="原始檔任務使用中，完成前不可封存" title="任務 ${escapeHtml(activeJobId || activeJobStatus || '使用中')} 使用中，完成前不可封存" disabled>使用中</button>`
+      : `<button type="button" class="source-media-action danger" aria-label="封存未連結原始檔" data-source-file="${escapeHtml(filename)}" onclick="deleteUnlinkedSourceMedia(this.dataset.sourceFile)">封存</button>`;
   const actions = [
     `<button type="button" class="source-media-action" aria-label="預覽${mediaActionLabel}" data-source-url="${escapeHtml(sourceUrl)}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${escapeHtml(filename)}" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile)">預覽</button>`,
     `<a class="source-media-action" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer" aria-label="在新分頁開啟${mediaActionLabel}">新分頁</a>`,
@@ -2523,6 +2534,72 @@ async function refreshSourceStorageInventory() {
   }
 }
 
+function syncSourceStorageArchiveUnlinkedButton() {
+  const button = document.getElementById('source-storage-archive-unlinked');
+  if (!button) return;
+  const payload = sourceStorageInventoryState.payload || {};
+  const unlinkedFiles = Number(payload.unlinked_files || 0);
+  const unlinkedBytes = Number(payload.unlinked_bytes || 0);
+  const busy = Boolean(sourceStorageInventoryState.archivingUnlinked);
+  const hasUnlinked = sourceStorageInventoryState.loaded && unlinkedFiles > 0;
+  button.disabled = busy || !hasUnlinked;
+  button.setAttribute('aria-busy', String(busy));
+  button.textContent = busy
+    ? '封存中'
+    : unlinkedFiles > 0
+      ? `封存未連結 (${unlinkedFiles})`
+      : '封存未連結';
+  button.title = hasUnlinked
+    ? `將 ${unlinkedFiles} 個未連結原始檔移至已移除備份（${formatBytes(unlinkedBytes)}）`
+    : '目前沒有可批次封存的未連結原始檔';
+}
+
+async function archiveUnlinkedSourceMedia() {
+  const list = document.getElementById('source-storage-list');
+  const payload = sourceStorageInventoryState.payload || {};
+  const unlinkedFiles = Number(payload.unlinked_files || 0);
+  const unlinkedBytes = Number(payload.unlinked_bytes || 0);
+  if (!sourceStorageInventoryState.loaded || unlinkedFiles <= 0) {
+    setSourceStorageStatus('目前沒有可封存的未連結原始檔。');
+    syncSourceStorageArchiveUnlinkedButton();
+    return;
+  }
+  if (!confirm(`封存 ${unlinkedFiles} 個未連結原始檔？\n容量約 ${formatBytes(unlinkedBytes)}。\n系統會移到已移除備份，保留期間內可還原。`)) return;
+
+  sourceStorageInventoryState.archivingUnlinked = true;
+  syncSourceStorageArchiveUnlinkedButton();
+  setElementBusy(list, true);
+  setSourceStorageStatus(`正在封存 ${unlinkedFiles} 個未連結原始檔...`, false, true);
+
+  try {
+    const res = await fetch(`${API}/source-media/inventory/archive-unlinked`, { method: 'POST' });
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    const result = await res.json().catch(() => ({}));
+    const page = await fetchSourceStorageInventoryPage(0, 0);
+    sourceStorageInventoryState = {
+      files: page.files,
+      archivedFiles: page.archivedFiles,
+      payload: page.payload,
+      archivePayload: page.archivePayload,
+      loadedAt: new Date().toISOString(),
+      loaded: true,
+      archivingUnlinked: false
+    };
+    renderSourceStorageInventory();
+    const archived = Number(result.archived || 0);
+    const skipped = Number(result.skipped || 0);
+    const skippedText = skipped > 0 ? `；跳過 ${skipped} 個已變更或使用中的檔案` : '';
+    setSourceStorageStatus(`已封存 ${archived} 個未連結原始檔（${formatBytes(result.archived_bytes)}）${skippedText}。`);
+    await loadMetrics();
+  } catch (err) {
+    sourceStorageInventoryState.archivingUnlinked = false;
+    setSourceStorageStatus(`封存未連結原始檔失敗：${err.message}`, true);
+    syncSourceStorageArchiveUnlinkedButton();
+  } finally {
+    setElementBusy(list, false);
+  }
+}
+
 function sourceStorageRowsHtml(title, rows, renderer, emptyIcon, emptyText) {
   const body = rows.length
     ? rows.map(renderer).join('')
@@ -2646,6 +2723,7 @@ function renderSourceStorageInventory() {
   }
   list.innerHTML = `${summary}${sections.join('')}`;
   syncSourceStorageLoadMoreButton();
+  syncSourceStorageArchiveUnlinkedButton();
 }
 
 async function fetchSourceStorageInventoryPage(liveOffset = 0, archiveOffset = 0) {
@@ -2688,7 +2766,8 @@ async function loadMoreSourceStorageInventory() {
       payload: page.payload,
       archivePayload: page.archivePayload,
       loadedAt: new Date().toISOString(),
-      loaded: true
+      loaded: true,
+      archivingUnlinked: false
     };
     renderSourceStorageInventory();
     setSourceStorageStatus(sourceStorageStatusSummary());
@@ -2702,6 +2781,7 @@ async function loadMoreSourceStorageInventory() {
       button.textContent = previousLabel;
     }
     syncSourceStorageLoadMoreButton();
+    syncSourceStorageArchiveUnlinkedButton();
   }
 }
 
@@ -2716,6 +2796,7 @@ async function openSourceStorageInventory() {
   list.innerHTML = '<div class="detail-placeholder"><div class="loading-spinner"></div><p>載入原始檔清單...</p></div>';
   setSourceStorageStatus('正在更新原始檔清單...', false, true);
   syncSourceStorageLoadMoreButton();
+  syncSourceStorageArchiveUnlinkedButton();
 
   try {
     const page = await fetchSourceStorageInventoryPage(0, 0);
@@ -2725,7 +2806,8 @@ async function openSourceStorageInventory() {
       payload: page.payload,
       archivePayload: page.archivePayload,
       loadedAt: new Date().toISOString(),
-      loaded: true
+      loaded: true,
+      archivingUnlinked: false
     };
     renderSourceStorageInventory();
     setSourceStorageStatus(sourceStorageStatusSummary());
@@ -2733,6 +2815,7 @@ async function openSourceStorageInventory() {
     sourceStorageInventoryState.loaded = false;
     setSourceStorageStatus(`更新失敗：${err.message}`, true);
     syncSourceStorageLoadMoreButton();
+    syncSourceStorageArchiveUnlinkedButton();
     list.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>無法讀取原始檔清單：${escapeHtml(err.message)}</p></div>`;
   } finally {
     setElementBusy(list, false);

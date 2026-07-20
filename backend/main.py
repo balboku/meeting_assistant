@@ -85,6 +85,7 @@ from backend.models import (
     StorageMetrics,
     SourceMediaArchiveRecord,
     SourceMediaArchiveResponse,
+    SourceMediaBulkArchiveResponse,
     SourceMediaDeleteResponse,
     SourceMediaInventoryResponse,
     SourceMediaRestoreResponse,
@@ -1060,12 +1061,64 @@ def _delete_unlinked_source_media(filename: str) -> SourceMediaDeleteResponse:
             source_media_type=source_media_type,
         )
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"刪除原始檔失敗：{exc}")
+        raise HTTPException(status_code=500, detail=f"封存原始檔失敗：{exc}")
     return SourceMediaDeleteResponse(
         deleted=True,
         name=source_path.name,
         bytes=int(file_bytes),
         backup_path=str(backup_path),
+    )
+
+
+def _unlinked_source_media_names() -> list[str]:
+    source_refs = _source_audio_refs_by_name()
+    active_refs = _active_source_audio_refs_by_name(SOURCE_AUDIO_DIR)
+    normalized_suffixes = {suffix.lower() for suffix in SUPPORTED_MEDIA_FORMATS}
+    names: list[str] = []
+
+    try:
+        entries = list(SOURCE_AUDIO_DIR.iterdir())
+    except OSError:
+        return []
+
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        if _is_source_media_temp_segment_name(entry.name):
+            continue
+        try:
+            if not entry.is_file():
+                continue
+            if entry.suffix.lower() not in normalized_suffixes:
+                continue
+        except OSError:
+            continue
+        if entry.name in source_refs or entry.name in active_refs:
+            continue
+        names.append(entry.name)
+
+    return sorted(names)
+
+
+def _archive_unlinked_source_media_inventory() -> SourceMediaBulkArchiveResponse:
+    archived_files: list[SourceMediaDeleteResponse] = []
+    skipped_files: list[str] = []
+
+    for filename in _unlinked_source_media_names():
+        try:
+            archived_files.append(_delete_unlinked_source_media(filename))
+        except HTTPException as exc:
+            if exc.status_code in {404, 409}:
+                skipped_files.append(filename)
+                continue
+            raise
+
+    return SourceMediaBulkArchiveResponse(
+        archived=len(archived_files),
+        archived_bytes=sum(int(item.bytes or 0) for item in archived_files),
+        files=archived_files,
+        skipped=len(skipped_files),
+        skipped_files=skipped_files,
     )
 
 
@@ -1143,6 +1196,17 @@ async def source_media_inventory(
 ):
     """回傳保留原始錄音/錄影的唯讀維運清單。"""
     return _source_media_inventory(limit=limit, offset=offset)
+
+
+@app.post(
+    "/source-media/inventory/archive-unlinked",
+    response_model=SourceMediaBulkArchiveResponse,
+    summary="批次封存未連結原始媒體檔",
+    tags=["系統"],
+)
+async def archive_unlinked_source_media():
+    """將所有未連結任何會議且非任務使用中的原始錄音/錄影移至備份區。"""
+    return _archive_unlinked_source_media_inventory()
 
 
 @app.get(
@@ -1230,11 +1294,11 @@ async def get_source_media_inventory_file(
 @app.delete(
     "/source-media/inventory/{filename}",
     response_model=SourceMediaDeleteResponse,
-    summary="刪除未連結原始媒體檔",
+    summary="封存未連結原始媒體檔",
     tags=["系統"],
 )
 async def delete_unlinked_source_media(filename: str):
-    """只允許刪除未連結任何會議的保留原始錄音/錄影檔。"""
+    """只允許封存未連結任何會議的保留原始錄音/錄影檔。"""
     return _delete_unlinked_source_media(filename)
 
 
