@@ -62,7 +62,7 @@ MAX_UPLOAD_WAIT_SECONDS = 600
 POLLING_INTERVAL        = 3
 SEGMENT_MINUTES         = 10
 TIMESTAMP_PATTERN       = re.compile(r"\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\d)\]")
-SEGMENT_CACHE_VERSION   = 3
+SEGMENT_CACHE_VERSION   = 4
 SEGMENT_CACHE_DIRNAME   = "segment_cache"
 SEGMENT_TARGET_SECONDS  = SEGMENT_MINUTES * 60
 SEGMENT_SILENCE_WINDOW_SECONDS = int(os.getenv("SEGMENT_SILENCE_WINDOW_SECONDS", "45"))
@@ -74,6 +74,10 @@ AUDIO_PREPROCESSING_VERSION = 1
 AUDIO_MIN_DBFS = float(os.getenv("AUDIO_MIN_DBFS", "-55"))
 AUDIO_NORMALIZE_BELOW_DBFS = float(os.getenv("AUDIO_NORMALIZE_BELOW_DBFS", "-28"))
 SEGMENT_COMPLETENESS_GRACE_SECONDS = 120
+SEGMENT_TIMESTAMP_BOUNDARY_TOLERANCE_SECONDS = max(
+    0,
+    int(os.getenv("SEGMENT_TIMESTAMP_BOUNDARY_TOLERANCE_SECONDS", "5")),
+)
 SEGMENT_RECOVERY_SPLIT_SECONDS = (300, 180, 120, 60, 30, 15, 10, 5)
 TRANSCRIPT_SECTION_HEADING = "## 📝 四、完整逐字稿 (Verbatim Transcript)"
 TRANSCRIPT_SECTION_PATTERN = re.compile(
@@ -94,6 +98,7 @@ SEGMENT_LONG_TURN_CHARS = 1200
 SEGMENT_MAX_NORMALIZED_TURN_CHARS = 8000
 SEGMENT_REPEATED_NGRAM_CHARS = 18
 SEGMENT_REPEATED_NGRAM_THRESHOLD = 12
+SEGMENT_STRUCTURED_TURN_REPEAT_THRESHOLD = 12
 TRANSCRIPT_INTEGRITY_MIN_CHAR_RATIO = 0.95
 TRANSCRIPT_INTEGRITY_MIN_TIMESTAMP_RATIO = 0.95
 TRANSCRIPT_OMISSION_MARKERS = (
@@ -853,28 +858,57 @@ def _segment_repetition_quality_issue(transcript: str) -> Optional[str]:
     return None
 
 
+def _structured_numeric_turn_quality_issue(transcript: str) -> Optional[str]:
+    """Detect pattern-completion loops that change only the numeric values."""
+    templates: dict[str, list[tuple[str, ...]]] = {}
+    number_pattern = re.compile(r"[+-]?\d+(?:[.,]\d+)?%?")
+
+    for raw_line in (transcript or "").splitlines():
+        line = TIMESTAMP_PATTERN.sub("", raw_line)
+        line = re.sub(r"\*\*\[[^\]]+\]\*\*", "", line).strip()
+        numbers = tuple(number_pattern.findall(line))
+        if len(numbers) < 2:
+            continue
+
+        template = number_pattern.sub("#", line)
+        template = re.sub(r"[^\w\u4e00-\u9fff#]+", "", template)
+        if len(template) < 6:
+            continue
+        templates.setdefault(template, []).append(numbers)
+
+    for numeric_variants in templates.values():
+        count = len(numeric_variants)
+        distinct_count = len(set(numeric_variants))
+        if (
+            count >= SEGMENT_STRUCTURED_TURN_REPEAT_THRESHOLD
+            and distinct_count >= SEGMENT_STRUCTURED_TURN_REPEAT_THRESHOLD
+        ):
+            return (
+                "分段疑似數列延伸轉錄幻覺"
+                f"（相同句型僅替換數字，共 {count} 次）"
+            )
+    return None
+
+
 def _speaker_context_from_transcripts(transcripts: list[str], max_lines: int = 8) -> str:
-    """Build compact prior-speaker context for the next segmented STT call."""
+    """Expose only prior anonymous labels, never prior utterance text, to STT."""
     if not transcripts:
         return ""
 
     text = "\n".join(transcripts)
     labels = sorted(set(re.findall(r"\*\*\[([^\]]+)\]\*\*", text)))
-    turns = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and re.search(r"\*\*\[[^\]]+\]\*\*", line)
-    ][-max_lines:]
-    if not labels and not turns:
+    labels.extend(
+        match
+        for match in re.findall(r"(?:發言者\s*[A-Z]|發言者不明|多人重疊)", text)
+        if match not in labels
+    )
+    if not labels:
         return ""
 
-    parts = ["Existing speaker labels from earlier segments:"]
-    if labels:
-        parts.append(", ".join(labels[:12]))
-    if turns:
-        parts.append("Recent speaker turns:")
-        parts.extend(f"- {line[:180]}" for line in turns)
-    return "\n".join(parts)
+    # Keep the legacy argument for compatibility while intentionally refusing
+    # to carry semantic content across audio chunks.
+    del max_lines
+    return "Existing speaker labels from earlier segments:\n" + ", ".join(labels[:12])
 
 
 def _segment_transcript_quality_issues(
@@ -882,6 +916,7 @@ def _segment_transcript_quality_issues(
     segment_index: int,
     total_segments: int,
     segment_minutes: int = SEGMENT_MINUTES,
+    expected_start_seconds: Optional[int] = None,
     expected_end_seconds: Optional[int] = None,
     is_last_segment: Optional[bool] = None,
 ) -> list[str]:
@@ -900,20 +935,43 @@ def _segment_transcript_quality_issues(
     if repetition_issue:
         issues.append(repetition_issue)
 
-    if is_last_segment:
-        return issues
+    structured_numeric_issue = _structured_numeric_turn_quality_issue(transcript)
+    if structured_numeric_issue:
+        issues.append(structured_numeric_issue)
 
     timestamps = [
         int(match.group("minutes")) * 60 + int(match.group("seconds"))
         for match in TIMESTAMP_PATTERN.finditer(transcript)
     ]
+    expected_start = expected_start_seconds
+    if expected_start is None:
+        expected_start = segment_index * segment_minutes * 60
+    expected_end = expected_end_seconds
+    if expected_end is None:
+        expected_end = (segment_index + 1) * segment_minutes * 60
+
+    if timestamps:
+        earliest_timestamp = min(timestamps)
+        latest_timestamp = max(timestamps)
+        tolerance = SEGMENT_TIMESTAMP_BOUNDARY_TOLERANCE_SECONDS
+        if earliest_timestamp < expected_start - tolerance:
+            issues.append(
+                f"分段時間戳早於段首 {_format_mmss(expected_start)}："
+                f"{_format_mmss(earliest_timestamp)}"
+            )
+        if latest_timestamp > expected_end + tolerance:
+            issues.append(
+                f"分段時間戳超過段尾 {_format_mmss(expected_end)}："
+                f"{_format_mmss(latest_timestamp)}"
+            )
+
+    if is_last_segment:
+        return issues
+
     if not timestamps:
         issues.append("非最後分段缺少時間戳")
         return issues
 
-    expected_end = expected_end_seconds
-    if expected_end is None:
-        expected_end = (segment_index + 1) * segment_minutes * 60
     latest_timestamp = max(timestamps)
     if latest_timestamp < expected_end - SEGMENT_COMPLETENESS_GRACE_SECONDS:
         issues.append(
@@ -929,6 +987,7 @@ def _raise_if_segment_transcript_incomplete(
     segment_index: int,
     total_segments: int,
     segment_minutes: int = SEGMENT_MINUTES,
+    expected_start_seconds: Optional[int] = None,
     expected_end_seconds: Optional[int] = None,
     is_last_segment: Optional[bool] = None,
 ) -> None:
@@ -937,6 +996,7 @@ def _raise_if_segment_transcript_incomplete(
         segment_index=segment_index,
         total_segments=total_segments,
         segment_minutes=segment_minutes,
+        expected_start_seconds=expected_start_seconds,
         expected_end_seconds=expected_end_seconds,
         is_last_segment=is_last_segment,
     )
@@ -945,6 +1005,38 @@ def _raise_if_segment_transcript_incomplete(
             f"第 {segment_index + 1}/{total_segments} 段轉錄不完整："
             + "；".join(issues)
         )
+
+
+def _record_segment_reuse_blocking_issues(
+    transcript: str,
+    *,
+    segment_index: int,
+    total_segments: int,
+    expected_start_seconds: int,
+    expected_end_seconds: int,
+) -> list[str]:
+    """Return high-risk issues that make an old record unsafe to reuse.
+
+    Legacy records may have sparse timestamps, so incompleteness alone remains
+    reviewable. Hallucination markers and impossible time bounds must instead
+    force a fresh transcription, even when that segment was not selected.
+    """
+    issues = _segment_transcript_quality_issues(
+        transcript=transcript,
+        segment_index=segment_index,
+        total_segments=total_segments,
+        segment_minutes=SEGMENT_MINUTES,
+        expected_start_seconds=expected_start_seconds,
+        expected_end_seconds=expected_end_seconds,
+        is_last_segment=segment_index >= total_segments - 1,
+    )
+    blocking_markers = (
+        "轉錄幻覺",
+        "自動過濾/截斷",
+        "早於段首",
+        "超過段尾",
+    )
+    return [issue for issue in issues if any(marker in issue for marker in blocking_markers)]
 
 
 def _safe_segment_cache_name(job_id: str) -> str:
@@ -1056,14 +1148,17 @@ def _load_segment_transcript_cache(
         if not isinstance(transcript, str):
             continue
         bounds = context.get("segment_bounds") or []
+        expected_start = None
         expected_end = None
         if segment_index < len(bounds) and len(bounds[segment_index]) >= 2:
+            expected_start = int(bounds[segment_index][0])
             expected_end = int(bounds[segment_index][1])
         issues = _segment_transcript_quality_issues(
             transcript=transcript,
             segment_index=segment_index,
             total_segments=int(context.get("total_segments") or 1),
             segment_minutes=int(context.get("segment_minutes") or SEGMENT_MINUTES),
+            expected_start_seconds=expected_start,
             expected_end_seconds=expected_end,
         )
         if issues:
@@ -1728,9 +1823,13 @@ def _split_audio_to_subsegments(audio_path: Path, chunk_seconds: int) -> list[tu
         end_seconds = max(1, (duration_ms + 999) // 1000)
         return [(audio_path, 0, end_seconds)]
 
+    # Split evenly instead of leaving a tiny final chunk (for example,
+    # 603 seconds used to become 300 + 300 + 3). Very short tails are highly
+    # prone to semantic continuation when an STT model receives prior context.
+    part_count = max(2, math.ceil(duration_ms / chunk_ms))
+    boundaries = [round(index * duration_ms / part_count) for index in range(part_count + 1)]
     subsegments: list[tuple[Path, int, int]] = []
-    for i, start_ms in enumerate(range(0, duration_ms, chunk_ms)):
-        end_ms = min(duration_ms, start_ms + chunk_ms)
+    for i, (start_ms, end_ms) in enumerate(zip(boundaries, boundaries[1:])):
         chunk = audio[start_ms:end_ms]
         sub_path = audio_path.parent / f"_sub_{audio_path.stem}_{chunk_seconds}s_{i:03d}.mp3"
         chunk.export(str(sub_path), format="mp3", parameters=["-q:a", "3"])
@@ -1784,6 +1883,7 @@ def _transcribe_segment_with_recovery(
             segment_index=seg_index,
             total_segments=total_segs,
             segment_minutes=SEGMENT_MINUTES,
+            expected_start_seconds=offset_seconds,
             expected_end_seconds=offset_seconds + duration_seconds,
             is_last_segment=is_last_segment,
         )
@@ -1865,9 +1965,19 @@ def _transcribe_segment_with_recovery(
             )
             recovered.append(child_transcript)
 
-        return _sort_transcript_blocks_by_timestamp(
+        recovered_transcript = _sort_transcript_blocks_by_timestamp(
             "\n\n".join(part.strip() for part in recovered if part.strip())
         )
+        _raise_if_segment_transcript_incomplete(
+            transcript=recovered_transcript,
+            segment_index=seg_index,
+            total_segments=total_segs,
+            segment_minutes=SEGMENT_MINUTES,
+            expected_start_seconds=offset_seconds,
+            expected_end_seconds=offset_seconds + duration_seconds,
+            is_last_segment=is_last_segment,
+        )
+        return recovered_transcript
 
 
 def _transcribe_segment(
@@ -1954,7 +2064,8 @@ def _build_segment_prompt(seg_index: int, total_segs: int, speaker_context: str 
         prompt += (
             "\n\n# Cross-segment speaker continuity\n"
             "Use the prior speaker context below only to keep anonymous labels stable across chunks. "
-            "If the same voice continues, reuse the same label. If uncertain, use an unknown-speaker label.\n\n"
+            "If the same voice continues, reuse the same label. If uncertain, use an unknown-speaker label. "
+            "The context contains labels only: never infer, continue, paraphrase, or copy prior utterances.\n\n"
             f"{speaker_context.strip()}"
         )
     return prompt
@@ -2841,8 +2952,25 @@ def process_audio_task(
                     )
                     transcript_source = "cache" if transcript is not None else ""
                     if transcript is None:
-                        transcript = existing_segment_transcripts.get(i)
-                        transcript_source = "record" if transcript is not None else ""
+                        record_transcript = existing_segment_transcripts.get(i)
+                        if record_transcript is not None:
+                            reuse_issues = _record_segment_reuse_blocking_issues(
+                                record_transcript,
+                                segment_index=i,
+                                total_segments=total_segs,
+                                expected_start_seconds=audio_slice.start_seconds,
+                                expected_end_seconds=audio_slice.end_seconds,
+                            )
+                            if reuse_issues:
+                                logger.warning(
+                                    "[%s] ⚠️ 第 %s 段原會議逐字稿不安全，改為重新轉錄：%s",
+                                    job_id,
+                                    i + 1,
+                                    "；".join(reuse_issues),
+                                )
+                            else:
+                                transcript = record_transcript
+                                transcript_source = "record"
                 if transcript is not None:
                     source_label = "原會議逐字稿" if transcript_source == "record" else "轉錄快取"
                     logger.info(f"[{job_id}] ♻️  使用第 {i + 1}/{total_segs} 段{source_label}")
@@ -2959,6 +3087,8 @@ def process_audio_task(
                     segment_index=0,
                     total_segments=total_segs,
                     segment_minutes=SEGMENT_MINUTES,
+                    expected_start_seconds=audio_slice.start_seconds,
+                    expected_end_seconds=audio_slice.end_seconds,
                 )
                 _save_segment_transcript_cache(
                     output_dir=output_dir,

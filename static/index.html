@@ -2841,6 +2841,16 @@ function cardWarningTypeLabel(warningPreview = '', hasReviewSegments = false, wa
   return '品質警示';
 }
 
+function contextualCardWarningTypeLabel(defaultLabel = '品質警示', qualityType = 'all') {
+  return {
+    summary: '摘要警示',
+    recording: '錄音警示',
+    transcript: '逐字稿警示',
+    rerunnable: '可重跑分段',
+    other: '品質警示',
+  }[qualityType] || defaultLabel;
+}
+
 function isRecordingQualityWarning(warning = '') {
   return /錄音|音檔|媒體|音量|爆音|靜音|聲道|取樣率/.test(String(warning || ''));
 }
@@ -3018,8 +3028,40 @@ function renderCardQuality(record, qualityType = 'all') {
     .map(segment => String(segment?.title || segment || '').trim())
     .filter(Boolean);
   const reviewSegmentSummary = String(record?.quality_review_segment_summary || '').trim();
+  const warningLines = [...new Set(
+    [warningText, warningPreview]
+      .flatMap(value => String(value || '').split(/\r?\n/))
+      .map(value => value.trim())
+      .filter(Boolean)
+  )];
+  const isTranscriptLine = line => isTranscriptQualityWarning(line)
+    || line.includes('需複核分段：')
+    || line.includes('問題位置：')
+    || line.includes('曾觸發轉錄補救');
+  const isRecordingLine = line => isRecordingQualityWarning(line)
+    && !isTranscriptLine(line)
+    && !line.includes('摘要品質警示');
+  const contextualWarningCount = (type = 'all') => {
+    if (type === 'summary') {
+      return warningLines.length > 1
+        ? warningLines.filter(line => line.includes('摘要品質警示')).length
+        : warningCount;
+    }
+    if (type === 'recording') {
+      const count = warningLines.filter(isRecordingLine).length;
+      return warningLines.length > 1 && count > 0 ? count : warningCount;
+    }
+    if (type === 'other') {
+      const count = warningLines.filter(line => !line.includes('摘要品質警示') && !isRecordingQualityWarning(line) && !isTranscriptQualityWarning(line)).length;
+      return warningLines.length > 1 && count > 0 ? count : warningCount;
+    }
+    return warningCount;
+  };
   const chips = [];
   let hasTranscriptWarningChip = false;
+  const filterType = ['summary', 'recording', 'transcript', 'rerunnable', 'other'].includes(qualityType)
+    ? qualityType
+    : 'all';
   if (score !== null && score !== undefined) {
     const reviewClass = Number(score) < 85 || /需|警|低|不/.test(label)
       ? 'needs-review'
@@ -3032,15 +3074,19 @@ function renderCardQuality(record, qualityType = 'all') {
     chips.push(`<span class="card-quality-chip needs-review">${escapeHtml(label)}</span>`);
   }
   if (warningCount > 0) {
-    const warningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0, warningText);
+    const defaultWarningType = cardWarningTypeLabel(warningPreview, reviewSegmentDetails.length > 0, warningText);
+    const warningType = contextualCardWarningTypeLabel(defaultWarningType, filterType);
     const hasSummaryWarning = warningText.includes('摘要品質警示');
     const hasRecordingWarning = isRecordingQualityWarning(warningText);
-    hasTranscriptWarningChip = warningType === '逐字稿警示';
-    const warningChipText = hasTranscriptWarningChip && reviewSegments.length
+    const hasReviewContext = ['transcript', 'rerunnable'].includes(filterType)
+      || (filterType === 'all' && defaultWarningType === '逐字稿警示');
+    hasTranscriptWarningChip = ['逐字稿警示', '可重跑分段'].includes(warningType);
+    const warningTypeCount = contextualWarningCount(filterType);
+    const warningChipText = hasReviewContext && reviewSegments.length
       ? `${warningType} ${reviewSegments.length} 段`
-      : `${warningType} ${warningCount}`;
-    const warningChipTitle = hasTranscriptWarningChip && reviewSegments.length
-      ? `逐字稿需複核分段：${reviewSegmentSummary || reviewSegmentTitles.join('、') || reviewSegments.join('、')}`
+      : `${warningType} ${warningTypeCount || warningCount}`;
+    const warningChipTitle = hasReviewContext && reviewSegments.length
+      ? `${warningType}：${reviewSegmentSummary || reviewSegmentTitles.join('、') || reviewSegments.join('、')}`
       : (warningText || warningPreview || warningType);
     chips.push(`<span class="card-quality-chip needs-review" title="${escapeHtml(warningChipTitle)}">${escapeHtml(warningChipText)}</span>`);
     if (hasSummaryWarning && hasRecordId) {
@@ -3103,22 +3149,6 @@ function renderCardQuality(record, qualityType = 'all') {
       .map(segment => String(segment.reason || '').trim())
       .filter(Boolean);
 
-  const filterType = ['summary', 'recording', 'transcript', 'rerunnable', 'other'].includes(qualityType)
-    ? qualityType
-    : 'all';
-  const warningLines = [...new Set(
-    [warningText, warningPreview]
-      .flatMap(value => String(value || '').split(/\r?\n/))
-      .map(value => value.trim())
-      .filter(Boolean)
-  )];
-  const isTranscriptLine = line => isTranscriptQualityWarning(line)
-    || line.includes('需複核分段：')
-    || line.includes('問題位置：')
-    || line.includes('曾觸發轉錄補救');
-  const isRecordingLine = line => isRecordingQualityWarning(line)
-    && !isTranscriptLine(line)
-    && !line.includes('摘要品質警示');
   const filteredWarningReason = (() => {
     if (filterType === 'summary') {
       return warningLines.find(line => line.includes('摘要品質警示')) || '';
