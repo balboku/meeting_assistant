@@ -3308,6 +3308,7 @@ function reviewIssueFocusSeconds(issues = [], fallbackSeconds = null) {
   const match = String(issueText || '').match(/(?:重複時間|重複時段|問題時間|異常時間)[：:]\s*(\d{1,3}:[0-5]\d)/);
   const issueSeconds = parseClockSeconds(match?.[1]);
   if (issueSeconds !== null) return issueSeconds;
+  if (fallbackSeconds === null || fallbackSeconds === undefined || fallbackSeconds === '') return null;
   const seconds = Number(fallbackSeconds);
   return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
 }
@@ -3326,14 +3327,27 @@ function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegment
     if (!Number.isInteger(index) || index < 0) return;
     const startSeconds = Number(sourceSegment?.start_seconds);
     const hasStartSeconds = Number.isFinite(startSeconds) && startSeconds >= 0;
-    const focusSeconds = reviewIssueFocusSeconds(sourceSegment?.issues || [], hasStartSeconds ? startSeconds : null);
+    const issueFocusSeconds = reviewIssueFocusSeconds(sourceSegment?.issues || [], null);
+    const hasIssueFocusSeconds = issueFocusSeconds !== null;
+    const focusSeconds = hasIssueFocusSeconds
+      ? issueFocusSeconds
+      : reviewIssueFocusSeconds([], hasStartSeconds ? startSeconds : null);
     const hasFocusSeconds = focusSeconds !== null;
     if (knownIndices.size && !knownIndices.has(index) && !hasFocusSeconds) return;
     if (!knownIndices.size && !hasFocusSeconds) return;
-    if (targets.some(target => target.index === index)) return;
+    const focusPrecision = hasIssueFocusSeconds ? 2 : hasFocusSeconds ? 1 : 0;
+    const existing = targets.find(target => target.index === index);
+    if (existing) {
+      if (hasFocusSeconds && focusPrecision > (existing.focus_precision || 0)) {
+        existing.start_seconds = focusSeconds;
+        existing.focus_precision = focusPrecision;
+      }
+      return;
+    }
     targets.push({
       index,
       start_seconds: hasFocusSeconds ? focusSeconds : null,
+      focus_precision: focusPrecision,
     });
   };
   const addIndex = (rawIndex, sourceText = '') => {
@@ -3375,7 +3389,9 @@ function qualityWarningSegmentTargets(warning = '', segments = [], reviewSegment
   if (isTranscriptWarning) {
     (reviewSegments || []).forEach(segment => addTarget(Number(segment?.index), segment));
   }
-  return targets.sort((a, b) => a.index - b.index);
+  return targets
+    .sort((a, b) => a.index - b.index)
+    .map(({ index, start_seconds }) => ({ index, start_seconds }));
 }
 
 function qualityWarningSegmentIndices(warning = '', segments = [], reviewSegments = []) {

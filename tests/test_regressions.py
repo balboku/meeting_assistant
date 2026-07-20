@@ -6202,6 +6202,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function parseClockSeconds", html)
         self.assertIn("return Number(match[1]) * 60 + Number(match[2]);", html)
         self.assertIn("function reviewIssueFocusSeconds", html)
+        self.assertIn("if (fallbackSeconds === null || fallbackSeconds === undefined || fallbackSeconds === '') return null;", html)
         self.assertIn("function qualityWarningSegmentTargets", html)
         self.assertIn("function qualityWarningSegmentIndices", html)
         self.assertIn("function reviewSegmentIssueSummary", html)
@@ -6217,6 +6218,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const isTranscriptWarning = text.startsWith('逐字稿品質警示');", html)
         self.assertIn("if (isTranscriptWarning)", html)
         self.assertIn("(reviewSegments || []).forEach(segment => addTarget(Number(segment?.index), segment));", html)
+        self.assertIn("const issueFocusSeconds = reviewIssueFocusSeconds(sourceSegment?.issues || [], null);", html)
+        self.assertIn("focusPrecision > (existing.focus_precision || 0)", html)
+        self.assertIn(".map(({ index, start_seconds }) => ({ index, start_seconds }));", html)
         self.assertIn("return qualityWarningSegmentTargets(warning, segments, reviewSegments).map(target => target.index);", html)
         self.assertIn("const segmentTimeRangeMatcher = /(\\d{1,3}:[0-5]\\d)\\s*(?:-|–|—|~|至|到)\\s*(\\d{1,3}:[0-5]\\d)/;", html)
         self.assertIn("const matchers = [/第\\s*(\\d+)\\s*段/g, /\\bSegment\\s*#?\\s*(\\d+)\\b/gi];", html)
@@ -7094,6 +7098,10 @@ if (!sandbox.result.includes('focusQualitySegment(1, 612)')) {{
 if (!sandbox.partial.includes('定位第 2 段') || !sandbox.partial.includes('定位第 4 段') || !sandbox.partial.includes('定位第 6 段')) {{
   console.error(sandbox.partial);
   process.exit(10);
+}}
+if (!sandbox.partial.includes('focusQualitySegment(1, 612)')) {{
+  console.error(sandbox.partial);
+  process.exit(12);
 }}
 if (!sandbox.partial.includes('focusQualitySegment(5, 3062)')) {{
   console.error(sandbox.partial);
