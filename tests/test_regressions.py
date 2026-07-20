@@ -3320,10 +3320,10 @@ class SearchRegressionTests(unittest.TestCase):
         listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
         searched = database.search_meetings("Legacy Transcript Repetition")[0]
 
-        expected = "第 7 段 59:59-70:04、第 8 段 70:01-80:01：疑似連續重複轉錄；同一句連續重複 4 次：因為我是結所以我領車；重複時間：70:01-70:04"
+        expected = "第 7 段 59:59-70:04：疑似連續重複轉錄；同一句連續重複 4 次：因為我是結所以我領車；重複時間：70:01-70:04"
         self.assertEqual(listed["quality_review_segment_summary"], expected)
         self.assertEqual(searched["quality_review_segment_summary"], expected)
-        self.assertEqual(listed["quality_review_segment_count"], 2)
+        self.assertEqual(listed["quality_review_segment_count"], 1)
         self.assertEqual(
             listed["quality_review_segment_details"][0]["issues"],
             [
@@ -3873,11 +3873,11 @@ class SearchRegressionTests(unittest.TestCase):
         listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
         searched = database.search_meetings("Phrase Only Repeat Warning")[0]
 
-        self.assertEqual(listed["quality_review_segments"], ["第 7 段", "第 8 段"])
-        self.assertEqual(listed["quality_review_segment_count"], 2)
-        self.assertEqual(listed["quality_review_rerunnable_segments"], [6, 7])
+        self.assertEqual(listed["quality_review_segments"], ["第 7 段"])
+        self.assertEqual(listed["quality_review_segment_count"], 1)
+        self.assertEqual(listed["quality_review_rerunnable_segments"], [6])
         expected_preview = (
-            "逐字稿品質警示：問題位置：第 7 段 59:59-70:04、第 8 段 70:01-80:01："
+            "逐字稿品質警示：問題位置：第 7 段 59:59-70:04："
             "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:00-70:30"
         )
         self.assertEqual(listed["quality_warning_preview"], expected_preview)
@@ -3891,8 +3891,57 @@ class SearchRegressionTests(unittest.TestCase):
         )
         self.assertIn("逐字稿品質警示：需複核分段：第 7 段", listed["quality_warning_text"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
-        self.assertEqual(searched["quality_review_rerunnable_segments"], [6, 7])
+        self.assertEqual(searched["quality_review_rerunnable_segments"], [6])
         self.assertEqual(searched["quality_warning_preview"], expected_preview)
+
+    def test_list_and_search_prefers_primary_heading_segment_for_overlapped_repeat(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "primary-overlap-repeat-warning.md"
+        repeated_turns = "\n".join(
+            f"[70:{index:02d}] **[發言者 A]**：因為我是結，所以我領車。"
+            for index in range(31)
+        )
+        output_path.write_text(
+            "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+            "## 二、最終決議 (Final Decisions)\n決議\n"
+            "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "### 【第 7 段｜59:59 – 70:04】\n"
+            "[69:59] **[發言者 B]**：前一句正常。\n"
+            "### 【第 8 段｜70:01 – 80:01】\n"
+            f"{repeated_turns}\n",
+            encoding="utf-8",
+        )
+        quality_report = {
+            "warnings": [
+                "逐字稿品質警示：疑似連續重複轉錄"
+                "（同一句連續重複 31 次：因為我是結所以我領車），"
+                "建議重跑或複核相關分段。"
+            ],
+            "segments": [
+                {"index": 6, "start_seconds": 3599, "end_seconds": 4204, "issues": []},
+                {"index": 7, "start_seconds": 4201, "end_seconds": 4801, "issues": []},
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Primary Overlap Repeat Warning",
+            date="2026/07/12",
+            source_audio="primary-overlap-repeat.webm",
+            output_path=str(output_path),
+            summary="primary-overlap-repeat-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Primary Overlap Repeat Warning")[0]
+
+        self.assertEqual(listed["quality_review_segments"], ["第 8 段"])
+        self.assertEqual(listed["quality_review_rerunnable_segments"], [7])
+        self.assertIn("問題位置：第 8 段 70:01-80:01", listed["quality_warning_preview"])
+        self.assertNotIn("第 7 段", listed["quality_warning_preview"])
+        self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
+        self.assertEqual(searched["quality_review_rerunnable_segments"], [7])
 
     def test_effective_quality_status_downgrades_rerunnable_transcript_warning(self):
         database, tmp_path = self._isolated_database()
@@ -3994,11 +4043,11 @@ class SearchRegressionTests(unittest.TestCase):
         listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
         searched = database.search_meetings("Incomplete Report Repeat Warning")[0]
 
-        self.assertEqual(listed["quality_review_segments"], ["第 7 段", "第 8 段"])
-        self.assertEqual(listed["quality_review_rerunnable_segments"], [6, 7])
+        self.assertEqual(listed["quality_review_segments"], ["第 7 段"])
+        self.assertEqual(listed["quality_review_rerunnable_segments"], [6])
         self.assertIn("第 7 段 59:59-70:04", listed["quality_warning_preview"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
-        self.assertEqual(searched["quality_review_rerunnable_segments"], [6, 7])
+        self.assertEqual(searched["quality_review_rerunnable_segments"], [6])
 
     def test_list_and_search_infer_repeat_segments_from_generic_warning(self):
         database, tmp_path = self._isolated_database()

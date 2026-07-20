@@ -394,6 +394,8 @@ def _repeated_transcript_turn_review_segments(
     current_preview = ""
     current_run = 0
     current_timestamps: list[int] = []
+    current_block_segments: list[dict[str, int]] = []
+    current_heading_segment: Optional[dict[str, int]] = None
 
     def flush_current() -> None:
         if current_run <= limit or not current_timestamps:
@@ -402,13 +404,41 @@ def _repeated_transcript_turn_review_segments(
             "text": current_preview,
             "run": current_run,
             "timestamps": list(current_timestamps),
+            "block_segments": list(current_block_segments),
         })
 
     def preview_text(value: str, max_chars: int = 24) -> str:
         cleaned = _normalize_repeated_phrase_preview(value)
         return cleaned[:max_chars]
 
+    def heading_segment(line: str) -> Optional[dict[str, int]]:
+        match = _TRANSCRIPT_SEGMENT_HEADING_PATTERN.match(str(line or "").strip())
+        if not match:
+            return None
+        raw_index = match.group("zh_index") or match.group("en_index")
+        raw_start = match.group("zh_start") or match.group("en_start")
+        raw_end = match.group("zh_end") or match.group("en_end")
+        try:
+            index = int(raw_index) - 1
+        except (TypeError, ValueError):
+            return None
+        start_seconds = _clock_text_to_seconds(raw_start)
+        end_seconds = _clock_text_to_seconds(raw_end)
+        if index < 0 or start_seconds is None:
+            return None
+        if end_seconds is None or end_seconds <= start_seconds:
+            end_seconds = start_seconds + 1
+        return {
+            "index": index,
+            "start_seconds": start_seconds,
+            "end_seconds": end_seconds,
+        }
+
     for line in (transcript or "").splitlines():
+        segment_heading = heading_segment(line)
+        if segment_heading is not None:
+            current_heading_segment = segment_heading
+            continue
         match = pattern.search(line)
         if not match:
             continue
@@ -421,16 +451,20 @@ def _repeated_transcript_turn_review_segments(
             current_preview = ""
             current_run = 0
             current_timestamps = []
+            current_block_segments = []
             continue
         if normalized == current_text:
             current_run += 1
             current_timestamps.append(timestamp)
+            if current_heading_segment is not None:
+                current_block_segments.append(dict(current_heading_segment))
         else:
             flush_current()
             current_text = normalized
             current_preview = preview_text(raw_text)
             current_run = 1
             current_timestamps = [timestamp]
+            current_block_segments = [dict(current_heading_segment)] if current_heading_segment is not None else []
     flush_current()
 
     if not runs:
@@ -448,12 +482,65 @@ def _repeated_transcript_turn_review_segments(
             for index in range(first_index, last_index + 1)
         ]
 
-    def segment_matches(timestamps: list[int]) -> list[dict[str, int]]:
+    def segment_metadata_by_index(index: int, fallback: dict[str, int]) -> dict[str, int]:
+        for position, segment in enumerate(segments or []):
+            try:
+                segment_index = int(segment.get("index", position))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if segment_index != index:
+                continue
+            try:
+                start_seconds = int(segment.get("start_seconds", fallback.get("start_seconds", 0)))
+                end_seconds = int(segment.get("end_seconds", fallback.get("end_seconds", start_seconds + 1)))
+            except (TypeError, ValueError, AttributeError):
+                start_seconds = int(fallback.get("start_seconds", index * segment_seconds))
+                end_seconds = int(fallback.get("end_seconds", start_seconds + segment_seconds))
+            if end_seconds <= start_seconds:
+                end_seconds = start_seconds + 1
+            return {
+                "index": index,
+                "start_seconds": start_seconds,
+                "end_seconds": end_seconds,
+            }
+        return {
+            "index": index,
+            "start_seconds": int(fallback.get("start_seconds", index * segment_seconds)),
+            "end_seconds": int(fallback.get("end_seconds", (index + 1) * segment_seconds)),
+        }
+
+    def primary_block_matches(block_segments: list[dict[str, int]]) -> list[dict[str, int]]:
+        if not block_segments:
+            return []
+        counts: dict[int, int] = {}
+        fallback_by_index: dict[int, dict[str, int]] = {}
+        for block_segment in block_segments:
+            try:
+                index = int(block_segment.get("index", -1))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if index < 0:
+                continue
+            counts[index] = counts.get(index, 0) + 1
+            fallback_by_index.setdefault(index, block_segment)
+        if not counts:
+            return []
+        best_count = max(counts.values())
+        return [
+            segment_metadata_by_index(index, fallback_by_index[index])
+            for index in sorted(counts)
+            if counts[index] == best_count
+        ]
+
+    def segment_matches(timestamps: list[int], block_segments: list[dict[str, int]]) -> list[dict[str, int]]:
         if not timestamps:
             return []
+        from_blocks = primary_block_matches(block_segments)
+        if from_blocks:
+            return from_blocks
         start_time = min(timestamps)
         end_time = max(timestamps)
-        matched: list[dict[str, int]] = []
+        matched: list[tuple[int, dict[str, int]]] = []
         seen_indices: set[int] = set()
         for position, segment in enumerate(segments or []):
             try:
@@ -464,19 +551,28 @@ def _repeated_transcript_turn_review_segments(
                 continue
             if end_seconds <= start_seconds:
                 end_seconds = start_seconds + 1
+            hit_count = sum(1 for timestamp in timestamps if start_seconds <= timestamp < end_seconds)
             overlaps = (
-                any(start_seconds <= timestamp < end_seconds for timestamp in timestamps)
+                hit_count > 0
                 or (start_seconds <= start_time < end_seconds)
                 or (start_seconds < end_time < end_seconds)
             )
             if overlaps and index not in seen_indices:
-                matched.append({
-                    "index": index,
-                    "start_seconds": start_seconds,
-                    "end_seconds": end_seconds,
-                })
+                matched.append((
+                    hit_count,
+                    {
+                        "index": index,
+                        "start_seconds": start_seconds,
+                        "end_seconds": end_seconds,
+                    },
+                ))
                 seen_indices.add(index)
-        return matched or fallback_matches(start_time, end_time)
+        if not matched:
+            return fallback_matches(start_time, end_time)
+        best_hit_count = max(hit_count for hit_count, _ in matched)
+        if best_hit_count <= 0:
+            return [match for _, match in matched]
+        return [match for hit_count, match in matched if hit_count == best_hit_count]
 
     details_by_index: dict[int, dict[str, Any]] = {}
     for run in runs:
@@ -492,7 +588,7 @@ def _repeated_transcript_turn_review_segments(
             f"疑似連續重複轉錄；同一句連續重複 {run_length} 次"
             f"{preview_part}；重複時間：{_format_clock(start_time)}-{_format_clock(end_time)}"
         )
-        for match in segment_matches(timestamps):
+        for match in segment_matches(timestamps, run.get("block_segments") or []):
             index = int(match["index"])
             detail = details_by_index.setdefault(
                 index,
