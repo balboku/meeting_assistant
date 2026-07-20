@@ -220,6 +220,8 @@ class MeetingSourceMediaRestoreResponse(BaseModel):
     bytes: int = 0
     source_media_type: Optional[str] = None
     source_media_sha256: Optional[str] = None
+    source_media_restored_at: Optional[str] = None
+    source_media_restored_name: Optional[str] = None
     restored_path: Optional[str] = None
 
 

@@ -3517,6 +3517,8 @@ class MeetingRerunRegressionTests(unittest.TestCase):
         self.assertEqual(payload["bytes"], len(media_bytes))
         self.assertEqual(payload["source_media_type"], "video")
         self.assertEqual(payload["source_media_sha256"], media_sha256)
+        self.assertEqual(payload["source_media_restored_name"], "missing-source.webm")
+        self.assertRegex(payload["source_media_restored_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
         self.assertTrue(restored_file_exists)
         self.assertFalse(restore_temp_files)
         detail_payload = detail_response.json()
@@ -3527,12 +3529,14 @@ class MeetingRerunRegressionTests(unittest.TestCase):
         self.assertEqual(detail_payload["source_media_sha256"], media_sha256)
         self.assertEqual(detail_payload["source_media_restored_name"], "missing-source.webm")
         self.assertRegex(detail_payload["source_media_restored_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+        self.assertEqual(detail_payload["source_media_restored_at"], payload["source_media_restored_at"])
         recording = restored_record["quality_report"]["recording"]
         self.assertEqual(recording["profile"], "video_balanced")
         self.assertEqual(recording["source_audio_size_bytes"], len(media_bytes))
         self.assertEqual(recording["source_audio_sha256"], media_sha256)
         self.assertEqual(recording["source_audio_restored_name"], "missing-source.webm")
         self.assertRegex(recording["source_audio_restored_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+        self.assertEqual(recording["source_audio_restored_at"], payload["source_media_restored_at"])
         self.assertEqual(rerun_response.status_code, 200)
 
     def test_restore_meeting_source_media_rejects_mismatch_and_existing_file(self):

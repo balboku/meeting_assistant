@@ -3084,6 +3084,11 @@ async def restore_meeting_source_media(
         restored_sha256=restored_sha256,
         media_kind=media_kind,
     )
+    restored_recording = restored_quality_report.get("recording") if isinstance(restored_quality_report, dict) else {}
+    if not isinstance(restored_recording, dict):
+        restored_recording = {}
+    restored_at = str(restored_recording.get("source_audio_restored_at") or "").strip() or None
+    restored_name = str(restored_recording.get("source_audio_restored_name") or restored_path.name).strip() or None
     if not update_meeting_quality_report(meeting_id, restored_quality_report):
         logger.warning("⚠️ 已補回原始媒體檔，但更新品質報告失敗：meeting_id=%s", meeting_id)
     logger.info(
@@ -3100,6 +3105,8 @@ async def restore_meeting_source_media(
         bytes=restored_bytes,
         source_media_type=media_kind,
         source_media_sha256=restored_sha256,
+        source_media_restored_at=restored_at,
+        source_media_restored_name=restored_name,
         restored_path=str(restored_path),
     )
 
