@@ -1953,7 +1953,7 @@ def _meeting_record_needs_review(record: dict[str, Any]) -> bool:
     return any(token in label for token in ("需", "警", "低", "不"))
 
 
-QUALITY_FILTER_TYPES = {"summary", "recording", "transcript", "other"}
+QUALITY_FILTER_TYPES = {"summary", "recording", "transcript", "rerunnable", "other"}
 
 
 def _normalize_quality_filter_type(quality_type: Optional[str] = None) -> str:
@@ -1979,6 +1979,7 @@ def _meeting_record_quality_types(record: dict[str, Any]) -> set[str]:
     warning_count = int(record.get("quality_warning_count") or 0)
     review_segment_count = int(record.get("quality_review_segment_count") or 0)
     review_segment_details = record.get("quality_review_segment_details") or []
+    rerunnable_segments = record.get("quality_review_rerunnable_segments") or []
     types: set[str] = set()
 
     if "摘要品質警示" in warning_text:
@@ -1989,8 +1990,11 @@ def _meeting_record_quality_types(record: dict[str, Any]) -> set[str]:
         _is_transcript_quality_warning(warning_text)
         or review_segment_count > 0
         or bool(review_segment_details)
+        or bool(rerunnable_segments)
     ):
         types.add("transcript")
+    if rerunnable_segments:
+        types.add("rerunnable")
 
     score = record.get("quality_score")
     has_score = score is not None and score != ""

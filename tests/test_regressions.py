@@ -3933,6 +3933,25 @@ class SearchRegressionTests(unittest.TestCase):
                 ],
             },
         )
+        rerunnable_id = database.save_meeting(
+            title="Quality Type Rerunnable",
+            date="2026/07/12",
+            source_audio="rerunnable.webm",
+            output_path=str(output_path),
+            summary=shared,
+            quality_report={
+                "warnings": [],
+                "segments": [
+                    {
+                        "index": 2,
+                        "start_seconds": 1200,
+                        "end_seconds": 1800,
+                        "status": "recovered",
+                        "issues": ["曾觸發轉錄補救：非最後分段含自動過濾/截斷提示"],
+                    },
+                ],
+            },
+        )
         other_id = database.save_meeting(
             title="Quality Type Other",
             date="2026/07/12",
@@ -3944,12 +3963,21 @@ class SearchRegressionTests(unittest.TestCase):
 
         self.assertEqual([row["id"] for row in database.list_meetings(quality_type="summary")], [summary_id])
         self.assertEqual([row["id"] for row in database.list_meetings(quality_type="recording")], [recording_id])
-        self.assertEqual([row["id"] for row in database.list_meetings(quality_type="transcript")], [transcript_id])
+        self.assertCountEqual(
+            [row["id"] for row in database.list_meetings(quality_type="transcript")],
+            [rerunnable_id, transcript_id],
+        )
+        self.assertEqual([row["id"] for row in database.list_meetings(quality_type="rerunnable")], [rerunnable_id])
         self.assertEqual([row["id"] for row in database.list_meetings(quality_type="other")], [other_id])
         self.assertEqual(database.count_meetings(quality_type="summary"), 1)
+        self.assertEqual(database.count_meetings(quality_type="rerunnable"), 1)
         self.assertEqual(
             [row["id"] for row in database.search_meetings(shared, quality_type="recording")],
             [recording_id],
+        )
+        self.assertEqual(
+            [row["id"] for row in database.search_meetings(shared, quality_type="rerunnable")],
+            [rerunnable_id],
         )
 
         import backend.main as main
@@ -3960,12 +3988,18 @@ class SearchRegressionTests(unittest.TestCase):
             "GET",
             f"/meetings/search?q={shared}&quality_type=transcript&limit=10",
         )
+        rerunnable_response = asgi_request(main.app, "GET", "/meetings?quality_type=rerunnable&limit=10")
+        metrics_response = asgi_request(main.app, "GET", "/metrics")
 
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual(list_response.json()["total"], 1)
         self.assertEqual([row["id"] for row in list_response.json()["records"]], [summary_id])
         self.assertEqual(search_response.status_code, 200)
-        self.assertEqual([row["id"] for row in search_response.json()], [transcript_id])
+        self.assertCountEqual([row["id"] for row in search_response.json()], [rerunnable_id, transcript_id])
+        self.assertEqual(rerunnable_response.status_code, 200)
+        self.assertEqual([row["id"] for row in rerunnable_response.json()["records"]], [rerunnable_id])
+        self.assertEqual(metrics_response.status_code, 200)
+        self.assertEqual(metrics_response.json()["meetings"]["quality_rerunnable"], 1)
 
     def test_quality_type_filter_uses_all_warning_text_not_only_preview(self):
         database, tmp_path = self._isolated_database()
@@ -4691,9 +4725,11 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn('id="ops-quality-summary-tile" title="顯示摘要警示會議" role="button" tabindex="0" aria-label="顯示摘要警示會議"', html)
         self.assertIn('id="ops-quality-recording-tile" title="顯示錄音警示會議" role="button" tabindex="0" aria-label="顯示錄音警示會議"', html)
         self.assertIn('id="ops-quality-transcript-tile" title="顯示逐字稿警示會議" role="button" tabindex="0" aria-label="顯示逐字稿警示會議"', html)
+        self.assertIn('id="ops-quality-rerunnable-tile" title="顯示可重跑問題分段的會議" role="button" tabindex="0" aria-label="顯示可重跑問題分段的會議"', html)
         self.assertIn('id="ops-quality-summary"', html)
         self.assertIn('id="ops-quality-recording"', html)
         self.assertIn('id="ops-quality-transcript"', html)
+        self.assertIn('id="ops-quality-rerunnable"', html)
         self.assertIn('id="ops-source-storage-tile" title="原始錄音/錄影保留容量" role="button" tabindex="0" aria-label="開啟原始檔清單"', html)
         self.assertIn(".ops-tile.actionable:focus-visible", html)
         self.assertIn("outline: 2px solid var(--blue);", html)
@@ -4701,12 +4737,14 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("data.meetings?.quality_summary", html)
         self.assertIn("data.meetings?.quality_recording", html)
         self.assertIn("data.meetings?.quality_transcript", html)
+        self.assertIn("data.meetings?.quality_rerunnable", html)
         self.assertIn("function showQualityTypeMeetings", html)
         self.assertIn("function selectedQualityFilterTypeValue", html)
         self.assertIn("qualityTypeFilter.value = selectedQualityFilterTypeValue(type);", html)
         self.assertIn("showQualityTypeMeetings('summary')", html)
         self.assertIn("showQualityTypeMeetings('recording')", html)
         self.assertIn("showQualityTypeMeetings('transcript')", html)
+        self.assertIn("showQualityTypeMeetings('rerunnable')", html)
         self.assertIn('id="ops-source-storage"', html)
         self.assertIn('id="ops-source-storage-tile"', html)
         self.assertIn('id="source-storage-modal"', html)
@@ -6733,6 +6771,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('<option value="summary">摘要警示</option>', html)
         self.assertIn('<option value="recording">錄音警示</option>', html)
         self.assertIn('<option value="transcript">逐字稿警示</option>', html)
+        self.assertIn('<option value="rerunnable">可重跑分段</option>', html)
         self.assertIn('<option value="other">其他品質警示</option>', html)
         self.assertIn("review-filter", html)
         self.assertIn(".quality-type-filter", html)
@@ -6740,6 +6779,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("function qualityFilterLabel", html)
         self.assertIn("function recordQualityWarningTypes", html)
         self.assertIn("function qualityTypeMatchesRecord", html)
+        self.assertIn("rerunnable: '可重跑分段'", html)
         self.assertIn("const qualityType = selectedQualityFilterType();", html)
         self.assertIn("const reviewOnly = Boolean(document.getElementById('needs-review-filter')?.checked) || qualityType !== 'all';", html)
         self.assertIn("const qualityTypeParam = qualityType !== 'all' ? `&quality_type=${encodeURIComponent(qualityType)}` : '';", html)
@@ -7838,6 +7878,7 @@ vm.runInNewContext(code + `
 const summary = {{ quality_warning_count: 1, quality_warning_preview: '摘要品質警示：討論摘要未使用 D 編號' }};
 const recording = {{ quality_warning_count: 1, quality_warning_preview: '偵測到可能的爆音；原始媒體檔已保留。' }};
 const transcript = {{ quality_warning_count: 0, quality_review_segment_count: 1, quality_review_segment_details: [{{ index: 0 }}] }};
+const rerunnable = {{ quality_warning_count: 0, quality_review_rerunnable_segments: [2] }};
 const legacyTranscript = {{ quality_warning_count: 1, quality_warning_text: '需複核分段：第 2 段 10:00-20:00：疑似連續重複轉錄' }};
 const mixed = {{
   quality_warning_count: 3,
@@ -7849,6 +7890,8 @@ result = [
   qualityTypeMatchesRecord(summary, 'summary'),
   qualityTypeMatchesRecord(recording, 'recording'),
   qualityTypeMatchesRecord(transcript, 'transcript'),
+  qualityTypeMatchesRecord(rerunnable, 'rerunnable'),
+  qualityTypeMatchesRecord(rerunnable, 'transcript'),
   qualityTypeMatchesRecord(legacyTranscript, 'transcript'),
   qualityTypeMatchesRecord(mixed, 'recording'),
   qualityTypeMatchesRecord(mixed, 'summary'),
