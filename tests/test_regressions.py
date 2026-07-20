@@ -3564,13 +3564,13 @@ class SearchRegressionTests(unittest.TestCase):
         filtered = database.list_meetings(needs_review=True)
         searched = database.search_meetings("segment-only-keyword", needs_review=True)
 
-        self.assertEqual(listed["quality_warning_count"], 0)
+        self.assertEqual(listed["quality_warning_count"], 1)
         self.assertEqual(
             listed["quality_warning_text"].splitlines()[0],
             "逐字稿品質警示：問題位置：第 1 段 00:00-10:00：曾觸發轉錄補救。"
             "建議重跑上述分段或複核相關內容。",
         )
-        self.assertIn("第 1 段：曾觸發轉錄補救", listed["quality_warning_text"])
+        self.assertNotIn("第 1 段：曾觸發轉錄補救", listed["quality_warning_text"])
         self.assertEqual(listed["quality_review_segment_count"], 1)
         self.assertEqual(listed["quality_review_segments"], ["第 1 段"])
         self.assertEqual(listed["quality_review_rerunnable_segments"], [])
@@ -3672,7 +3672,7 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(listed["quality_review_segment_summary"], expected_summary)
         self.assertEqual(listed["quality_warning_preview"], f"逐字稿品質警示：問題位置：{expected_summary}")
         self.assertEqual(listed["quality_warning_text"].splitlines()[0], expected_location_warning)
-        self.assertIn(quality_report["warnings"][0], listed["quality_warning_text"])
+        self.assertNotIn(quality_report["warnings"][0], listed["quality_warning_text"])
         self.assertEqual(searched["quality_review_segments"], ["第 2 段", "第 4 段"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
         self.assertEqual(searched["quality_review_segment_count"], 2)
@@ -3729,7 +3729,7 @@ class SearchRegressionTests(unittest.TestCase):
             "逐字稿品質警示：問題位置：第 2 段 10:00-20:00：分段疑似重複轉錄幻覺。"
             "建議重跑上述分段或複核相關內容。",
         )
-        self.assertIn(quality_report["warnings"][0], listed["quality_warning_text"])
+        self.assertNotIn(quality_report["warnings"][0], listed["quality_warning_text"])
         self.assertEqual(searched["quality_review_segments"], ["第 2 段"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
 
@@ -3884,7 +3884,8 @@ class SearchRegressionTests(unittest.TestCase):
 
         self.assertIsNone(listed["quality_score"])
         self.assertIsNone(listed["quality_label"])
-        self.assertGreaterEqual(listed["quality_warning_count"], 5)
+        self.assertEqual(listed["quality_warning_count"], len(listed["quality_warning_text"].splitlines()))
+        self.assertGreaterEqual(listed["quality_warning_count"], 4)
         self.assertEqual(
             listed["quality_warning_preview"],
             "摘要品質警示：討論摘要未使用 D 編號，較難與決議及待辦事項串聯",
@@ -3895,9 +3896,10 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(listed["quality_review_segment_details"][0]["end_seconds"], 600)
         self.assertTrue(any("疑似連續重複轉錄" in issue for issue in listed["quality_review_segment_details"][0]["issues"]))
         self.assertIn(
-            "逐字稿品質警示：疑似連續重複轉錄；問題位置：第 1 段 00:00-10:00：疑似連續重複轉錄；同一句連續重複 4 次：這一句不應該連續重複；重複時間：00:00-00:03",
+            "逐字稿品質警示：問題位置：第 1 段 00:00-10:00：疑似連續重複轉錄；同一句連續重複 4 次：這一句不應該連續重複；重複時間：00:00-00:03",
             listed["quality_warning_text"],
         )
+        self.assertNotIn("逐字稿品質警示：疑似連續重複轉錄；問題位置", listed["quality_warning_text"])
         self.assertNotIn("逐字稿品質警示：疑似連續重複轉錄\n", listed["quality_warning_text"])
         self.assertEqual(searched["quality_warning_count"], listed["quality_warning_count"])
         self.assertEqual(searched["quality_warning_preview"], listed["quality_warning_preview"])
@@ -3962,11 +3964,10 @@ class SearchRegressionTests(unittest.TestCase):
                 },
             ],
         )
-        self.assertIn("逐字稿品質警示：疑似連續重複轉錄", listed["quality_warning_text"])
-        self.assertIn(
-            "逐字稿品質警示：需複核分段：第 4 段 30:00-40:00：疑似連續重複轉錄；同一句連續重複 4 次：因為我是結所以我領車；重複時間：31:00-31:03",
-            listed["quality_warning_text"],
-        )
+        self.assertEqual(len(listed["quality_warning_text"].splitlines()), 1)
+        self.assertIn("逐字稿品質警示：問題位置：第 4 段 30:00-40:00", listed["quality_warning_text"])
+        self.assertNotIn("逐字稿品質警示：需複核分段", listed["quality_warning_text"])
+        self.assertNotIn("舊版未定位", listed["quality_warning_text"])
         self.assertIn(
             "第 6 段 50:00-60:00：疑似連續重複轉錄；同一句連續重複 4 次：那這個分數就歸零；重複時間：51:00-51:03",
             listed["quality_warning_text"],
@@ -4035,7 +4036,7 @@ class SearchRegressionTests(unittest.TestCase):
             expected_preview.replace("逐字稿品質警示：問題位置：", ""),
             listed["quality_review_segment_summary"],
         )
-        self.assertIn("逐字稿品質警示：需複核分段：第 7 段", listed["quality_warning_text"])
+        self.assertNotIn("逐字稿品質警示：需複核分段：第 7 段", listed["quality_warning_text"])
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
         self.assertEqual(searched["quality_review_rerunnable_segments"], [6])
         self.assertEqual(searched["quality_warning_preview"], expected_preview)
@@ -4227,10 +4228,11 @@ class SearchRegressionTests(unittest.TestCase):
         listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
         searched = database.search_meetings("Generic Warning Repeat")[0]
 
-        self.assertEqual(listed["quality_warning_count"], 1)
+        self.assertEqual(listed["quality_warning_count"], 2)
         self.assertEqual(listed["quality_warning_preview"], quality_report["warnings"][0])
         self.assertEqual(listed["quality_review_segments"], ["第 3 段"])
         self.assertEqual(listed["quality_review_segment_count"], 1)
+        self.assertIn("逐字稿品質警示：問題位置：第 3 段 20:00-30:00", listed["quality_warning_text"])
         self.assertEqual(
             listed["quality_review_segment_details"],
             [
@@ -4466,7 +4468,12 @@ class SearchRegressionTests(unittest.TestCase):
             "逐字稿品質警示：問題位置：第 2 段 10:00-10:03：疑似連續重複轉錄；重複時間：10:00-10:03",
         )
         self.assertIn("摘要品質警示：討論摘要未使用 D 編號", listed["quality_warning_text"])
-        self.assertIn("逐字稿品質警示：疑似連續重複轉錄", listed["quality_warning_text"])
+        self.assertIn("逐字稿品質警示：問題位置：第 2 段 10:00-10:03", listed["quality_warning_text"])
+        self.assertNotIn(
+            "逐字稿品質警示：疑似連續重複轉錄（重複時間：10:00-10:03）",
+            listed["quality_warning_text"],
+        )
+        self.assertEqual(listed["quality_warning_count"], 3)
         self.assertEqual([row["id"] for row in database.list_meetings(quality_type="recording")], [mixed_id])
         self.assertEqual([row["id"] for row in database.list_meetings(quality_type="summary")], [mixed_id])
         self.assertEqual([row["id"] for row in database.list_meetings(quality_type="transcript")], [mixed_id])
@@ -4526,6 +4533,8 @@ class SearchRegressionTests(unittest.TestCase):
         )
         self.assertEqual(listed["quality_warning_preview"], expected_preview)
         self.assertIn("偵測到可能的爆音；原始媒體檔已保留。", listed["quality_warning_text"])
+        self.assertEqual(listed["quality_warning_count"], 2)
+        self.assertNotIn(f"第 2 段：{segment_issue}", listed["quality_warning_text"])
         self.assertEqual(listed["quality_review_segments"], ["第 2 段"])
         self.assertEqual([row["id"] for row in database.list_meetings(quality_type="recording")], [meeting_id])
         self.assertEqual([row["id"] for row in database.list_meetings(quality_type="transcript")], [meeting_id])

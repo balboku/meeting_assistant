@@ -336,6 +336,61 @@ def _has_standard_review_location_warning(text: str) -> bool:
     return bool(_STANDARD_REVIEW_LOCATION_PATTERN.search(str(text or "")))
 
 
+_PROBLEM_LOCATION_WARNING_PATTERN = re.compile(
+    r"(?:^|\n)\s*逐字稿品質警示[：:]\s*問題位置[：:]"
+)
+
+
+def _has_problem_location_warning(text: str) -> bool:
+    return bool(_PROBLEM_LOCATION_WARNING_PATTERN.search(str(text or "")))
+
+
+def _quality_warning_lines(text: str) -> list[str]:
+    return [
+        line.strip()
+        for line in str(text or "").splitlines()
+        if line.strip()
+    ]
+
+
+def _is_redundant_transcript_warning_line(line: str, *, has_problem_location: bool) -> bool:
+    if not has_problem_location:
+        return False
+    warning = str(line or "").strip()
+    if not warning:
+        return False
+    if "摘要品質警示" in warning:
+        return False
+    if re.match(r"^逐字稿品質警示[：:]\s*問題位置[：:]", warning):
+        return False
+    if re.match(r"^逐字稿品質警示[：:]\s*需複核分段[：:]", warning):
+        return True
+    if warning.startswith("逐字稿品質警示") and (
+        _has_transcript_review_signal(warning)
+        or "以下分段曾觸發轉錄品質補救或需複核" in warning
+        or "完整逐字稿區塊" in warning
+    ):
+        return True
+    if _is_recording_warning_preview(warning):
+        return False
+    if re.match(r"^(?:第\s*\d+\s*段|Segment\s*#?\d+)\s*[：:]", warning) and _has_transcript_review_signal(warning):
+        return True
+    return False
+
+
+def _compact_quality_warning_lines(lines: list[str]) -> list[str]:
+    unique_lines = list(dict.fromkeys(line.strip() for line in lines if line.strip()))
+    has_problem_location = any(_has_problem_location_warning(line) for line in unique_lines)
+    return [
+        line
+        for line in unique_lines
+        if not _is_redundant_transcript_warning_line(
+            line,
+            has_problem_location=has_problem_location,
+        )
+    ]
+
+
 _TRANSCRIPT_SEGMENT_HEADING_PATTERN = re.compile(
     r"(?m)^#{1,6}\s*(?:"
     r"【第\s*(?P<zh_index>\d+)\s*段\s*[｜|]\s*"
@@ -2013,25 +2068,25 @@ def apply_quality_preview_fields(
     review_summary = str(record.get("quality_review_segment_summary") or "").strip()
     if _should_promote_review_summary_to_preview(warning_preview, review_summary):
         warning_preview = f"逐字稿品質警示：問題位置：{review_summary}"
-    record["quality_warning_count"] = warning_count
     record["quality_warning_preview"] = warning_preview
     warning_text_items = [
-        str(item).strip()
+        line
         for item in [quality_warning_text]
-        if str(item).strip()
+        for line in _quality_warning_lines(str(item or ""))
     ]
+    combined_warning_text = "\n".join(warning_text_items)
+    if review_summary and not _has_standard_review_location_warning(combined_warning_text):
+        warning_text_items.insert(0, _review_summary_location_warning(review_summary))
     _append_uncovered_quality_previews(
         warning_text_items,
-        quality_warning_text,
+        "\n".join(warning_text_items),
         [*review_segment_issue_previews, *segment_issue_previews],
     )
     if not warning_text_items and warning_preview:
         warning_text_items.append(str(warning_preview).strip())
-    combined_warning_text = "\n".join(dict.fromkeys(warning_text_items))
-    if review_summary and not _has_standard_review_location_warning(combined_warning_text):
-        warning_text_items.insert(0, _review_summary_location_warning(review_summary))
-        warning_text_items.append(f"逐字稿品質警示：需複核分段：{review_summary}")
-    record["quality_warning_text"] = "\n".join(dict.fromkeys(warning_text_items)) or None
+    warning_text_items = _compact_quality_warning_lines(warning_text_items)
+    record["quality_warning_count"] = len(warning_text_items) or warning_count
+    record["quality_warning_text"] = "\n".join(warning_text_items) or None
     record["quality_review_segment_count"] = len(sorted_review_segment_labels)
     if not known_segment_indices and record["quality_review_segment_details"]:
         known_segment_indices = _markdown_transcript_segment_indices(str(record.get("output_path") or ""))
