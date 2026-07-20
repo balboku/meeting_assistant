@@ -307,6 +307,17 @@ def _has_transcript_review_signal(text: str) -> bool:
     return any(token in str(text or "") for token in TRANSCRIPT_REVIEW_SUMMARY_TOKENS)
 
 
+_GENERIC_TRANSCRIPT_REVIEW_WARNING_PATTERN = re.compile(
+    r"^逐字稿品質警示[：:]\s*"
+    r"(?:需抽查|需複核|建議抽查|建議複核|需複核相關內容|需複核相關分段|建議重跑或複核相關分段)"
+    r"[。.]?$"
+)
+
+
+def _is_generic_transcript_review_warning(text: str) -> bool:
+    return bool(_GENERIC_TRANSCRIPT_REVIEW_WARNING_PATTERN.match(str(text or "").strip()))
+
+
 def _is_recording_warning_preview(text: str) -> bool:
     return bool(re.search(r"錄音|音檔|媒體|音量|爆音|靜音|聲道|取樣率", str(text or "")))
 
@@ -373,6 +384,8 @@ def _is_redundant_transcript_warning_line(line: str, *, has_problem_location: bo
     if re.match(r"^逐字稿品質警示[：:]\s*問題位置[：:]", warning):
         return False
     if re.match(r"^逐字稿品質警示[：:]\s*需複核分段[：:]", warning):
+        return True
+    if _is_generic_transcript_review_warning(warning):
         return True
     if warning.startswith("逐字稿品質警示") and (
         _has_transcript_review_signal(warning)
@@ -2076,6 +2089,12 @@ def apply_quality_preview_fields(
     )
     review_summary = str(record.get("quality_review_segment_summary") or "").strip()
     if review_summary and _has_standard_review_location_warning(str(warning_preview or "")):
+        warning_preview = f"逐字稿品質警示：問題位置：{review_summary}"
+    elif (
+        review_summary
+        and record["quality_review_segment_details"]
+        and str(warning_preview or "").strip().startswith("逐字稿品質警示")
+    ):
         warning_preview = f"逐字稿品質警示：問題位置：{review_summary}"
     elif _should_promote_review_summary_to_preview(warning_preview, review_summary):
         warning_preview = f"逐字稿品質警示：問題位置：{review_summary}"

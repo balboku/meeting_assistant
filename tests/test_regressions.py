@@ -3455,6 +3455,63 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(searched["quality_review_rerunnable_segments"], listed["quality_review_rerunnable_segments"])
         self.assertEqual(searched["quality_review_segment_count"], 2)
 
+    def test_detail_api_matches_list_and_search_review_segment_fields(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "detail-review-segments.md"
+        output_path.write_text("detail-review-segments-content", encoding="utf-8")
+        quality_report = {
+            "score": 88,
+            "label": "需複核",
+            "warnings": ["逐字稿品質警示：需抽查"],
+            "review_segments": [
+                {
+                    "index": 7,
+                    "label": "第 8 段",
+                    "start_seconds": 4201,
+                    "end_seconds": 4801,
+                    "issues": [
+                        "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：70:01-73:00",
+                    ],
+                },
+            ],
+            "segments": [
+                {"index": 7, "start_seconds": 4201, "end_seconds": 4801, "issues": []},
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Detail Review Segment Fields",
+            date="2026/07/20",
+            source_audio="detail-review-segments.webm",
+            output_path=str(output_path),
+            summary="detail-review-segments-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Detail Review Segment Fields")[0]
+
+        import backend.main as main
+
+        detail_response = asgi_request(main.app, "GET", f"/meetings/{meeting_id}")
+        self.assertEqual(detail_response.status_code, 200)
+        detail = detail_response.json()
+
+        shared_fields = [
+            "quality_warning_preview",
+            "quality_warning_text",
+            "quality_review_segments",
+            "quality_review_segment_details",
+            "quality_review_segment_summary",
+            "quality_review_segment_count",
+            "quality_review_rerunnable_segments",
+        ]
+        for field in shared_fields:
+            self.assertEqual(searched[field], listed[field], field)
+            self.assertEqual(detail[field], listed[field], field)
+        self.assertEqual(detail["quality_review_segments"], ["第 8 段"])
+        self.assertEqual(detail["quality_review_rerunnable_segments"], [7])
+        self.assertIn("因為我是結所以我領車", detail["quality_review_segment_summary"])
+
     def test_list_and_search_quality_summary_prefers_actionable_review_issue(self):
         database, tmp_path = self._isolated_database()
         output_path = tmp_path / "actionable-review-issue.md"
