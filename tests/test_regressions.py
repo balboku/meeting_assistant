@@ -3939,8 +3939,18 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(listed["quality_effective_score"], 80)
         self.assertEqual(listed["quality_effective_label"], "需重跑問題分段")
         self.assertEqual(listed["quality_review_rerunnable_segments"], [1])
+        expected_preview = (
+            "逐字稿品質警示：問題位置：第 2 段 10:00-20:00："
+            "疑似連續重複轉錄；同一句連續重複 31 次：因為我是結所以我領車；重複時間：10:12-10:15"
+        )
+        self.assertEqual(listed["quality_warning_preview"], expected_preview)
+        self.assertEqual(
+            listed["quality_warning_text"].splitlines()[0],
+            expected_preview + "。建議重跑上述分段或複核相關內容。",
+        )
         self.assertEqual(searched["quality_effective_score"], 80)
         self.assertEqual(searched["quality_effective_label"], "需重跑問題分段")
+        self.assertEqual(searched["quality_warning_preview"], expected_preview)
 
     def test_list_and_search_trust_markdown_repeat_segments_when_report_segments_are_incomplete(self):
         database, tmp_path = self._isolated_database()

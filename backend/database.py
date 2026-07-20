@@ -327,8 +327,13 @@ def _review_summary_location_warning(review_summary: str) -> str:
     )
 
 
+_STANDARD_REVIEW_LOCATION_PATTERN = re.compile(
+    r"(?:^|\n)\s*逐字稿品質警示[：:]\s*(?:問題位置|需複核分段)[：:]"
+)
+
+
 def _has_standard_review_location_warning(text: str) -> bool:
-    return "問題位置：" in str(text or "") or "需複核分段：" in str(text or "")
+    return bool(_STANDARD_REVIEW_LOCATION_PATTERN.search(str(text or "")))
 
 
 _TRANSCRIPT_SEGMENT_HEADING_PATTERN = re.compile(
