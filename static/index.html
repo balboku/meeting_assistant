@@ -689,6 +689,16 @@
       min-width: 0;
       overflow-wrap: anywhere;
     }
+    .quality-warning-unlocated {
+      flex: 1 1 420px;
+      min-width: 0;
+      color: var(--yellow);
+      border: 1px solid rgba(224,175,104,0.28);
+      border-radius: 6px;
+      background: rgba(224,175,104,0.08);
+      padding: 3px 7px;
+      overflow-wrap: anywhere;
+    }
     .quality-warning-actions { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .quality-warning-jump {
       border: 1px solid rgba(242, 213, 207, 0.45);
@@ -1009,6 +1019,11 @@
       border-color: rgba(122,162,247,0.38);
       background: rgba(122,162,247,0.08);
       color: var(--blue);
+    }
+    .source-media-player-status.success {
+      border-color: rgba(158,206,106,0.42);
+      background: rgba(158,206,106,0.08);
+      color: var(--green);
     }
     .source-storage-summary {
       display: flex;
@@ -4185,6 +4200,13 @@ function renderQualityWarning(warning = '', segments = [], reviewSegments = []) 
   const body = bodyText
     ? `<span class="quality-warning-body">${escapeHtml(bodyText)}</span>`
     : '';
+  const needsUnlocatedRepeatHint = !summary
+    && !targets.length
+    && isTranscriptQualityWarning(warningText)
+    && /疑似連續重複轉錄|同一句連續重複|重複轉錄/.test(warningText);
+  const unlocatedHint = needsUnlocatedRepeatHint
+    ? '<span class="quality-warning-unlocated">尚未定位問題分段；請開啟完整逐字稿複核，或使用完整重跑重新建立分段資料。</span>'
+    : '';
   const actions = targets.length
     ? `<span class="quality-warning-actions">${targets
         .map(target => {
@@ -4199,7 +4221,7 @@ function renderQualityWarning(warning = '', segments = [], reviewSegments = []) 
         })
         .join('')}</span>`
     : '';
-  return `<div class="quality-warning">${summary}${body}${actions}</div>`;
+  return `<div class="quality-warning">${summary}${body}${unlocatedHint}${actions}</div>`;
 }
 
 function reviewSummaryFromWarningText(warningText = '') {
@@ -4909,9 +4931,14 @@ function renderAudioEvidence(meeting, requestedMode = null) {
   const label = escapeHtml(meeting.source_audio || '原始音檔');
   if (!sourceMediaAvailable(meeting)) {
     const mediaKind = sourceMediaKindLabel(meeting);
+    const restoreInputId = `source-media-restore-input-${Number(meeting.id) || 0}`;
     return `<div id="source-media-evidence" class="audio-evidence media-unavailable" tabindex="-1">
       <div class="audio-evidence-header">
         <span class="audio-evidence-label">${escapeHtml(mediaKind)}遺失：${label}</span>
+        <div class="source-media-actions">
+          <button id="source-media-restore-button" type="button" class="source-media-action warning" aria-describedby="source-media-player-status" aria-busy="false" onclick="document.getElementById('${restoreInputId}')?.click()">補回原始檔</button>
+          <input id="${restoreInputId}" class="sr-only" type="file" accept="${FALLBACK_UPLOAD_ACCEPT}" onchange="restoreMeetingSourceMedia(${Number(meeting.id) || 0}, this.files[0]); this.value='';">
+        </div>
       </div>
       ${renderSourceMediaFacts(meeting)}
       <div id="source-media-player-status" class="source-media-player-status show error" role="status" aria-live="polite" aria-atomic="true" aria-busy="false">找不到保留的原始媒體檔，無法播放、下載或用原始檔重跑；請從備份或原錄製檔補回系統原始檔資料夾。</div>
@@ -4954,6 +4981,64 @@ function renderAudioEvidence(meeting, requestedMode = null) {
   </div>`;
 }
 
+async function restoreMeetingSourceMedia(id, file) {
+  if (!id || !file) return;
+  const statusEl = document.getElementById('source-media-player-status');
+  const button = document.getElementById('source-media-restore-button');
+  const expectedExtension = uploadFileExtension({ name: currentMeetingData?.source_audio || '' });
+  const actualExtension = uploadFileExtension(file);
+  if (!isSupportedUploadFile(file)) {
+    setSourceMediaPlayerStatus(statusEl, uploadUnsupportedMessage(file), 'error');
+    alert(uploadUnsupportedMessage(file));
+    return;
+  }
+  if (expectedExtension && actualExtension !== expectedExtension) {
+    const message = `補回檔案副檔名需與原紀錄一致：${expectedExtension}。目前上傳：${actualExtension || '無副檔名'}`;
+    setSourceMediaPlayerStatus(statusEl, message, 'error');
+    alert(message);
+    return;
+  }
+  if (file.size > runtimeConfig.max_upload_bytes) {
+    const message = `檔案過大，請上傳 ${formatBytes(runtimeConfig.max_upload_bytes)} 以內的媒體檔。`;
+    setSourceMediaPlayerStatus(statusEl, message, 'error');
+    alert(message);
+    return;
+  }
+
+  const originalButtonText = button?.innerHTML;
+  if (button) {
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.innerHTML = '<span class="loading-spinner"></span> 補回中';
+  }
+  setSourceMediaPlayerStatus(statusEl, `正在補回原始檔：${file.name}`, 'loading', true);
+
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    const res = await fetch(`${API}/meetings/${id}/source-media/restore`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    const payload = await res.json().catch(() => ({}));
+    const restoredName = payload.name || file.name;
+    setSourceMediaPlayerStatus(statusEl, `已補回原始檔：${restoredName}`, 'success');
+    await openDetail(id);
+    await loadMeetings(document.getElementById('search-input').value.trim());
+    await loadMetrics();
+  } catch (err) {
+    setSourceMediaPlayerStatus(statusEl, `補回原始檔失敗：${err.message}`, 'error');
+    alert(`補回原始檔失敗：${err.message}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.setAttribute('aria-busy', 'false');
+      button.innerHTML = originalButtonText || '補回原始檔';
+    }
+  }
+}
+
 function primeSourceVideoPreview(video) {
   if (!video || video.dataset.previewPrimed === '1') return;
   const seekPreviewFrame = () => {
@@ -4985,6 +5070,7 @@ function setSourceMediaPlayerStatus(statusEl, message = '', level = 'warning', b
   statusEl.classList.toggle('show', Boolean(message));
   statusEl.classList.toggle('error', level === 'error' && Boolean(message));
   statusEl.classList.toggle('loading', level === 'loading' && Boolean(message));
+  statusEl.classList.toggle('success', level === 'success' && Boolean(message));
   statusEl.setAttribute('aria-busy', String(Boolean(busy)));
 }
 

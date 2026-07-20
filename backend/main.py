@@ -95,6 +95,7 @@ from backend.models import (
     SourceMediaBulkArchiveResponse,
     SourceMediaDeleteResponse,
     SourceMediaInventoryResponse,
+    MeetingSourceMediaRestoreResponse,
     SourceMediaRestoreResponse,
     MetricsResponse,
     AppConfigResponse,
@@ -1614,6 +1615,100 @@ def _resolve_meeting_source_audio(record: dict) -> Path:
     )
 
 
+def _meeting_source_media_restore_target(record: dict) -> tuple[Path, str]:
+    source_audio = str(record.get("source_audio") or "").strip()
+    if not source_audio:
+        raise HTTPException(status_code=409, detail="此會議紀錄沒有原始媒體檔資訊，無法補回。")
+
+    source_name = Path(source_audio).name
+    suffix = Path(source_name).suffix.lower()
+    if not source_name:
+        raise HTTPException(status_code=409, detail="此會議紀錄的原始媒體檔名不合法，無法補回。")
+    if suffix not in SUPPORTED_MEDIA_FORMATS:
+        supported = ", ".join(sorted(SUPPORTED_MEDIA_FORMATS))
+        raise HTTPException(
+            status_code=415,
+            detail=f"此會議原始媒體檔格式不支援：{suffix or '無副檔名'}。支援格式：{supported}",
+        )
+
+    try:
+        source_root = SOURCE_AUDIO_DIR.resolve()
+        target_path = (SOURCE_AUDIO_DIR / source_name).resolve()
+    except OSError:
+        raise HTTPException(status_code=500, detail="原始媒體檔資料夾無法存取。")
+    if target_path.parent != source_root:
+        raise HTTPException(status_code=400, detail="原始媒體檔路徑不合法。")
+    return target_path, suffix
+
+
+async def _restore_missing_meeting_source_media(
+    *,
+    record: dict,
+    file: UploadFile,
+    content_length: Optional[int],
+) -> tuple[Path, int, str]:
+    target_path, expected_suffix = _meeting_source_media_restore_target(record)
+    if target_path.exists():
+        raise HTTPException(status_code=409, detail="此會議的原始媒體檔已存在，無需補回。")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="未提供補回檔案名稱。")
+    upload_suffix = Path(file.filename).suffix.lower()
+    if upload_suffix != expected_suffix:
+        raise HTTPException(
+            status_code=415,
+            detail=f"補回檔案副檔名需與原紀錄一致：{expected_suffix}。目前上傳：{upload_suffix or '無副檔名'}",
+        )
+    if (
+        content_length is not None
+        and content_length > MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_ALLOWANCE_BYTES
+    ):
+        raise HTTPException(
+            status_code=413,
+            detail=f"檔案過大，請上傳 {MAX_UPLOAD_MB}MB 以內的媒體檔。",
+        )
+
+    SOURCE_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    temp_path = SOURCE_AUDIO_DIR / f".restore_{record.get('id') or 'meeting'}_{uuid.uuid4().hex[:8]}{expected_suffix}.tmp"
+    bytes_written = 0
+    upload_hasher = hashlib.sha256()
+
+    try:
+        first_chunk = await file.read(4096)
+        if not first_chunk:
+            raise HTTPException(status_code=400, detail="補回檔案是空的。")
+        magic_error = validate_media_magic(expected_suffix, first_chunk)
+        if magic_error:
+            raise HTTPException(status_code=415, detail=magic_error)
+
+        async with aiofiles.open(temp_path, "wb") as handle:
+            bytes_written += len(first_chunk)
+            upload_hasher.update(first_chunk)
+            await handle.write(first_chunk)
+
+            while chunk := await file.read(1024 * 1024):
+                bytes_written += len(chunk)
+                if bytes_written > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"檔案過大，請上傳 {MAX_UPLOAD_MB}MB 以內的媒體檔。",
+                    )
+                upload_hasher.update(chunk)
+                await handle.write(chunk)
+
+        if target_path.exists():
+            raise HTTPException(status_code=409, detail="此會議的原始媒體檔已存在，無需補回。")
+        temp_path.replace(target_path)
+        return target_path, bytes_written, upload_hasher.hexdigest()
+    except HTTPException:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
+    except Exception as exc:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise HTTPException(status_code=500, detail=f"原始媒體檔補回失敗：{exc}")
+
+
 def _recording_profile(record: dict) -> str:
     quality_report = record.get("quality_report") or {}
     if not isinstance(quality_report, dict):
@@ -2902,6 +2997,47 @@ async def get_meeting_source_media(
         media_type=media_type,
         headers={"Accept-Ranges": "bytes"},
         content_disposition_type="attachment" if download else "inline",
+    )
+
+
+@app.post(
+    "/meetings/{meeting_id}/source-media/restore",
+    response_model=MeetingSourceMediaRestoreResponse,
+    status_code=201,
+    summary="補回遺失的會議原始媒體檔",
+    tags=["會議記錄"],
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}, 415: {"model": ErrorResponse}},
+)
+async def restore_meeting_source_media(
+    meeting_id: int,
+    file: UploadFile = File(..., description="補回的原始媒體檔，副檔名需與原紀錄一致。"),
+    content_length: Optional[int] = Header(default=None, alias="Content-Length"),
+):
+    record = get_meeting(meeting_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
+
+    restored_path, restored_bytes, restored_sha256 = await _restore_missing_meeting_source_media(
+        record=record,
+        file=file,
+        content_length=content_length,
+    )
+    media_kind = _source_media_type(record, restored_path)
+    logger.info(
+        "📼 已補回會議原始媒體檔：meeting_id=%s name=%s bytes=%s sha256=%s",
+        meeting_id,
+        restored_path.name,
+        restored_bytes,
+        restored_sha256,
+    )
+    return MeetingSourceMediaRestoreResponse(
+        restored=True,
+        meeting_id=meeting_id,
+        name=restored_path.name,
+        bytes=restored_bytes,
+        source_media_type=media_kind,
+        source_media_sha256=restored_sha256,
+        restored_path=str(restored_path),
     )
 
 

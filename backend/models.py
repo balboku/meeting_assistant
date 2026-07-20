@@ -212,6 +212,17 @@ class SourceMediaRestoreResponse(BaseModel):
     restored_path: Optional[str] = None
 
 
+class MeetingSourceMediaRestoreResponse(BaseModel):
+    """POST /meetings/{meeting_id}/source-media/restore response payload."""
+    restored: bool
+    meeting_id: int
+    name: str
+    bytes: int = 0
+    source_media_type: Optional[str] = None
+    source_media_sha256: Optional[str] = None
+    restored_path: Optional[str] = None
+
+
 class RecentJobError(BaseModel):
     """最近失敗任務摘要"""
     job_id: str

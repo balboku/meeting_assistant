@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import inspect
 import json
 import os
@@ -3471,6 +3472,113 @@ class MeetingRerunRegressionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("原始媒體檔", response.json()["detail"])
         self.assertEqual(database.count_jobs(), 0)
+
+    def test_missing_meeting_source_media_can_be_restored(self):
+        database = self._isolated_database()
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_dir = root / "source_audio"
+            output_dir = root / "output"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            output_path = output_dir / "meeting.md"
+            output_path.write_text("# meeting", encoding="utf-8")
+            meeting_id = database.save_meeting(
+                title="補回原始檔",
+                date="2026/07/08",
+                source_audio="missing-source.webm",
+                output_path=str(output_path),
+                summary="摘要",
+            )
+            media_bytes = b"\x1a\x45\xdf\xa3" + b"\0" * 32
+
+            with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
+                 mock.patch.object(main, "_ffprobe_stream_types", return_value={"video", "audio"}):
+                response = asgi_request(
+                    main.app,
+                    "POST",
+                    f"/meetings/{meeting_id}/source-media/restore",
+                    files={"file": ("missing-source.webm", BytesIO(media_bytes), "video/webm")},
+                )
+                detail_response = asgi_request(main.app, "GET", f"/meetings/{meeting_id}")
+                rerun_response = asgi_request(main.app, "POST", f"/meetings/{meeting_id}/rerun")
+                restored_file_exists = (source_dir / "missing-source.webm").is_file()
+                restore_temp_files = list(source_dir.glob(".restore_*"))
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()
+        self.assertTrue(payload["restored"])
+        self.assertEqual(payload["meeting_id"], meeting_id)
+        self.assertEqual(payload["name"], "missing-source.webm")
+        self.assertEqual(payload["bytes"], len(media_bytes))
+        self.assertEqual(payload["source_media_type"], "video")
+        self.assertEqual(payload["source_media_sha256"], hashlib.sha256(media_bytes).hexdigest())
+        self.assertTrue(restored_file_exists)
+        self.assertFalse(restore_temp_files)
+        self.assertTrue(detail_response.json()["source_media_available"])
+        self.assertEqual(detail_response.json()["source_media_type"], "video")
+        self.assertEqual(rerun_response.status_code, 200)
+
+    def test_restore_meeting_source_media_rejects_mismatch_and_existing_file(self):
+        database = self._isolated_database()
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_dir = root / "source_audio"
+            output_dir = root / "output"
+            source_dir.mkdir()
+            output_dir.mkdir()
+            output_path = output_dir / "meeting.md"
+            output_path.write_text("# meeting", encoding="utf-8")
+            mismatch_id = database.save_meeting(
+                title="副檔名不符",
+                date="2026/07/08",
+                source_audio="missing-source.webm",
+                output_path=str(output_path),
+                summary="摘要",
+            )
+            existing_id = database.save_meeting(
+                title="已存在原始檔",
+                date="2026/07/08",
+                source_audio="existing-source.mp3",
+                output_path=str(output_path),
+                summary="摘要",
+            )
+            (source_dir / "existing-source.mp3").write_bytes(b"ID3" + b"\0" * 32)
+
+            with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir):
+                mismatch_response = asgi_request(
+                    main.app,
+                    "POST",
+                    f"/meetings/{mismatch_id}/source-media/restore",
+                    files={"file": ("wrong.mp3", BytesIO(b"ID3" + b"\0" * 32), "audio/mpeg")},
+                )
+                spoof_response = asgi_request(
+                    main.app,
+                    "POST",
+                    f"/meetings/{mismatch_id}/source-media/restore",
+                    files={"file": ("missing-source.webm", BytesIO(b"<html>not media</html>"), "video/webm")},
+                )
+                existing_response = asgi_request(
+                    main.app,
+                    "POST",
+                    f"/meetings/{existing_id}/source-media/restore",
+                    files={"file": ("existing-source.mp3", BytesIO(b"ID3" + b"\0" * 32), "audio/mpeg")},
+                )
+                restored_file_exists = (source_dir / "missing-source.webm").exists()
+                restore_temp_files = list(source_dir.glob(".restore_*"))
+
+        self.assertEqual(mismatch_response.status_code, 415)
+        self.assertIn("副檔名需與原紀錄一致", mismatch_response.json()["detail"])
+        self.assertEqual(spoof_response.status_code, 415)
+        self.assertIn("檔案內容", spoof_response.json()["detail"])
+        self.assertEqual(existing_response.status_code, 409)
+        self.assertIn("已存在", existing_response.json()["detail"])
+        self.assertFalse(restored_file_exists)
+        self.assertFalse(restore_temp_files)
 
 
 class MetricsRegressionTests(unittest.TestCase):
@@ -9258,6 +9366,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("quality-warning", html)
         self.assertIn("quality-warning-summary", html)
         self.assertIn("quality-warning-body", html)
+        self.assertIn("quality-warning-unlocated", html)
+        self.assertIn("尚未定位問題分段；請開啟完整逐字稿複核，或使用完整重跑重新建立分段資料。", html)
         self.assertIn("quality-warning-actions", html)
         self.assertIn("quality-warning-jump", html)
         self.assertIn("transcript-focus-highlight", html)
@@ -9373,6 +9483,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const targets = qualityWarningSegmentTargets(warning, segments, reviewSegments);", html)
         self.assertIn("const fullReviewSummary = isTranscriptQualityWarning(warningText)", html)
         self.assertIn("const visibleReviewSummary = fullReviewSummary && (reviewSegments || []).length", html)
+        self.assertIn("const needsUnlocatedRepeatHint = !summary", html)
         self.assertIn("問題位置：${escapeHtml(visibleReviewSummary)}", html)
         self.assertIn("const focusArgs = target.start_seconds !== null ? `${target.index}, ${target.start_seconds}` : `${target.index}`;", html)
         self.assertIn("定位第 ${target.index + 1} 段，並跳到原始檔 ${clockText(target.start_seconds)}", html)
@@ -9403,6 +9514,16 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("evidence.scrollIntoView({ block: 'center', behavior: 'smooth' });", html)
         self.assertIn("setDetailStatus('已定位原始檔播放器，請抽查錄音或錄影品質警示時段');", html)
         self.assertIn("setDetailStatus('已定位原始檔狀態；這筆紀錄的原始檔不存在，無法播放或下載');", html)
+        self.assertIn("async function restoreMeetingSourceMedia", html)
+        self.assertIn("/source-media/restore", html)
+        self.assertIn('id="source-media-restore-button"', html)
+        self.assertIn("補回原始檔", html)
+        self.assertIn("restoreMeetingSourceMedia(${Number(meeting.id) || 0}, this.files[0]); this.value='';", html)
+        self.assertIn("if (!isSupportedUploadFile(file))", html)
+        self.assertIn("補回檔案副檔名需與原紀錄一致", html)
+        self.assertIn("file.size > runtimeConfig.max_upload_bytes", html)
+        self.assertIn("formData.append('file', file);", html)
+        self.assertIn("await loadMetrics();", html)
         self.assertIn("window.requestAnimationFrame(focus)", html)
         self.assertIn("function isNeedsReviewRecord", html)
         self.assertIn("const reviewSegmentCount = Number(record?.quality_review_segment_count || 0);", html)
@@ -9582,6 +9703,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn(".source-media-player-status", html)
         self.assertIn(".source-media-player-status.error", html)
         self.assertIn(".source-media-player-status.loading", html)
+        self.assertIn(".source-media-player-status.success", html)
         self.assertIn("flex-wrap: wrap;", html)
         self.assertIn("justify-content: flex-end;", html)
         self.assertIn("justify-content: flex-start;", html)
@@ -9644,6 +9766,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('data-source-mode="audio" onclick="switchSourceMediaPlayer(\'audio\')"', html)
         self.assertIn('data-source-mode="video" onclick="switchSourceMediaPlayer(\'video\')"', html)
         self.assertIn("statusEl.setAttribute('aria-busy', String(Boolean(busy)));", html)
+        self.assertIn("statusEl.classList.toggle('success', level === 'success' && Boolean(message));", html)
         self.assertIn("Number(player.readyState || 0) < 1", html)
         self.assertIn("正在載入${label}預覽...", html)
         self.assertIn("'loading', true", html)
@@ -9726,6 +9849,7 @@ const code = [
   "const VIDEO_FILE_EXTENSIONS = new Set(['.webm', '.mp4', '.mov', '.mkv', '.avi', '.mpeg', '.mpg', '.wmv']);",
   "const BROWSER_VIDEO_PREVIEW_EXTENSIONS = new Set(['.webm', '.mp4']);",
   "const AUDIO_FILE_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.flac', '.wma']);",
+  "const FALLBACK_UPLOAD_ACCEPT = '.mp3,.wav,.m4a,.webm,.mp4';",
   grab('escapeHtml'),
   grab('formatBytes'),
   grab('normalizeMediaKind'),
@@ -9821,9 +9945,13 @@ if (!sandbox.missingPlayer.includes('media-unavailable') || !sandbox.missingPlay
   console.error(sandbox.missingPlayer);
   process.exit(15);
 }}
-if (sandbox.missingPlayer.includes('<video') || sandbox.missingPlayer.includes('<audio') || sandbox.missingPlayer.includes('download=1')) {{
+if (!sandbox.missingPlayer.includes('source-media-restore-button') || !sandbox.missingPlayer.includes('restoreMeetingSourceMedia(34, this.files[0])')) {{
   console.error(sandbox.missingPlayer);
   process.exit(16);
+}}
+if (sandbox.missingPlayer.includes('<video') || sandbox.missingPlayer.includes('<audio') || sandbox.missingPlayer.includes('download=1')) {{
+  console.error(sandbox.missingPlayer);
+  process.exit(17);
 }}
 console.log('source_video_entry_points_ok');
 """
@@ -10751,6 +10879,11 @@ segmentOnlyLocation = renderQualityWarning(
   [],
   []
 );
+genericUnlocated = renderQualityWarning(
+  '逐字稿品質警示：疑似連續重複轉錄（同一句連續重複 31 次：因為我是結所以我領車），建議重跑或複核相關分段。',
+  [],
+  []
+);
 locatedFull = renderQualityWarning(
   '逐字稿品質警示：問題位置：第 2 段 10:00-20:00：疑似連續重複轉錄；同一句連續重複 31 次；重複時間：10:12-10:15。建議重跑上述分段或複核相關內容。',
   [{{ index: 1 }}],
@@ -10856,6 +10989,14 @@ if (!sandbox.segmentOnlyLocation.includes('focusQualitySegment(4)')) {{
 if (!sandbox.segmentOnlyLocation.includes('定位第 5 段')) {{
   console.error(sandbox.segmentOnlyLocation);
   process.exit(19);
+}}
+if (!sandbox.genericUnlocated.includes('quality-warning-unlocated') || !sandbox.genericUnlocated.includes('尚未定位問題分段')) {{
+  console.error(sandbox.genericUnlocated);
+  process.exit(30);
+}}
+if (sandbox.genericUnlocated.includes('quality-warning-actions') || sandbox.genericUnlocated.includes('定位第')) {{
+  console.error(sandbox.genericUnlocated);
+  process.exit(31);
 }}
 if (sandbox.result.includes('分段疑似重複轉錄幻覺')) {{
   console.error(sandbox.result);
