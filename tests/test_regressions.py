@@ -471,6 +471,88 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
         self.assertEqual(payload["case_count"], 1)
         self.assertGreaterEqual(payload["average_score"], 80)
 
+    def test_quality_consistency_audit_runs_against_isolated_database(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            db_path = tmp_path / "meetings.db"
+            output_path = tmp_path / "audit-meeting.md"
+            output_path.write_text(
+                "## 一、討論摘要 (Discussion Summary)\n\n"
+                "### D1. 稽核腳本\n- 摘要：檢查品質欄位一致性。\n\n"
+                "## 二、最終決議 (Final Decisions)\n\n"
+                "| # | 關聯討論 | 決議 | 依據 | 狀態 |\n"
+                "|---|---|---|---|---|\n"
+                "| R1 | D1 | 確認稽核腳本可執行。 | [00:00] | confirmed |\n\n"
+                "## 三、待辦事項 (Action Items)\n\n"
+                "| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+                "|---|---|---|---|---|---|---|\n"
+                "| A1 | D1 | R1 | 保留稽核結果。 | 發言者 A | 未提及 | 中 |\n\n"
+                "## 四、完整逐字稿 (Verbatim Transcript)\n\n"
+                "### 【第 1 段｜00:00 – 10:00】\n"
+                "[00:00] **[發言者 A]**：測試品質欄位一致性。\n",
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env.update({
+                "DB_PATH": str(db_path),
+                "MEETING_OUTPUT_DIR": str(tmp_path / "output"),
+                "MEETING_TEMP_DIR": str(tmp_path / "temp"),
+                "MEETING_BACKUP_DIR": str(tmp_path / "backups"),
+            })
+            setup_code = f"""
+import json
+from backend import database
+
+database.init_db()
+database.save_meeting(
+    title='Audit Consistency Meeting',
+    date='2026/07/20',
+    source_audio='audit-consistency.webm',
+    output_path={json.dumps(str(output_path))},
+    summary='Audit Consistency Meeting',
+    quality_report={{
+        'score': 95,
+        'label': '良好',
+        'warnings': [],
+        'segments': [
+            {{'index': 0, 'start_seconds': 0, 'end_seconds': 600, 'issues': []}}
+        ],
+        'timestamp_count': 1,
+        'speaker_labels': ['發言者 A'],
+    }},
+)
+"""
+            subprocess.run(
+                [sys.executable, "-c", setup_code],
+                cwd=ROOT,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/audit_quality_consistency.py",
+                    "--limit",
+                    "10",
+                ],
+                cwd=ROOT,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["passed"])
+        self.assertEqual(payload["records"], 1)
+        self.assertEqual(payload["search_checked"], 1)
+        self.assertEqual(payload["problem_count"], 0)
+
     def test_quality_benchmark_can_scan_generated_markdown_directory(self):
         sample = (
             "## 一、討論摘要 (Discussion Summary)\n\n"
