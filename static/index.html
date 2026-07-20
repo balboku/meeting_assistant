@@ -4194,7 +4194,7 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
         .map(issue => String(issue || '').trim())
         .filter(Boolean);
       const issue = reviewIssueDisplay(issues);
-      const issueText = issue.compact;
+      const issueText = conciseReviewIssueLabel(issue.compact);
       const allIssueText = issue.all || issueText;
       const hasTimeRange = segment.start_seconds !== undefined || segment.end_seconds !== undefined;
       const timeText = hasTimeRange
