@@ -1065,6 +1065,8 @@ def _source_media_recording_metadata(quality_report: Any) -> dict[str, Any]:
     sha256 = str(recording.get("source_audio_sha256") or "").strip() or None
     if sha256 == "unavailable":
         sha256 = None
+    restored_at = str(recording.get("source_audio_restored_at") or "").strip() or None
+    restored_name = str(recording.get("source_audio_restored_name") or "").strip() or None
     raw_size = recording.get("source_audio_size_bytes")
     try:
         size_bytes = int(raw_size) if raw_size not in (None, "") else None
@@ -1075,6 +1077,8 @@ def _source_media_recording_metadata(quality_report: Any) -> dict[str, Any]:
         "recording_profile": profile,
         "source_media_size_bytes": size_bytes,
         "source_media_sha256": sha256,
+        "source_media_restored_at": restored_at,
+        "source_media_restored_name": restored_name,
     }
 
 

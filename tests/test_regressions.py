@@ -3525,6 +3525,8 @@ class MeetingRerunRegressionTests(unittest.TestCase):
         self.assertEqual(detail_payload["recording_profile"], "video_balanced")
         self.assertEqual(detail_payload["source_media_size_bytes"], len(media_bytes))
         self.assertEqual(detail_payload["source_media_sha256"], media_sha256)
+        self.assertEqual(detail_payload["source_media_restored_name"], "missing-source.webm")
+        self.assertRegex(detail_payload["source_media_restored_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
         recording = restored_record["quality_report"]["recording"]
         self.assertEqual(recording["profile"], "video_balanced")
         self.assertEqual(recording["source_audio_size_bytes"], len(media_bytes))
@@ -5283,6 +5285,8 @@ class SearchRegressionTests(unittest.TestCase):
                     "profile": "video_balanced",
                     "source_audio_size_bytes": 12345,
                     "source_audio_sha256": "a" * 64,
+                    "source_audio_restored_at": "2026-07-20T22:10:11",
+                    "source_audio_restored_name": "recorded-screen.webm",
                 },
             },
         )
@@ -5321,6 +5325,8 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(listed_by_id[video_id]["recording_profile"], "video_balanced")
         self.assertEqual(listed_by_id[video_id]["source_media_size_bytes"], 12345)
         self.assertEqual(listed_by_id[video_id]["source_media_sha256"], "a" * 64)
+        self.assertEqual(listed_by_id[video_id]["source_media_restored_at"], "2026-07-20T22:10:11")
+        self.assertEqual(listed_by_id[video_id]["source_media_restored_name"], "recorded-screen.webm")
         self.assertEqual(listed_by_id[audio_id]["source_media_type"], "audio")
         self.assertEqual(listed_by_id[audio_id]["recording_profile"], "audio_standard")
         self.assertEqual(listed_by_id[audio_id]["source_media_size_bytes"], 6789)
@@ -5329,6 +5335,7 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertIsNone(listed_by_id[legacy_webm_id]["source_media_type"])
         self.assertEqual(database.search_meetings("Video Meeting")[0]["source_media_type"], "video")
         self.assertEqual(database.search_meetings("Video Meeting")[0]["source_media_sha256"], "a" * 64)
+        self.assertEqual(database.search_meetings("Video Meeting")[0]["source_media_restored_name"], "recorded-screen.webm")
         self.assertEqual(database.search_meetings("Audio Meeting")[0]["source_media_type"], "audio")
         self.assertEqual(database.search_meetings("Audio Meeting")[0]["source_media_size_bytes"], 6789)
 
@@ -5350,6 +5357,8 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(api_by_id[video_id]["recording_profile"], "video_balanced")
         self.assertEqual(api_by_id[video_id]["source_media_size_bytes"], 12345)
         self.assertEqual(api_by_id[video_id]["source_media_sha256"], "a" * 64)
+        self.assertEqual(api_by_id[video_id]["source_media_restored_at"], "2026-07-20T22:10:11")
+        self.assertEqual(api_by_id[video_id]["source_media_restored_name"], "recorded-screen.webm")
         self.assertEqual(api_by_id[audio_id]["source_media_type"], "audio")
         self.assertFalse(api_by_id[audio_id]["source_media_available"])
         self.assertEqual(api_by_id[audio_id]["recording_profile"], "audio_standard")
@@ -5361,6 +5370,7 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(search_response.json()[0]["source_media_type"], "video")
         self.assertFalse(search_response.json()[0]["source_media_available"])
         self.assertEqual(search_response.json()[0]["source_media_sha256"], "a" * 64)
+        self.assertEqual(search_response.json()[0]["source_media_restored_at"], "2026-07-20T22:10:11")
         self.assertEqual(legacy_search_response.status_code, 200)
         self.assertEqual(legacy_search_response.json()[0]["source_media_type"], "video")
         self.assertTrue(legacy_search_response.json()[0]["source_media_available"])
@@ -8539,6 +8549,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                     "recording": {
                         "profile": "video_balanced",
                         "source_audio_sha256": "abc123def4567890",
+                        "source_audio_restored_at": "2026-07-20T22:30:31",
+                        "source_audio_restored_name": "source.webm",
                     }
                 },
             }
@@ -8552,6 +8564,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(payload["recording_profile"], "video_balanced")
         self.assertEqual(payload["source_media_size_bytes"], 5)
         self.assertEqual(payload["source_media_sha256"], "abc123def4567890")
+        self.assertEqual(payload["source_media_restored_at"], "2026-07-20T22:30:31")
+        self.assertEqual(payload["source_media_restored_name"], "source.webm")
 
     def test_meeting_detail_marks_missing_source_media_unavailable(self):
         import backend.main as main
@@ -9816,8 +9830,14 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("return recordingProfileBaseLabel(profile);", html)
         self.assertNotIn("video_balanced: '錄影模式'", html)
         self.assertIn("function sourceHashPreview", html)
+        self.assertIn("function sourceMediaRestoredLabel", html)
         self.assertIn("function renderSourceMediaFacts", html)
         self.assertIn("SHA256 ${hash}", html)
+        self.assertIn("source_media_restored_at", html)
+        self.assertIn("source_media_restored_name", html)
+        self.assertIn("recording.source_audio_restored_at", html)
+        self.assertIn("recording.source_audio_restored_name", html)
+        self.assertIn("已補回 ${displayAt}", html)
         self.assertIn("meeting?.recording_profile", html)
         self.assertIn("meeting?.source_media_size_bytes", html)
         self.assertIn("meeting?.source_media_sha256", html)
@@ -9969,6 +9989,7 @@ const code = [
   grab('recordingProfileBaseLabel'),
   grab('recordingProfileLabel'),
   grab('sourceHashPreview'),
+  grab('sourceMediaRestoredLabel'),
   grab('renderSourceMediaFacts'),
   grab('sourceMediaModePill'),
   grab('sourceMediaModeFacts'),
@@ -9983,7 +10004,9 @@ const meeting = {{
   source_media_type: 'video',
   recording_profile: 'video_balanced',
   source_media_size_bytes: 1234567,
-  source_media_sha256: 'abcdef0123456789'
+  source_media_sha256: 'abcdef0123456789',
+  source_media_restored_at: '2026-07-20T22:10:11',
+  source_media_restored_name: '79506dff_20260709_132517.webm'
 }};
 card = renderCardSourceMedia(meeting);
 chip = renderDetailSourceMediaChip(meeting);
@@ -10030,6 +10053,10 @@ if (!sandbox.player.includes('data-source-mode="audio" onclick="switchSourceMedi
 if (!sandbox.player.includes('SHA256 abcdef012345')) {{
   console.error(sandbox.player);
   process.exit(11);
+}}
+if (!sandbox.player.includes('已補回 2026-07-20 22:10:11 · 79506dff_20260709_132517.webm')) {{
+  console.error(sandbox.player);
+  process.exit(18);
 }}
 if (!sandbox.missingCard.includes('card-source-media unavailable') || sandbox.missingCard.includes('card-source-media-button')) {{
   console.error(sandbox.missingCard);

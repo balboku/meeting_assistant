@@ -4908,16 +4908,29 @@ function sourceHashPreview(hash = '') {
   return value && value !== 'unavailable' ? value.slice(0, 12) : '';
 }
 
+function sourceMediaRestoredLabel(meeting) {
+  const recording = meeting?.quality_report?.recording || {};
+  const restoredAt = String(meeting?.source_media_restored_at || recording.source_audio_restored_at || '').trim();
+  if (!restoredAt) return '';
+  const restoredName = String(meeting?.source_media_restored_name || recording.source_audio_restored_name || '').trim();
+  const displayAt = restoredAt.replace('T', ' ');
+  return restoredName
+    ? `已補回 ${displayAt} · ${restoredName}`
+    : `已補回 ${displayAt}`;
+}
+
 function renderSourceMediaFacts(meeting) {
   const recording = meeting?.quality_report?.recording || {};
   const profile = recordingProfileLabel(meeting?.recording_profile || recording.profile);
   const sizeBytes = Number(meeting?.source_media_size_bytes || recording.source_audio_size_bytes || 0);
   const hash = sourceHashPreview(meeting?.source_media_sha256 || recording.source_audio_sha256);
+  const restoredLabel = sourceMediaRestoredLabel(meeting);
   const facts = [
     sourceMediaKindLabel(meeting),
     profile,
     sizeBytes > 0 ? formatBytes(sizeBytes) : '',
-    hash ? `SHA256 ${hash}` : ''
+    hash ? `SHA256 ${hash}` : '',
+    restoredLabel
   ].filter(Boolean);
   if (!facts.length) return '';
   return `<div class="source-media-facts">${facts

@@ -1871,6 +1871,8 @@ def _source_media_detail_metadata(record: dict, source_path: Optional[Path] = No
     sha256 = str(recording.get("source_audio_sha256") or "").strip() or None
     if sha256 == "unavailable":
         sha256 = None
+    restored_at = str(recording.get("source_audio_restored_at") or "").strip() or None
+    restored_name = str(recording.get("source_audio_restored_name") or "").strip() or None
 
     size_bytes: Optional[int]
     raw_size = recording.get("source_audio_size_bytes")
@@ -1890,6 +1892,8 @@ def _source_media_detail_metadata(record: dict, source_path: Optional[Path] = No
         "recording_profile": profile,
         "source_media_size_bytes": size_bytes,
         "source_media_sha256": sha256,
+        "source_media_restored_at": restored_at,
+        "source_media_restored_name": restored_name,
     }
 
 
@@ -3001,6 +3005,8 @@ async def get_meeting_detail(meeting_id: int):
         recording_profile=source_media_metadata["recording_profile"],
         source_media_size_bytes=source_media_metadata["source_media_size_bytes"],
         source_media_sha256=source_media_metadata["source_media_sha256"],
+        source_media_restored_at=source_media_metadata["source_media_restored_at"],
+        source_media_restored_name=source_media_metadata["source_media_restored_name"],
     )
 
 

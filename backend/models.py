@@ -322,6 +322,8 @@ class MeetingRecord(BaseModel):
     recording_profile: Optional[str] = Field(None, description="錄製或轉檔設定代號")
     source_media_size_bytes: Optional[int] = Field(None, description="原始媒體檔大小")
     source_media_sha256: Optional[str] = Field(None, description="原始媒體 SHA256")
+    source_media_restored_at: Optional[str] = Field(None, description="原始媒體檔補回時間")
+    source_media_restored_name: Optional[str] = Field(None, description="補回時使用的原始媒體檔名")
     created_at: datetime
 
     model_config = {"from_attributes": True}
