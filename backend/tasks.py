@@ -31,6 +31,7 @@ from google.genai import types
 from dotenv import load_dotenv
 
 from backend.database import (
+    _repeated_transcript_turn_review_segments,
     is_job_cancel_requested,
     update_job_status,
     save_meeting
@@ -543,6 +544,63 @@ def _quality_report_review_segments(segment_report: list[dict[str, Any]]) -> lis
                 item[key] = segment[key]
         review_segments.append(item)
     return review_segments
+
+
+def _merge_repeated_turn_review_segments(
+    segment_report: list[dict[str, Any]],
+    full_transcript: str,
+) -> None:
+    """Add timestamp-located repeated-turn issues to segment quality metadata."""
+    repeated_segments = _repeated_transcript_turn_review_segments(
+        full_transcript,
+        segments=segment_report,
+    )
+    if not repeated_segments:
+        return
+
+    segments_by_index: dict[int, dict[str, Any]] = {}
+    for position, segment in enumerate(segment_report):
+        if not isinstance(segment, dict):
+            continue
+        try:
+            index = int(segment.get("index", position))
+        except (TypeError, ValueError):
+            continue
+        segments_by_index[index] = segment
+
+    for repeated_segment in repeated_segments:
+        if not isinstance(repeated_segment, dict):
+            continue
+        try:
+            index = int(repeated_segment.get("index", -1))
+        except (TypeError, ValueError):
+            continue
+        if index < 0:
+            continue
+        segment = segments_by_index.get(index)
+        if segment is None:
+            segment = {
+                "index": index,
+                "start_seconds": repeated_segment.get("start_seconds"),
+                "end_seconds": repeated_segment.get("end_seconds"),
+                "status": "review",
+                "issues": [],
+            }
+            segment_report.append(segment)
+            segments_by_index[index] = segment
+        for key in ("start_seconds", "end_seconds"):
+            if segment.get(key) is None and repeated_segment.get(key) is not None:
+                segment[key] = repeated_segment.get(key)
+        issues = [
+            str(issue).strip()
+            for issue in segment.get("issues") or []
+            if str(issue).strip()
+        ]
+        for issue in repeated_segment.get("issues") or []:
+            issue_text = str(issue).strip()
+            if issue_text and issue_text not in issues:
+                issues.append(issue_text)
+        segment["issues"] = issues
 
 
 def _quality_report_segment_warnings(review_segments: list[dict[str, Any]]) -> list[str]:
@@ -2580,6 +2638,12 @@ def _build_quality_report(
     segment_report: list[dict[str, Any]],
     full_transcript: str,
 ) -> dict[str, Any]:
+    segment_report = [
+        dict(segment)
+        for segment in segment_report or []
+        if isinstance(segment, dict)
+    ]
+    _merge_repeated_turn_review_segments(segment_report, full_transcript)
     warnings = list(audio_report.get("warnings") or [])
     silence_ratio = float(audio_report.get("silence_ratio") or 0)
     if silence_ratio >= 0.8:

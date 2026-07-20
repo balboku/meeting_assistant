@@ -1360,6 +1360,39 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertIn("第 3 段｜20:00-30:00", warning_text)
         self.assertNotIn("另有", warning_text)
 
+    def test_quality_report_locates_repeated_turn_segments(self):
+        import backend.tasks as tasks
+
+        repeated_turns = "\n".join(
+            f"[31:0{index}] **[發言者 A]**：因為我是結所以我領車。"
+            for index in range(4)
+        )
+        full_transcript = (
+            "### 【第 4 段｜30:00 – 40:00】\n"
+            "[30:59] **[發言者 B]**：前一句正常。\n"
+            f"{repeated_turns}\n"
+        )
+
+        report = tasks._build_quality_report(
+            audio_report={"warnings": []},
+            segment_report=[
+                {
+                    "index": 3,
+                    "start_seconds": 1800,
+                    "end_seconds": 2400,
+                    "status": "transcribed",
+                    "issues": [],
+                }
+            ],
+            full_transcript=full_transcript,
+        )
+
+        self.assertEqual(report["review_segments"][0]["index"], 3)
+        self.assertEqual(report["review_segments"][0]["start_seconds"], 1800)
+        self.assertEqual(report["review_segments"][0]["end_seconds"], 2400)
+        self.assertTrue(any("因為我是結所以我領車" in issue for issue in report["segments"][0]["issues"]))
+        self.assertIn("第 4 段｜30:00-40:00", "\n".join(report["warnings"]))
+
     def test_single_segment_audio_task_uses_dual_model_pipeline(self):
         import backend.tasks as tasks
 
@@ -3757,6 +3790,54 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
         self.assertEqual(searched["quality_review_rerunnable_segments"], [6, 7])
         self.assertEqual(searched["quality_warning_preview"], expected_preview)
+
+    def test_list_and_search_trust_markdown_repeat_segments_when_report_segments_are_incomplete(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "incomplete-report-repeat-warning.md"
+        repeated_turns = "\n".join(
+            f"[70:{index:02d}] **[發言者 A]**：因為我是結，所以我領車。"
+            for index in range(31)
+        )
+        output_path.write_text(
+            "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+            "## 二、最終決議 (Final Decisions)\n決議\n"
+            "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "### 【第 7 段｜59:59 – 70:04】\n"
+            "[69:59] **[發言者 B]**：前一句正常。\n"
+            f"{repeated_turns}\n"
+            "### 【第 8 段｜70:01 – 80:01】\n"
+            "[71:00] **[發言者 C]**：下一句正常內容。\n",
+            encoding="utf-8",
+        )
+        quality_report = {
+            "warnings": [
+                "逐字稿品質警示：疑似連續重複轉錄"
+                "（同一句連續重複 31 次：因為我是結所以我領車），"
+                "建議重跑或複核相關分段。"
+            ],
+            "segments": [
+                {"index": 0, "start_seconds": 0, "end_seconds": 600, "issues": []},
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Incomplete Report Repeat Warning",
+            date="2026/07/12",
+            source_audio="incomplete-report-repeat.webm",
+            output_path=str(output_path),
+            summary="incomplete-report-repeat-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Incomplete Report Repeat Warning")[0]
+
+        self.assertEqual(listed["quality_review_segments"], ["第 7 段", "第 8 段"])
+        self.assertEqual(listed["quality_review_rerunnable_segments"], [6, 7])
+        self.assertIn("第 7 段 59:59-70:04", listed["quality_warning_preview"])
+        self.assertEqual(searched["quality_review_segment_details"], listed["quality_review_segment_details"])
+        self.assertEqual(searched["quality_review_rerunnable_segments"], [6, 7])
 
     def test_list_and_search_infer_repeat_segments_from_generic_warning(self):
         database, tmp_path = self._isolated_database()

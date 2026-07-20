@@ -1847,7 +1847,11 @@ def apply_quality_preview_fields(
             warning_preview = legacy_warnings[0]
             for warning in legacy_warnings:
                 add_review_segment_labels_from_text(warning)
-    for detail in _legacy_markdown_repeated_turn_review_segments(str(record.get("output_path") or "")):
+    output_path_text = str(record.get("output_path") or "")
+    legacy_repeated_details = _legacy_markdown_repeated_turn_review_segments(output_path_text)
+    if legacy_repeated_details:
+        known_segment_indices.update(_markdown_transcript_segment_indices(output_path_text))
+    for detail in legacy_repeated_details:
         segment_issues = [
             _normalize_quality_review_issue_text(str(issue).strip())
             for issue in detail.get("issues") or []
