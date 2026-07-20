@@ -8456,6 +8456,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("onclick=\"focusQualitySegment(${focusArgs})\"", html)
         self.assertIn('return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment"', html)
         self.assertIn('id="${rerunButtonId}" type="button" class="quality-review-segment-rerun"', html)
+        self.assertIn('aria-label="重跑第 ${index + 1} 段"', html)
+        self.assertIn("↻ 重跑本段", html)
         self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, ${index}, false, false, '${rerunButtonId}')\"", html)
         self.assertIn("quality-review-title", html)
         self.assertIn('id="quality-rerun-review-segments-button"', html)
@@ -8661,7 +8663,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('data-segment-index="${index}"', html)
         self.assertIn('data-start-seconds="${startSeconds}"', html)
         self.assertIn('data-end-seconds="${endSeconds}"', html)
-        self.assertIn('id="rerun-segment-${index}" aria-describedby="detail-status" aria-busy="false"', html)
+        self.assertIn('id="rerun-segment-${index}" type="button" aria-describedby="detail-status" aria-busy="false"', html)
+        self.assertIn('title="只重跑第 ${index + 1} 段"', html)
         self.assertIn("const segmentIndices = normalizeSegmentIndices(segmentIndex);", html)
         self.assertIn("JSON.stringify({ segments: segmentIndices })", html)
         self.assertIn('id="rerun-summary-button"', html)
@@ -10186,6 +10189,10 @@ if (!sandbox.available.includes('quality-rerun-review-segment-7')) {{
 if (!sandbox.available.includes("rerunMeeting(43, 7, false, false, 'quality-rerun-review-segment-7')")) {{
   console.error(sandbox.available);
   process.exit(17);
+}}
+if (!sandbox.available.includes('aria-label="重跑第 8 段"') || !sandbox.available.includes('↻ 重跑本段')) {{
+  console.error(sandbox.available);
+  process.exit(23);
 }}
 if (!sandbox.available.includes('↻ 重跑 1 段')) {{
   console.error(sandbox.available);

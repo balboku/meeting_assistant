@@ -4224,7 +4224,7 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
       const rerunButtonId = `quality-rerun-review-segment-${index}`;
       const reviewSegmentTitle = `第 ${index + 1} 段${plainTimeText}：${allIssueText}`;
       const rerunControl = canFocusSegment
-        ? `<button id="${rerunButtonId}" type="button" class="quality-review-segment-rerun" aria-describedby="detail-status" aria-busy="false" title="只重跑第 ${index + 1} 段，其他分段沿用快取" onclick="rerunMeeting(${Number(meetingId) || 0}, ${index}, false, false, '${rerunButtonId}')">↻ 重跑</button>`
+        ? `<button id="${rerunButtonId}" type="button" class="quality-review-segment-rerun" aria-describedby="detail-status" aria-busy="false" title="只重跑第 ${index + 1} 段，其他分段沿用快取" aria-label="重跑第 ${index + 1} 段" onclick="rerunMeeting(${Number(meetingId) || 0}, ${index}, false, false, '${rerunButtonId}')">↻ 重跑本段</button>`
         : '';
       if (!canFocusSegment) {
         if (canCueSource) {
@@ -4553,7 +4553,7 @@ function renderQualityReport(meeting) {
     return `<div class="segment-status${issues.length ? ' has-issue' : ''}" ${segmentAttrs}>
       <span>第 ${index + 1} 段 · ${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)} · ${escapeHtml(state)}</span>
       ${issueBadges}
-      <button id="rerun-segment-${index}" aria-describedby="detail-status" aria-busy="false" title="只重跑這一段" onclick="rerunMeeting(${meeting.id}, ${index})">↻ 重跑</button>
+      <button id="rerun-segment-${index}" type="button" aria-describedby="detail-status" aria-busy="false" title="只重跑第 ${index + 1} 段" aria-label="重跑第 ${index + 1} 段" onclick="rerunMeeting(${meeting.id}, ${index})">↻ 重跑本段</button>
     </div>`;
   }).join('');
   const scoreText = report.score === null || report.score === undefined
