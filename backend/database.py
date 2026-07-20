@@ -437,6 +437,14 @@ def _has_standard_review_location_warning(text: str) -> bool:
     return bool(_STANDARD_REVIEW_LOCATION_PATTERN.search(str(text or "")))
 
 
+def _is_derived_review_location_warning(text: str) -> bool:
+    warning = str(text or "")
+    return (
+        _has_standard_review_location_warning(warning)
+        and "建議重跑上述分段或複核相關內容" in warning
+    )
+
+
 _PROBLEM_LOCATION_WARNING_PATTERN = re.compile(
     r"(?:^|\n)\s*逐字稿品質警示[：:]\s*問題位置[：:]"
 )
@@ -2022,10 +2030,32 @@ def apply_quality_preview_fields(
     review_segment_issue_previews: list[str] = []
     generic_review_issue = "品質警示提及此分段"
 
+    def has_structured_review_issues(report: Any) -> bool:
+        if not isinstance(report, dict):
+            return False
+        for key in ("review_segments", "segments"):
+            for segment in report.get(key) or []:
+                if not isinstance(segment, dict):
+                    continue
+                if any(str(issue or "").strip() for issue in segment.get("issues") or []):
+                    return True
+        return False
+
     def clean_review_issues(issues: list[str]) -> list[str]:
         unique_issues = list(dict.fromkeys(issue for issue in issues if issue))
         if any(issue != generic_review_issue for issue in unique_issues):
             unique_issues = [issue for issue in unique_issues if issue != generic_review_issue]
+        repeated_hallucination_preview = "分段疑似重複轉錄幻覺"
+        if repeated_hallucination_preview in unique_issues and any(
+            issue != repeated_hallucination_preview
+            and repeated_hallucination_preview in issue
+            for issue in unique_issues
+        ):
+            unique_issues = [
+                issue
+                for issue in unique_issues
+                if issue != repeated_hallucination_preview
+            ]
         return unique_issues
 
     def add_review_segment_label(
@@ -2098,6 +2128,7 @@ def apply_quality_preview_fields(
     record["source_media_type"] = _source_media_type_from_metadata(record, quality_report)
     record.update(_source_media_recording_metadata(quality_report))
     if isinstance(quality_report, dict):
+        skip_derived_location_warning_segments = has_structured_review_issues(quality_report)
         warnings = quality_report.get("warnings") or []
         if isinstance(warnings, list):
             warning_count = len(warnings)
@@ -2105,6 +2136,11 @@ def apply_quality_preview_fields(
             if warnings:
                 warning_preview = str(warnings[0]).strip() or None
             for warning in warnings:
+                if (
+                    skip_derived_location_warning_segments
+                    and _is_derived_review_location_warning(str(warning))
+                ):
+                    continue
                 add_review_segment_labels_from_text(str(warning))
         for review_segment in quality_report.get("review_segments") or []:
             if not isinstance(review_segment, dict):

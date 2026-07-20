@@ -2359,6 +2359,17 @@ def _refresh_quality_report_review_segments(quality_report: dict) -> None:
         unique_issues = list(dict.fromkeys(issue for issue in issues if issue))
         if any(issue != generic_review_issue for issue in unique_issues):
             unique_issues = [issue for issue in unique_issues if issue != generic_review_issue]
+        repeated_hallucination_preview = "分段疑似重複轉錄幻覺"
+        if repeated_hallucination_preview in unique_issues and any(
+            issue != repeated_hallucination_preview
+            and repeated_hallucination_preview in issue
+            for issue in unique_issues
+        ):
+            unique_issues = [
+                issue
+                for issue in unique_issues
+                if issue != repeated_hallucination_preview
+            ]
         return unique_issues
 
     for position, segment in enumerate(quality_report.get("segments") or []):
@@ -2445,8 +2456,23 @@ def _refresh_quality_report_review_segments(quality_report: dict) -> None:
     warnings = quality_report.get("warnings") or []
     if isinstance(warnings, str):
         warnings = [warnings]
+    has_existing_specific_review_issues = any(
+        any(
+            str(issue or "").strip()
+            and str(issue or "").strip() != generic_review_issue
+            for issue in item.get("issues") or []
+        )
+        for item in review_segments_by_index.values()
+    )
     for warning in warnings:
-        for detail in review_segment_details_from_text(str(warning)):
+        warning_text = str(warning)
+        if (
+            has_existing_specific_review_issues
+            and "建議重跑上述分段或複核相關內容" in warning_text
+            and re.search(r"逐字稿品質警示[：:]\s*(?:問題位置|需複核分段)[：:]", warning_text)
+        ):
+            continue
+        for detail in review_segment_details_from_text(warning_text):
             try:
                 index = int(detail.get("index", -1))
             except (TypeError, ValueError):

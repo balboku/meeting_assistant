@@ -3868,6 +3868,94 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(detail["quality_review_rerunnable_segments"], [7])
         self.assertIn("因為我是結所以我領車", detail["quality_review_segment_summary"])
 
+    def test_detail_api_does_not_smear_derived_location_issue_across_segments(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "detail-derived-location.md"
+        output_path.write_text(
+            "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+            "## 二、最終決議 (Final Decisions)\n決議\n"
+            "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "### 【第 7 段｜59:59 – 70:04】\n"
+            "[64:47] **[發言者 A]**：那時候你把那個做。\n"
+            "[64:59] **[發言者 A]**：那時候你把那個做。\n"
+            "[65:29] **[發言者 A]**：那時候你把那個做。\n"
+            "[65:44] **[發言者 A]**：那時候你把那個做。\n"
+            "[65:59] **[發言者 A]**：下一句正常內容。\n"
+            "### 【第 8 段｜70:01 – 80:01】\n"
+            "[70:01] **[發言者 A]**：第八段正常內容。\n",
+            encoding="utf-8",
+        )
+        quality_report = {
+            "warnings": [
+                "逐字稿品質警示：以下分段曾觸發轉錄品質補救或需複核："
+                "第 7 段｜59:59-70:04（曾觸發轉錄補救：非最後分段含自動過濾/截斷提示）、"
+                "第 8 段｜70:01-80:01（曾觸發轉錄補救：非最後分段時間戳只到 70:56，未接近段尾 75:01）。"
+                "建議點選需複核分段定位原始錄音/錄影後抽查，必要時只重跑指定分段。"
+            ],
+            "review_segments": [
+                {
+                    "index": 6,
+                    "label": "第 7 段",
+                    "start_seconds": 3599,
+                    "end_seconds": 4204,
+                    "issues": ["曾觸發轉錄補救：非最後分段含自動過濾/截斷提示"],
+                },
+                {
+                    "index": 7,
+                    "label": "第 8 段",
+                    "start_seconds": 4201,
+                    "end_seconds": 4801,
+                    "issues": ["曾觸發轉錄補救：非最後分段時間戳只到 70:56，未接近段尾 75:01"],
+                },
+            ],
+            "segments": [
+                {
+                    "index": 6,
+                    "start_seconds": 3599,
+                    "end_seconds": 4204,
+                    "issues": ["曾觸發轉錄補救：非最後分段含自動過濾/截斷提示"],
+                },
+                {
+                    "index": 7,
+                    "start_seconds": 4201,
+                    "end_seconds": 4801,
+                    "issues": ["曾觸發轉錄補救：非最後分段時間戳只到 70:56，未接近段尾 75:01"],
+                },
+            ],
+        }
+        meeting_id = database.save_meeting(
+            title="Detail Derived Location",
+            date="2026/07/20",
+            source_audio="detail-derived-location.webm",
+            output_path=str(output_path),
+            summary="detail-derived-location-summary",
+            quality_report=quality_report,
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+
+        import backend.main as main
+
+        detail_response = asgi_request(main.app, "GET", f"/meetings/{meeting_id}")
+        self.assertEqual(detail_response.status_code, 200)
+        detail = detail_response.json()
+
+        repeat_issue = "疑似連續重複轉錄；同一句連續重複 4 次：那時候你把那個做；重複時間：64:47-65:44"
+        detail_by_index = {
+            segment["index"]: segment
+            for segment in detail["quality_review_segment_details"]
+        }
+        self.assertIn(repeat_issue, detail_by_index[6]["issues"])
+        self.assertNotIn(repeat_issue, detail_by_index[7]["issues"])
+        self.assertNotIn(
+            "第 8 段 70:01-80:01：疑似連續重複轉錄；同一句連續重複 4 次",
+            detail["quality_review_segment_summary"],
+        )
+        self.assertEqual(detail["quality_review_segment_details"], listed["quality_review_segment_details"])
+        self.assertEqual(detail["quality_review_segment_summary"], listed["quality_review_segment_summary"])
+
     def test_list_and_search_quality_summary_prefers_actionable_review_issue(self):
         database, tmp_path = self._isolated_database()
         output_path = tmp_path / "actionable-review-issue.md"
