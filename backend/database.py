@@ -2196,6 +2196,29 @@ def save_meeting(
     return meeting_id
 
 
+def update_meeting_quality_report(meeting_id: int, quality_report: dict[str, Any]) -> bool:
+    """Persist a meeting quality report without disturbing unrelated columns."""
+    report = quality_report if isinstance(quality_report, dict) else {}
+    quality_report_json = json.dumps(report, ensure_ascii=False) if report else None
+    with get_db() as conn:
+        _ensure_meeting_quality_columns(conn)
+        row = conn.execute(
+            "SELECT quality_score, quality_label FROM meetings WHERE id=?",
+            (meeting_id,),
+        ).fetchone()
+        if not row:
+            return False
+        quality_score = report.get("score") if "score" in report else row["quality_score"]
+        quality_label = report.get("label") if "label" in report else row["quality_label"]
+        cursor = conn.execute(
+            """UPDATE meetings
+                  SET quality_score=?, quality_label=?, quality_report_json=?
+                WHERE id=?""",
+            (quality_score, quality_label, quality_report_json, meeting_id),
+        )
+    return cursor.rowcount > 0
+
+
 def apply_quality_preview_fields(
     record: dict[str, Any],
     *,

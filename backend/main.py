@@ -61,6 +61,7 @@ from backend.database import (
     get_meeting,
     search_meetings,
     delete_meeting,
+    update_meeting_quality_report,
     update_meeting_content_with_revision,
     list_meeting_revisions,
     upsert_app_user,
@@ -1641,6 +1642,17 @@ def _meeting_source_media_restore_target(record: dict) -> tuple[Path, str]:
     return target_path, suffix
 
 
+def _recording_source_media_sha256(record: dict) -> Optional[str]:
+    quality_report = record.get("quality_report") or {}
+    recording = quality_report.get("recording") if isinstance(quality_report, dict) else {}
+    if not isinstance(recording, dict):
+        return None
+    sha256 = str(recording.get("source_audio_sha256") or "").strip().lower()
+    if sha256 and sha256 != "unavailable" and re.fullmatch(r"[0-9a-f]{64}", sha256):
+        return sha256
+    return None
+
+
 async def _restore_missing_meeting_source_media(
     *,
     record: dict,
@@ -1695,10 +1707,21 @@ async def _restore_missing_meeting_source_media(
                 upload_hasher.update(chunk)
                 await handle.write(chunk)
 
+        restored_sha256 = upload_hasher.hexdigest()
+        expected_sha256 = _recording_source_media_sha256(record)
+        if expected_sha256 and restored_sha256.lower() != expected_sha256:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "補回檔案內容與原紀錄 SHA256 不一致，請確認是否選到正確的原始檔。"
+                    f"原紀錄：{expected_sha256}；上傳檔：{restored_sha256}"
+                ),
+            )
+
         if target_path.exists():
             raise HTTPException(status_code=409, detail="此會議的原始媒體檔已存在，無需補回。")
         temp_path.replace(target_path)
-        return target_path, bytes_written, upload_hasher.hexdigest()
+        return target_path, bytes_written, restored_sha256
     except HTTPException:
         if temp_path.exists():
             temp_path.unlink()
@@ -1707,6 +1730,31 @@ async def _restore_missing_meeting_source_media(
         if temp_path.exists():
             temp_path.unlink()
         raise HTTPException(status_code=500, detail=f"原始媒體檔補回失敗：{exc}")
+
+
+def _quality_report_with_restored_source_media(
+    record: dict,
+    *,
+    restored_path: Path,
+    restored_bytes: int,
+    restored_sha256: str,
+    media_kind: str,
+) -> dict:
+    quality_report = dict(record.get("quality_report") or {})
+    recording = quality_report.get("recording")
+    if not isinstance(recording, dict):
+        recording = {}
+    else:
+        recording = dict(recording)
+
+    if not str(recording.get("profile") or "").strip():
+        recording["profile"] = "video_balanced" if media_kind == "video" else "audio_standard"
+    recording["source_audio_size_bytes"] = restored_bytes
+    recording["source_audio_sha256"] = restored_sha256
+    recording["source_audio_restored_at"] = datetime.now().isoformat(timespec="seconds")
+    recording["source_audio_restored_name"] = restored_path.name
+    quality_report["recording"] = recording
+    return quality_report
 
 
 def _recording_profile(record: dict) -> str:
@@ -3023,6 +3071,15 @@ async def restore_meeting_source_media(
         content_length=content_length,
     )
     media_kind = _source_media_type(record, restored_path)
+    restored_quality_report = _quality_report_with_restored_source_media(
+        record,
+        restored_path=restored_path,
+        restored_bytes=restored_bytes,
+        restored_sha256=restored_sha256,
+        media_kind=media_kind,
+    )
+    if not update_meeting_quality_report(meeting_id, restored_quality_report):
+        logger.warning("⚠️ 已補回原始媒體檔，但更新品質報告失敗：meeting_id=%s", meeting_id)
     logger.info(
         "📼 已補回會議原始媒體檔：meeting_id=%s name=%s bytes=%s sha256=%s",
         meeting_id,

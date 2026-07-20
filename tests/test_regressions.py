@@ -3506,19 +3506,31 @@ class MeetingRerunRegressionTests(unittest.TestCase):
                 rerun_response = asgi_request(main.app, "POST", f"/meetings/{meeting_id}/rerun")
                 restored_file_exists = (source_dir / "missing-source.webm").is_file()
                 restore_temp_files = list(source_dir.glob(".restore_*"))
+                restored_record = database.get_meeting(meeting_id)
 
         self.assertEqual(response.status_code, 201)
         payload = response.json()
+        media_sha256 = hashlib.sha256(media_bytes).hexdigest()
         self.assertTrue(payload["restored"])
         self.assertEqual(payload["meeting_id"], meeting_id)
         self.assertEqual(payload["name"], "missing-source.webm")
         self.assertEqual(payload["bytes"], len(media_bytes))
         self.assertEqual(payload["source_media_type"], "video")
-        self.assertEqual(payload["source_media_sha256"], hashlib.sha256(media_bytes).hexdigest())
+        self.assertEqual(payload["source_media_sha256"], media_sha256)
         self.assertTrue(restored_file_exists)
         self.assertFalse(restore_temp_files)
-        self.assertTrue(detail_response.json()["source_media_available"])
-        self.assertEqual(detail_response.json()["source_media_type"], "video")
+        detail_payload = detail_response.json()
+        self.assertTrue(detail_payload["source_media_available"])
+        self.assertEqual(detail_payload["source_media_type"], "video")
+        self.assertEqual(detail_payload["recording_profile"], "video_balanced")
+        self.assertEqual(detail_payload["source_media_size_bytes"], len(media_bytes))
+        self.assertEqual(detail_payload["source_media_sha256"], media_sha256)
+        recording = restored_record["quality_report"]["recording"]
+        self.assertEqual(recording["profile"], "video_balanced")
+        self.assertEqual(recording["source_audio_size_bytes"], len(media_bytes))
+        self.assertEqual(recording["source_audio_sha256"], media_sha256)
+        self.assertEqual(recording["source_audio_restored_name"], "missing-source.webm")
+        self.assertRegex(recording["source_audio_restored_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
         self.assertEqual(rerun_response.status_code, 200)
 
     def test_restore_meeting_source_media_rejects_mismatch_and_existing_file(self):
@@ -3547,6 +3559,18 @@ class MeetingRerunRegressionTests(unittest.TestCase):
                 output_path=str(output_path),
                 summary="摘要",
             )
+            sha_mismatch_id = database.save_meeting(
+                title="SHA 不符",
+                date="2026/07/08",
+                source_audio="sha-mismatch.webm",
+                output_path=str(output_path),
+                summary="摘要",
+                quality_report={
+                    "recording": {
+                        "source_audio_sha256": "0" * 64,
+                    },
+                },
+            )
             (source_dir / "existing-source.mp3").write_bytes(b"ID3" + b"\0" * 32)
 
             with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir):
@@ -3568,7 +3592,14 @@ class MeetingRerunRegressionTests(unittest.TestCase):
                     f"/meetings/{existing_id}/source-media/restore",
                     files={"file": ("existing-source.mp3", BytesIO(b"ID3" + b"\0" * 32), "audio/mpeg")},
                 )
+                sha_mismatch_response = asgi_request(
+                    main.app,
+                    "POST",
+                    f"/meetings/{sha_mismatch_id}/source-media/restore",
+                    files={"file": ("sha-mismatch.webm", BytesIO(b"\x1a\x45\xdf\xa3" + b"\0" * 32), "video/webm")},
+                )
                 restored_file_exists = (source_dir / "missing-source.webm").exists()
+                sha_mismatch_file_exists = (source_dir / "sha-mismatch.webm").exists()
                 restore_temp_files = list(source_dir.glob(".restore_*"))
 
         self.assertEqual(mismatch_response.status_code, 415)
@@ -3577,7 +3608,10 @@ class MeetingRerunRegressionTests(unittest.TestCase):
         self.assertIn("檔案內容", spoof_response.json()["detail"])
         self.assertEqual(existing_response.status_code, 409)
         self.assertIn("已存在", existing_response.json()["detail"])
+        self.assertEqual(sha_mismatch_response.status_code, 409)
+        self.assertIn("SHA256 不一致", sha_mismatch_response.json()["detail"])
         self.assertFalse(restored_file_exists)
+        self.assertFalse(sha_mismatch_file_exists)
         self.assertFalse(restore_temp_files)
 
 
