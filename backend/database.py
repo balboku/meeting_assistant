@@ -1937,6 +1937,7 @@ def apply_quality_preview_fields(
         for detail in record["quality_review_segment_details"]
         if isinstance(detail.get("index"), int) and detail["index"] in known_segment_indices
     ]
+    _apply_effective_quality_status(record)
     return record
 
 
@@ -2023,6 +2024,49 @@ def _meeting_record_quality_types(record: dict[str, Any]) -> set[str]:
         types.add("other")
 
     return types
+
+
+def _int_quality_score(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _capped_effective_quality_status(
+    record: dict[str, Any],
+    *,
+    cap: int,
+    label: str,
+) -> None:
+    original_score = _int_quality_score(record.get("quality_score"))
+    record["quality_effective_score"] = min(original_score, cap) if original_score is not None else cap
+    record["quality_effective_label"] = label
+
+
+def _apply_effective_quality_status(record: dict[str, Any]) -> None:
+    """Expose a display-oriented quality state without overwriting raw scores."""
+    quality_types = _meeting_record_quality_types(record)
+    if "rerunnable" in quality_types:
+        _capped_effective_quality_status(record, cap=80, label="需重跑問題分段")
+        return
+    if "transcript" in quality_types:
+        _capped_effective_quality_status(record, cap=82, label="需複核逐字稿")
+        return
+    if "summary" in quality_types:
+        _capped_effective_quality_status(record, cap=84, label="需重整摘要")
+        return
+    if "recording" in quality_types:
+        _capped_effective_quality_status(record, cap=88, label="需抽查原始檔")
+        return
+    if "other" in quality_types:
+        label = str(record.get("quality_label") or "需複核").strip() or "需複核"
+        _capped_effective_quality_status(record, cap=84, label=label)
+        return
+    record["quality_effective_score"] = _int_quality_score(record.get("quality_score"))
+    record["quality_effective_label"] = str(record.get("quality_label") or "").strip() or None
 
 
 def _meeting_record_matches_quality_type(record: dict[str, Any], quality_type: Optional[str] = None) -> bool:

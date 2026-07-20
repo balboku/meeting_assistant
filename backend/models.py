@@ -253,6 +253,8 @@ class MeetingRecord(BaseModel):
     job_id: Optional[str] = Field(None, description="產生此會議記錄的任務 ID")
     quality_score: Optional[int] = Field(None, description="本機品質檢查分數")
     quality_label: Optional[str] = Field(None, description="本機品質檢查結果")
+    quality_effective_score: Optional[int] = Field(None, description="依品質警示調整後的顯示分數")
+    quality_effective_label: Optional[str] = Field(None, description="依品質警示調整後的顯示結果")
     quality_warning_count: int = Field(0, description="已儲存品質警示數量")
     quality_warning_preview: Optional[str] = Field(None, description="第一個品質警示摘要")
     quality_warning_text: Optional[str] = Field(None, description="完整品質警示文字")

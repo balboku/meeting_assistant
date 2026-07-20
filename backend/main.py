@@ -2368,6 +2368,8 @@ async def get_meeting_detail(meeting_id: int):
         job_id=record.get("job_id"),
         quality_score=record.get("quality_score"),
         quality_label=record.get("quality_label"),
+        quality_effective_score=quality_fields.get("quality_effective_score"),
+        quality_effective_label=quality_fields.get("quality_effective_label"),
         quality_warning_count=quality_fields.get("quality_warning_count") or 0,
         quality_warning_preview=quality_fields.get("quality_warning_preview"),
         quality_warning_text=quality_fields.get("quality_warning_text"),

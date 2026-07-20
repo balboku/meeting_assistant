@@ -3852,6 +3852,54 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(searched["quality_review_rerunnable_segments"], [6, 7])
         self.assertEqual(searched["quality_warning_preview"], expected_preview)
 
+    def test_effective_quality_status_downgrades_rerunnable_transcript_warning(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "effective-quality-repeat-warning.md"
+        output_path.write_text(
+            "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+            "## 二、最終決議 (Final Decisions)\n決議\n"
+            "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "### 【第 2 段｜10:00 – 20:00】\n"
+            "[10:12] **[發言者 A]**：因為我是結所以我領車。\n",
+            encoding="utf-8",
+        )
+        meeting_id = database.save_meeting(
+            title="Effective Quality Repeat Warning",
+            date="2026/07/12",
+            source_audio="effective-repeat.webm",
+            output_path=str(output_path),
+            summary="effective-quality-summary",
+            quality_report={
+                "score": 95,
+                "label": "良好",
+                "warnings": [
+                    "逐字稿品質警示：疑似連續重複轉錄；問題位置：第 2 段 10:00-20:00："
+                    "同一句連續重複 31 次：因為我是結所以我領車；重複時間：10:12-10:15。"
+                ],
+                "segments": [
+                    {
+                        "index": 1,
+                        "start_seconds": 600,
+                        "end_seconds": 1200,
+                        "issues": ["疑似連續重複轉錄；重複時間：10:12-10:15"],
+                    }
+                ],
+            },
+        )
+
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+        searched = database.search_meetings("Effective Quality Repeat Warning")[0]
+
+        self.assertEqual(listed["quality_score"], 95)
+        self.assertEqual(listed["quality_label"], "良好")
+        self.assertEqual(listed["quality_effective_score"], 80)
+        self.assertEqual(listed["quality_effective_label"], "需重跑問題分段")
+        self.assertEqual(listed["quality_review_rerunnable_segments"], [1])
+        self.assertEqual(searched["quality_effective_score"], 80)
+        self.assertEqual(searched["quality_effective_label"], "需重跑問題分段")
+
     def test_list_and_search_trust_markdown_repeat_segments_when_report_segments_are_incomplete(self):
         database, tmp_path = self._isolated_database()
         output_path = tmp_path / "incomplete-report-repeat-warning.md"
@@ -6516,6 +6564,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(payload["quality_review_segment_details"], report["review_segments"])
         self.assertEqual(payload["quality_review_segment_count"], 2)
         self.assertEqual(payload["quality_review_rerunnable_segments"], [1, 3])
+        self.assertEqual(payload["quality_effective_score"], 80)
+        self.assertEqual(payload["quality_effective_label"], "需重跑問題分段")
         self.assertEqual(
             payload["quality_review_segment_summary"],
             "第 2 段 10:00-20:00、第 4 段 30:00-40:00：疑似連續重複轉錄；重複時間：10:00-10:03",
@@ -7181,6 +7231,11 @@ function grab(name) {{
   return script.slice(start, next < 0 ? script.length : next);
 }}
 const code = [
+  grab('isRecordingQualityWarning'),
+  grab('isTranscriptQualityWarning'),
+  grab('recordQualityWarningTypes'),
+  grab('finiteQualityScore'),
+  grab('effectiveQualityStatus'),
   grab('isReviewLocationWarning'),
   grab('mergeQualityReportWarnings'),
   grab('fallbackQualityReportFromMeeting'),
@@ -7197,13 +7252,13 @@ const legacy = detailQualityReport({{
 }});
 if (!legacy || legacy.warnings.length !== 2) process.exit(4);
 if (legacy.review_segments[0].index !== 7) process.exit(5);
-if (legacy.label !== '需複核') process.exit(6);
+if (legacy.score !== 82 || legacy.label !== '需複核逐字稿') process.exit(6);
 const merged = detailQualityReport({{
   quality_report: {{ score: 95, label: '良好', warnings: [], segments: [] }},
   quality_warning_text: '摘要品質警示：需補 D 編號',
   quality_review_segment_details: [{{ index: 2, label: '第 3 段', issues: ['需複核'] }}]
 }});
-if (merged.score !== 95 || merged.warnings[0] !== '摘要品質警示：需補 D 編號') process.exit(7);
+if (merged.score !== 82 || merged.label !== '需複核逐字稿' || merged.warnings[0] !== '摘要品質警示：需補 D 編號') process.exit(7);
 if (merged.review_segments[0].label !== '第 3 段') process.exit(8);
 const oldLocated = detailQualityReport({{
   quality_report: {{
@@ -7264,6 +7319,9 @@ const code = [
   grab('parseClockSeconds'),
   grab('isRecordingQualityWarning'),
   grab('isTranscriptQualityWarning'),
+  grab('recordQualityWarningTypes'),
+  grab('finiteQualityScore'),
+  grab('effectiveQualityStatus'),
   grab('cardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
@@ -7371,6 +7429,9 @@ const code = [
   grab('parseClockSeconds'),
   grab('isRecordingQualityWarning'),
   grab('isTranscriptQualityWarning'),
+  grab('recordQualityWarningTypes'),
+  grab('finiteQualityScore'),
+  grab('effectiveQualityStatus'),
   grab('cardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
@@ -7451,6 +7512,9 @@ const code = [
   grab('parseClockSeconds'),
   grab('isRecordingQualityWarning'),
   grab('isTranscriptQualityWarning'),
+  grab('recordQualityWarningTypes'),
+  grab('finiteQualityScore'),
+  grab('effectiveQualityStatus'),
   grab('cardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
@@ -7462,6 +7526,8 @@ const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderCardQuality({{
   id: 43,
+  quality_score: 95,
+  quality_label: '良好',
   quality_warning_count: 1,
   quality_warning_preview: '偵測到可能的爆音；原始媒體檔已保留，重要內容請抽查。',
   quality_review_rerunnable_segments: [7],
@@ -7473,6 +7539,14 @@ result = renderCardQuality({{
 if (!sandbox.result.includes('錄音警示 1')) {{
   console.error(sandbox.result);
   process.exit(4);
+}}
+if (!sandbox.result.includes('品質 80 · 需重跑問題分段')) {{
+  console.error(sandbox.result);
+  process.exit(13);
+}}
+if (sandbox.result.includes('>品質 95 · 良好</span>')) {{
+  console.error(sandbox.result);
+  process.exit(14);
 }}
 if (!sandbox.result.includes('逐字稿警示 1 段')) {{
   console.error(sandbox.result);
@@ -7544,6 +7618,9 @@ const code = [
   grab('parseClockSeconds'),
   grab('isRecordingQualityWarning'),
   grab('isTranscriptQualityWarning'),
+  grab('recordQualityWarningTypes'),
+  grab('finiteQualityScore'),
+  grab('effectiveQualityStatus'),
   grab('cardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),
@@ -7615,6 +7692,9 @@ const code = [
   grab('parseClockSeconds'),
   grab('isRecordingQualityWarning'),
   grab('isTranscriptQualityWarning'),
+  grab('recordQualityWarningTypes'),
+  grab('finiteQualityScore'),
+  grab('effectiveQualityStatus'),
   grab('cardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
   grab('reviewIssuePriority'),

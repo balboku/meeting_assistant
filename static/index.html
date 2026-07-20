@@ -2894,6 +2894,60 @@ function qualityTypeMatchesRecord(record, type = 'all') {
   return recordQualityWarningTypes(record).has(type);
 }
 
+function finiteQualityScore(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function effectiveQualityStatus(record) {
+  const rawScore = finiteQualityScore(record?.quality_score ?? record?.quality_report?.score);
+  const rawLabel = String(record?.quality_label || record?.quality_report?.label || '').trim();
+  const apiScore = finiteQualityScore(record?.quality_effective_score);
+  const apiLabel = String(record?.quality_effective_label || '').trim();
+  if (apiScore !== null || apiLabel) {
+    const score = apiScore !== null ? apiScore : rawScore;
+    const label = apiLabel || rawLabel;
+    return {
+      score,
+      label,
+      rawScore,
+      rawLabel,
+      adjusted: (apiScore !== null && apiScore !== rawScore) || Boolean(apiLabel && apiLabel !== rawLabel),
+    };
+  }
+
+  const types = recordQualityWarningTypes(record);
+  let cap = null;
+  let label = '';
+  if (types.has('rerunnable')) {
+    cap = 80;
+    label = '需重跑問題分段';
+  } else if (types.has('transcript')) {
+    cap = 82;
+    label = '需複核逐字稿';
+  } else if (types.has('summary')) {
+    cap = 84;
+    label = '需重整摘要';
+  } else if (types.has('recording')) {
+    cap = 88;
+    label = '需抽查原始檔';
+  } else if (types.has('other')) {
+    cap = 84;
+    label = rawLabel || '需複核';
+  }
+  if (cap !== null) {
+    return {
+      score: rawScore !== null ? Math.min(rawScore, cap) : cap,
+      label,
+      rawScore,
+      rawLabel,
+      adjusted: true,
+    };
+  }
+  return { score: rawScore, label: rawLabel, rawScore, rawLabel, adjusted: false };
+}
+
 function reviewIssuePriority(issue = '') {
   const text = String(issue || '').trim();
   if (!text) return 0;
@@ -2917,8 +2971,9 @@ function preferredReviewIssue(issues = []) {
 
 function renderCardQuality(record) {
   const warningCount = Number(record?.quality_warning_count || 0);
-  const score = record?.quality_score;
-  const label = String(record?.quality_label || '').trim();
+  const qualityStatus = effectiveQualityStatus(record);
+  const score = qualityStatus.score;
+  const label = qualityStatus.label;
   const warningPreview = String(record?.quality_warning_preview || '').trim();
   const warningText = String(record?.quality_warning_text || warningPreview).trim();
   const recordId = Number(record?.id);
@@ -2965,7 +3020,10 @@ function renderCardQuality(record) {
     const reviewClass = Number(score) < 85 || /需|警|低|不/.test(label)
       ? 'needs-review'
       : 'good';
-    chips.push(`<span class="card-quality-chip ${reviewClass}">品質 ${escapeHtml(score)}${label ? ` · ${escapeHtml(label)}` : ''}</span>`);
+    const originalStatus = qualityStatus.adjusted && qualityStatus.rawScore !== null
+      ? ` title="原始品質 ${escapeHtml(qualityStatus.rawScore)}${qualityStatus.rawLabel ? ` · ${escapeHtml(qualityStatus.rawLabel)}` : ''}；已依品質警示調整顯示狀態"`
+      : '';
+    chips.push(`<span class="card-quality-chip ${reviewClass}"${originalStatus}>品質 ${escapeHtml(score)}${label ? ` · ${escapeHtml(label)}` : ''}</span>`);
   } else if (label) {
     chips.push(`<span class="card-quality-chip needs-review">${escapeHtml(label)}</span>`);
   }
@@ -3054,8 +3112,9 @@ function renderCardQuality(record) {
 function isNeedsReviewRecord(record) {
   const warningCount = Number(record?.quality_warning_count || 0);
   const reviewSegmentCount = Number(record?.quality_review_segment_count || 0);
-  const score = record?.quality_score;
-  const label = String(record?.quality_label || '').trim();
+  const qualityStatus = effectiveQualityStatus(record);
+  const score = qualityStatus.score;
+  const label = qualityStatus.label;
   const hasScore = score !== null && score !== undefined && score !== '';
   return warningCount > 0 || reviewSegmentCount > 0 || (hasScore && Number(score) < 85) || /需|警|低|不/.test(label);
 }
@@ -3766,9 +3825,10 @@ function fallbackQualityReportFromMeeting(meeting) {
     || Number(meeting?.quality_warning_count || 0) > 0
     || Number(meeting?.quality_review_segment_count || 0) > 0;
   if (!hasQualityFields) return null;
+  const qualityStatus = effectiveQualityStatus(meeting);
   return {
-    score: meeting?.quality_score ?? null,
-    label: meeting?.quality_label || (reviewSegments.length ? '需複核' : '品質警示'),
+    score: qualityStatus.score ?? null,
+    label: qualityStatus.label || (reviewSegments.length ? '需複核' : '品質警示'),
     warnings,
     segments: [],
     review_segments: reviewSegments,
@@ -3783,6 +3843,9 @@ function detailQualityReport(meeting) {
     : null;
   const fallback = fallbackQualityReportFromMeeting(meeting);
   if (!report) return fallback;
+  const qualityStatus = effectiveQualityStatus(meeting);
+  if (qualityStatus.score !== null) report.score = qualityStatus.score;
+  if (qualityStatus.label) report.label = qualityStatus.label;
   if (fallback?.warnings?.length) {
     report.warnings = mergeQualityReportWarnings(report.warnings, fallback.warnings);
   }
