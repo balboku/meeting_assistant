@@ -7594,7 +7594,9 @@ console.log('summary_editor_quality_note_ok');
         self.assertIn("setDetailStatus(`正在建立重跑任務：${segmentText}`)", html)
         self.assertIn("setDetailStatus(`已建立重跑任務：${data.job_id}`)", html)
         self.assertIn("setDetailStatus(`重跑失敗：${err.message}`)", html)
-        self.assertIn("`只重跑 ${segmentIndices.length} 個問題分段（第 ${segmentListText} 段）`", html)
+        self.assertIn("function segmentIndicesDisplayText", html)
+        self.assertIn("`只重跑 ${segmentIndices.length} 個問題分段（${segmentTextLabel}）`", html)
+        self.assertIn("`只重跑${segmentTextLabel}`", html)
         self.assertNotIn("個需複核分段", html)
         self.assertIn("button.setAttribute('aria-busy', 'true');", html)
         self.assertIn("button.setAttribute('aria-busy', 'false');", html)
@@ -9636,7 +9638,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, ${index}, false, false, '${rerunButtonId}')\"", html)
         self.assertIn("quality-review-title", html)
         self.assertIn('id="quality-rerun-review-segments-button"', html)
-        self.assertIn("↻ 重跑 ${rerunnableSegmentIndices.length} 段", html)
+        self.assertIn("const rerunSegmentText = segmentIndicesDisplayText(rerunnableSegmentIndices, 5);", html)
+        self.assertIn("↻ 重跑${escapeHtml(rerunSegmentText)}", html)
         self.assertIn("此紀錄缺少可直接重跑的分段資料；可定位原始檔時間複核，必要時使用完整重跑。", html)
         self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, null, false, false, 'quality-rerun-review-full-button')\"", html)
         self.assertIn("onclick=\"rerunMeeting(${Number(meetingId) || 0}, [${rerunnableSegmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')\"", html)
@@ -9834,8 +9837,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const rerunnableSegmentIndices = normalizeSegmentIndices(record?.quality_review_rerunnable_segments || []);", html)
         self.assertIn("id=\"card-rerun-review-segments-${recordId}\"", html)
         self.assertIn("onclick=\"rerunReviewSegmentsFromCard(event, ${recordId}, [${rerunnableSegmentIndices.join(',')}])\"", html)
-        self.assertIn("const rerunCountText = `${rerunnableSegmentIndices.length} 段`;", html)
-        self.assertIn("↻ 重跑 ${escapeHtml(rerunCountText)}", html)
+        self.assertIn("const rerunSegmentText = segmentIndicesDisplayText(rerunnableSegmentIndices, 3);", html)
+        self.assertIn("↻ 重跑${escapeHtml(rerunSegmentText)}", html)
         self.assertIn("需詳情複核", html)
         self.assertIn("card-quality-action", html)
         self.assertIn("onclick=\"openDetailAndFocusSegment(event, ${focusArgs})\"", html)
@@ -10493,6 +10496,7 @@ const code = [
   grab('cardWarningTypeLabel'),
   grab('contextualCardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
+  grab('segmentIndicesDisplayText'),
   grab('reviewIssuePriority'),
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
@@ -10570,7 +10574,7 @@ if (!sandbox.result.includes('rerunReviewSegmentsFromCard(event, 17, [0,1])')) {
   console.error(sandbox.result);
   process.exit(9);
 }}
-if (!sandbox.result.includes('↻ 重跑 2 段')) {{
+if (!sandbox.result.includes('↻ 重跑第 1、2 段')) {{
   console.error(sandbox.result);
   process.exit(10);
 }}
@@ -10622,6 +10626,7 @@ const code = [
   grab('cardWarningTypeLabel'),
   grab('contextualCardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
+  grab('segmentIndicesDisplayText'),
   grab('reviewIssuePriority'),
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
@@ -10710,6 +10715,7 @@ const code = [
   grab('cardWarningTypeLabel'),
   grab('contextualCardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
+  grab('segmentIndicesDisplayText'),
   grab('reviewIssuePriority'),
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
@@ -10805,7 +10811,7 @@ if (!sandbox.result.includes('rerunReviewSegmentsFromCard(event, 43, [7])')) {{
   console.error(sandbox.result);
   process.exit(9);
 }}
-if (!sandbox.result.includes('↻ 重跑 1 段')) {{
+if (!sandbox.result.includes('↻ 重跑第 8 段')) {{
   console.error(sandbox.result);
   process.exit(22);
 }}
@@ -10877,6 +10883,7 @@ const code = [
   grab('cardWarningTypeLabel'),
   grab('contextualCardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
+  grab('segmentIndicesDisplayText'),
   grab('reviewIssuePriority'),
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
@@ -10956,6 +10963,7 @@ const code = [
   grab('cardWarningTypeLabel'),
   grab('contextualCardWarningTypeLabel'),
   grab('normalizeSegmentIndices'),
+  grab('segmentIndicesDisplayText'),
   grab('reviewIssuePriority'),
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
@@ -11394,6 +11402,7 @@ const code = [
   grab('clockText'),
   grab('parseClockSeconds'),
   grab('normalizeSegmentIndices'),
+  grab('segmentIndicesDisplayText'),
   grab('reviewIssuePriority'),
   grab('orderedReviewIssues'),
   grab('preferredReviewIssue'),
@@ -11493,7 +11502,7 @@ if (!sandbox.available.includes('aria-label="重跑第 8 段"') || !sandbox.avai
   console.error(sandbox.available);
   process.exit(23);
 }}
-if (!sandbox.available.includes('↻ 重跑 1 段')) {{
+if (!sandbox.available.includes('↻ 重跑第 8 段')) {{
   console.error(sandbox.available);
   process.exit(22);
 }}
