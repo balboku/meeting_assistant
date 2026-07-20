@@ -2505,6 +2505,16 @@ async def rerun_meeting_record(
     if not known_segments:
         transcript = _extract_transcript_section_body(record.get("full_content") or "") or ""
         known_segments = _transcript_segment_metadata(transcript)
+    known_segment_indices: set[int] = set()
+    for position, segment in enumerate(known_segments or []):
+        if not isinstance(segment, dict):
+            continue
+        try:
+            index = int(segment.get("index", position))
+        except (TypeError, ValueError):
+            continue
+        if index >= 0:
+            known_segment_indices.add(index)
     summary_only = bool(request_body and request_body.summary_only)
     high_quality = bool(request_body and request_body.high_quality)
     summary_source_path = None
@@ -2520,15 +2530,18 @@ async def rerun_meeting_record(
         force_segment_indices = []
     elif request_body is not None and request_body.segments is not None:
         force_segment_indices = sorted(set(request_body.segments))
-        if any(index < 0 or index >= len(known_segments) for index in force_segment_indices):
-            raise HTTPException(status_code=400, detail="指定的重跑分段不存在。")
         if not force_segment_indices:
             raise HTTPException(status_code=400, detail="請至少指定一個要重跑的分段。")
+        if (
+            not known_segment_indices
+            or any(index < 0 or index not in known_segment_indices for index in force_segment_indices)
+        ):
+            raise HTTPException(status_code=400, detail="指定的重跑分段不存在。")
         transcript_reuse_source_path = Path(record.get("output_path") or "")
         if not transcript_reuse_source_path.is_file():
             raise HTTPException(status_code=409, detail="原會議紀錄檔不存在，無法沿用其他分段逐字稿。")
     else:
-        force_segment_indices = list(range(len(known_segments)))
+        force_segment_indices = sorted(known_segment_indices)
 
     job_id = str(uuid.uuid4())
     try:

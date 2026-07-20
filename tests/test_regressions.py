@@ -5657,6 +5657,42 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(enqueue.call_args.kwargs["transcript_reuse_source_path"], meeting_path)
         self.assertIn("第 1、2 段", response.json()["message"])
 
+    def test_meeting_rerun_api_accepts_sparse_legacy_segment_indices(self):
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            meeting_path = Path(tmpdir) / "meeting.md"
+            full_content = (
+                "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 7 段｜59:59 – 70:04】\n[70:01] **[發言者 A]**：第七段。\n"
+                "### 【第 8 段｜70:01 – 80:01】\n[70:02] **[發言者 B]**：第八段。"
+            )
+            meeting_path.write_text(full_content, encoding="utf-8")
+            record = {
+                "id": 18,
+                "title": "舊紀錄 sparse 分段",
+                "output_path": str(meeting_path),
+                "full_content": full_content,
+                "quality_report": {"warnings": ["逐字稿品質警示：需複核分段：第 7 段、第 8 段"]},
+            }
+            with mock.patch.object(main, "get_meeting", return_value=record), \
+                 mock.patch.object(main, "_resolve_meeting_source_audio", return_value=audio_path), \
+                 mock.patch.object(main, "enqueue_audio_job") as enqueue:
+                response = asgi_request(
+                    main.app,
+                    "POST",
+                    "/meetings/18/rerun",
+                    json={"segments": [7, 6, 7]},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(enqueue.call_args.kwargs["force_segment_indices"], [6, 7])
+        self.assertEqual(enqueue.call_args.kwargs["transcript_reuse_source_path"], meeting_path)
+        self.assertIn("第 7、8 段", response.json()["message"])
+
     def test_meeting_rerun_api_can_rebuild_summary_without_forcing_transcription(self):
         import backend.main as main
 
