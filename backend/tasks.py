@@ -1121,6 +1121,143 @@ def _record_segment_reuse_blocking_issues(
     return [issue for issue in issues if any(marker in issue for marker in blocking_markers)]
 
 
+def _segment_transcript_issue_penalty(issue: str) -> int:
+    text = str(issue or "")
+    if "轉錄內容為空" in text:
+        return 10000
+    if "轉錄幻覺" in text or "自動過濾/截斷" in text:
+        return 1000
+    if "早於段首" in text or "超過段尾" in text:
+        return 500
+    if "缺少時間戳" in text:
+        return 300
+    if "未接近段尾" in text:
+        return 150
+    return 25
+
+
+def _segment_transcript_candidate_metrics(
+    transcript: str,
+    *,
+    segment_index: int,
+    total_segments: int,
+    expected_start_seconds: int,
+    expected_end_seconds: int,
+) -> dict[str, Any]:
+    issues = _segment_transcript_quality_issues(
+        transcript=transcript,
+        segment_index=segment_index,
+        total_segments=total_segments,
+        segment_minutes=SEGMENT_MINUTES,
+        expected_start_seconds=expected_start_seconds,
+        expected_end_seconds=expected_end_seconds,
+        is_last_segment=segment_index >= total_segments - 1,
+    )
+    timestamps = [
+        int(match.group("minutes")) * 60 + int(match.group("seconds"))
+        for match in TIMESTAMP_PATTERN.finditer(transcript or "")
+    ]
+    if timestamps:
+        earliest_timestamp = min(timestamps)
+        latest_timestamp = max(timestamps)
+        covered_start = max(expected_start_seconds, earliest_timestamp)
+        covered_end = min(expected_end_seconds, latest_timestamp)
+        coverage_seconds = max(0, covered_end - covered_start)
+        tail_gap_seconds = max(0, expected_end_seconds - latest_timestamp)
+    else:
+        earliest_timestamp = None
+        latest_timestamp = None
+        coverage_seconds = 0
+        tail_gap_seconds = expected_end_seconds - expected_start_seconds
+    nonempty_lines = [
+        line.strip()
+        for line in (transcript or "").splitlines()
+        if line.strip()
+    ]
+    issue_penalty = sum(_segment_transcript_issue_penalty(issue) for issue in issues)
+    rank = (
+        issue_penalty,
+        tail_gap_seconds,
+        -coverage_seconds,
+        -len(timestamps),
+        -len(nonempty_lines),
+        -len(transcript or ""),
+    )
+    return {
+        "issues": issues,
+        "rank": rank,
+        "timestamp_count": len(timestamps),
+        "line_count": len(nonempty_lines),
+        "coverage_seconds": coverage_seconds,
+        "tail_gap_seconds": tail_gap_seconds,
+        "earliest_timestamp": earliest_timestamp,
+        "latest_timestamp": latest_timestamp,
+    }
+
+
+def _prefer_existing_segment_transcript_after_rerun(
+    *,
+    existing_transcript: Optional[str],
+    rerun_transcript: str,
+    segment_index: int,
+    total_segments: int,
+    expected_start_seconds: int,
+    expected_end_seconds: int,
+) -> tuple[bool, list[str], list[str], str]:
+    if not existing_transcript:
+        return False, [], [], ""
+
+    rerun_metrics = _segment_transcript_candidate_metrics(
+        rerun_transcript,
+        segment_index=segment_index,
+        total_segments=total_segments,
+        expected_start_seconds=expected_start_seconds,
+        expected_end_seconds=expected_end_seconds,
+    )
+    rerun_issues = list(rerun_metrics["issues"])
+    if not rerun_issues:
+        return False, [], rerun_issues, ""
+
+    blocking_existing_issues = _record_segment_reuse_blocking_issues(
+        existing_transcript,
+        segment_index=segment_index,
+        total_segments=total_segments,
+        expected_start_seconds=expected_start_seconds,
+        expected_end_seconds=expected_end_seconds,
+    )
+    if blocking_existing_issues:
+        return False, blocking_existing_issues, rerun_issues, ""
+
+    existing_metrics = _segment_transcript_candidate_metrics(
+        existing_transcript,
+        segment_index=segment_index,
+        total_segments=total_segments,
+        expected_start_seconds=expected_start_seconds,
+        expected_end_seconds=expected_end_seconds,
+    )
+    existing_issues = list(existing_metrics["issues"])
+    if existing_metrics["rank"] >= rerun_metrics["rank"]:
+        return False, existing_issues, rerun_issues, ""
+
+    reason_parts = []
+    if existing_metrics["timestamp_count"] > rerun_metrics["timestamp_count"]:
+        reason_parts.append(
+            f"舊稿時間戳較多（{existing_metrics['timestamp_count']} > {rerun_metrics['timestamp_count']}）"
+        )
+    if existing_metrics["line_count"] > rerun_metrics["line_count"]:
+        reason_parts.append(
+            f"舊稿內容行較多（{existing_metrics['line_count']} > {rerun_metrics['line_count']}）"
+        )
+    if existing_metrics["tail_gap_seconds"] < rerun_metrics["tail_gap_seconds"]:
+        reason_parts.append(
+            "舊稿較接近段尾"
+            f"（{_format_mmss(expected_end_seconds - existing_metrics['tail_gap_seconds'])}"
+            f" > {_format_mmss(expected_end_seconds - rerun_metrics['tail_gap_seconds'])}）"
+        )
+    reason = "、".join(reason_parts) or "舊稿結構評分較佳"
+    return True, existing_issues, rerun_issues, reason
+
+
 def _safe_segment_cache_name(job_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", job_id) or "unknown-job"
 
@@ -1974,41 +2111,75 @@ def _transcribe_segment_with_recovery(
     speaker_context: str = "",
     temp_segment_paths: Optional[list[Path]] = None,
     quality_events: Optional[list[dict[str, Any]]] = None,
+    direct_recovery: bool = False,
 ) -> str:
-    transcript = _transcribe_segment(
-        client,
-        seg_path,
-        seg_index,
-        total_segs,
-        job_id,
-        model,
-        speaker_context=speaker_context,
-    )
-    transcript = _offset_transcript_timestamps(transcript, offset_seconds)
-
-    try:
-        _raise_if_segment_transcript_incomplete(
-            transcript=transcript,
-            segment_index=seg_index,
-            total_segments=total_segs,
-            segment_minutes=SEGMENT_MINUTES,
-            expected_start_seconds=offset_seconds,
-            expected_end_seconds=offset_seconds + duration_seconds,
-            is_last_segment=is_last_segment,
+    quality_error: Optional[RuntimeError] = None
+    if not direct_recovery:
+        transcript = _transcribe_segment(
+            client,
+            seg_path,
+            seg_index,
+            total_segs,
+            job_id,
+            model,
+            speaker_context=speaker_context,
         )
-        return transcript
-    except RuntimeError as quality_error:
-        if quality_events is not None:
-            quality_events.append({
-                "segment_index": seg_index,
-                "start_seconds": offset_seconds,
-                "end_seconds": offset_seconds + duration_seconds,
-                "issue": str(quality_error),
-            })
-        chunk_seconds = _next_recovery_chunk_seconds(duration_seconds)
-        if chunk_seconds is None:
-            raise
+        transcript = _offset_transcript_timestamps(transcript, offset_seconds)
 
+        try:
+            _raise_if_segment_transcript_incomplete(
+                transcript=transcript,
+                segment_index=seg_index,
+                total_segments=total_segs,
+                segment_minutes=SEGMENT_MINUTES,
+                expected_start_seconds=offset_seconds,
+                expected_end_seconds=offset_seconds + duration_seconds,
+                is_last_segment=is_last_segment,
+            )
+            return transcript
+        except RuntimeError as exc:
+            quality_error = exc
+            if quality_events is not None:
+                quality_events.append({
+                    "segment_index": seg_index,
+                    "start_seconds": offset_seconds,
+                    "end_seconds": offset_seconds + duration_seconds,
+                    "issue": str(quality_error),
+                })
+    else:
+        quality_error = RuntimeError("指定重跑分段使用小段穩定轉錄模式")
+
+    chunk_seconds = _next_recovery_chunk_seconds(duration_seconds)
+    if chunk_seconds is None:
+        if direct_recovery:
+            transcript = _transcribe_segment(
+                client,
+                seg_path,
+                seg_index,
+                total_segs,
+                job_id,
+                model,
+                speaker_context=speaker_context,
+            )
+            return _offset_transcript_timestamps(transcript, offset_seconds)
+        raise quality_error
+
+    if direct_recovery:
+        logger.info(
+            "[%s] 🧩 第 %s/%s 段為指定重跑，直接切成約 %s 秒小段穩定轉錄",
+            job_id,
+            seg_index + 1,
+            total_segs,
+            chunk_seconds,
+        )
+        update_job_status(
+            job_id,
+            "processing",
+            f"🧩 第 {seg_index + 1}/{total_segs} 段為問題分段，改用小段穩定轉錄...",
+            progress_current=seg_index,
+            progress_total=total_segs,
+        )
+    else:
         logger.warning(
             "[%s] ⚠️ 第 %s/%s 段轉錄不完整，改切成約 %s 秒小段補救：%s",
             job_id,
@@ -2025,58 +2196,91 @@ def _transcribe_segment_with_recovery(
             progress_total=total_segs,
         )
 
-        try:
-            subsegments = _split_audio_to_subsegments(seg_path, chunk_seconds)
-        except Exception as split_error:
-            logger.warning(
-                "[%s] ⚠️ 第 %s/%s 段補救切段失敗：%s",
-                job_id,
-                seg_index + 1,
-                total_segs,
-                split_error,
-            )
-            raise quality_error
-
-        if len(subsegments) <= 1:
-            raise quality_error
-
-        recovered: list[str] = []
-        for sub_index, (sub_path, start_seconds, end_seconds) in enumerate(subsegments):
-            _raise_if_cancelled(job_id)
-            if (
-                temp_segment_paths is not None
-                and sub_path != seg_path
-                and sub_path not in temp_segment_paths
-            ):
-                temp_segment_paths.append(sub_path)
-
-            update_job_status(
-                job_id,
-                "processing",
-                f"📝 正在補救轉錄第 {seg_index + 1}/{total_segs} 段的小段 {sub_index + 1}/{len(subsegments)}...",
-                progress_current=seg_index,
-                progress_total=total_segs,
-            )
-            child_context = _speaker_context_from_transcripts([speaker_context, *recovered])
-            child_transcript = _transcribe_segment_with_recovery(
+    try:
+        subsegments = _split_audio_to_subsegments(seg_path, chunk_seconds)
+    except Exception as split_error:
+        logger.warning(
+            "[%s] ⚠️ 第 %s/%s 段補救切段失敗：%s",
+            job_id,
+            seg_index + 1,
+            total_segs,
+            split_error,
+        )
+        if direct_recovery:
+            return _transcribe_segment_with_recovery(
                 client,
-                sub_path,
+                seg_path,
                 seg_index,
                 total_segs,
                 job_id,
                 model,
-                offset_seconds=offset_seconds + start_seconds,
-                duration_seconds=max(1, end_seconds - start_seconds),
-                is_last_segment=is_last_segment and sub_index == len(subsegments) - 1,
-                speaker_context=child_context,
+                offset_seconds=offset_seconds,
+                duration_seconds=duration_seconds,
+                is_last_segment=is_last_segment,
+                speaker_context=speaker_context,
                 temp_segment_paths=temp_segment_paths,
                 quality_events=quality_events,
+                direct_recovery=False,
             )
-            recovered.append(child_transcript)
+        raise quality_error
 
-        recovered_transcript = _sort_transcript_blocks_by_timestamp(
-            "\n\n".join(part.strip() for part in recovered if part.strip())
+    if len(subsegments) <= 1:
+        if direct_recovery:
+            return _transcribe_segment_with_recovery(
+                client,
+                seg_path,
+                seg_index,
+                total_segs,
+                job_id,
+                model,
+                offset_seconds=offset_seconds,
+                duration_seconds=duration_seconds,
+                is_last_segment=is_last_segment,
+                speaker_context=speaker_context,
+                temp_segment_paths=temp_segment_paths,
+                quality_events=quality_events,
+                direct_recovery=False,
+            )
+        raise quality_error
+
+    recovered: list[str] = []
+    for sub_index, (sub_path, start_seconds, end_seconds) in enumerate(subsegments):
+        _raise_if_cancelled(job_id)
+        if (
+            temp_segment_paths is not None
+            and sub_path != seg_path
+            and sub_path not in temp_segment_paths
+        ):
+            temp_segment_paths.append(sub_path)
+
+        update_job_status(
+            job_id,
+            "processing",
+            f"📝 正在補救轉錄第 {seg_index + 1}/{total_segs} 段的小段 {sub_index + 1}/{len(subsegments)}...",
+            progress_current=seg_index,
+            progress_total=total_segs,
         )
+        child_context = _speaker_context_from_transcripts([speaker_context, *recovered])
+        child_transcript = _transcribe_segment_with_recovery(
+            client,
+            sub_path,
+            seg_index,
+            total_segs,
+            job_id,
+            model,
+            offset_seconds=offset_seconds + start_seconds,
+            duration_seconds=max(1, end_seconds - start_seconds),
+            is_last_segment=is_last_segment and sub_index == len(subsegments) - 1,
+            speaker_context=child_context,
+            temp_segment_paths=temp_segment_paths,
+            quality_events=quality_events,
+        )
+        recovered.append(child_transcript)
+
+    recovered_transcript = _sort_transcript_blocks_by_timestamp(
+        "\n\n".join(part.strip() for part in recovered if part.strip())
+    )
+    try:
         _raise_if_segment_transcript_incomplete(
             transcript=recovered_transcript,
             segment_index=seg_index,
@@ -2086,7 +2290,17 @@ def _transcribe_segment_with_recovery(
             expected_end_seconds=offset_seconds + duration_seconds,
             is_last_segment=is_last_segment,
         )
-        return recovered_transcript
+    except RuntimeError as exc:
+        if quality_events is not None:
+            quality_events.append({
+                "segment_index": seg_index,
+                "start_seconds": offset_seconds,
+                "end_seconds": offset_seconds + duration_seconds,
+                "issue": str(exc),
+            })
+        if not direct_recovery:
+            raise
+    return recovered_transcript
 
 
 def _transcribe_segment(
@@ -3117,6 +3331,8 @@ def process_audio_task(
                 )
                 logger.info(f"[{job_id}] 🎙 轉錄分段 {i + 1}/{total_segs}：{seg_path.name}")
                 speaker_context = _speaker_context_from_transcripts(all_transcripts)
+                existing_forced_transcript = existing_segment_transcripts.get(i)
+                use_stable_rerun = i in forced_segments and existing_forced_transcript is not None
                 transcript = _transcribe_segment_with_recovery(
                     client,
                     seg_path,
@@ -3130,7 +3346,42 @@ def process_audio_task(
                     speaker_context=speaker_context,
                     temp_segment_paths=temporary_segment_paths,
                     quality_events=segment_quality_events,
+                    direct_recovery=use_stable_rerun,
                 )
+                kept_existing_after_rerun = False
+                kept_existing_reason = ""
+                kept_existing_issues: list[str] = []
+                rerun_candidate_issues: list[str] = []
+                if use_stable_rerun:
+                    (
+                        kept_existing_after_rerun,
+                        kept_existing_issues,
+                        rerun_candidate_issues,
+                        kept_existing_reason,
+                    ) = _prefer_existing_segment_transcript_after_rerun(
+                        existing_transcript=existing_forced_transcript,
+                        rerun_transcript=transcript,
+                        segment_index=i,
+                        total_segments=total_segs,
+                        expected_start_seconds=audio_slice.start_seconds,
+                        expected_end_seconds=audio_slice.end_seconds,
+                    )
+                    if kept_existing_after_rerun:
+                        transcript = existing_forced_transcript
+                        logger.warning(
+                            "[%s] ⚠️ 第 %s/%s 段指定重跑未改善，保留較完整的原逐字稿：%s",
+                            job_id,
+                            i + 1,
+                            total_segs,
+                            kept_existing_reason,
+                        )
+                        update_job_status(
+                            job_id,
+                            "processing",
+                            f"⚠️ 第 {i + 1}/{total_segs} 段重跑未改善，已保留較完整舊稿...",
+                            progress_current=i + 1,
+                            progress_total=total_segs,
+                        )
                 _save_segment_transcript_cache(
                     output_dir=output_dir,
                     job_id=job_id,
@@ -3140,11 +3391,23 @@ def process_audio_task(
                 )
                 all_transcripts.append(f"\n\n### 【第 {i + 1} 段｜{segment_start} – {segment_end}】\n\n{transcript}")
                 segment_issues = _quality_event_issues_for_segment(segment_quality_events, i)
+                if kept_existing_after_rerun:
+                    segment_issues = list(dict.fromkeys([
+                        f"指定重跑未改善，已沿用較完整舊逐字稿：{kept_existing_reason}",
+                        *kept_existing_issues,
+                        *[f"重跑候選仍需複核：{issue}" for issue in rerun_candidate_issues],
+                    ]))
                 segment_report.append({
                     "index": i,
                     "start_seconds": audio_slice.start_seconds,
                     "end_seconds": audio_slice.end_seconds,
-                    "status": "recovered" if segment_issues else ("rerun" if i in forced_segments else "transcribed"),
+                    "status": (
+                        "kept_existing_after_rerun"
+                        if kept_existing_after_rerun
+                        else "recovered"
+                        if segment_issues
+                        else ("rerun" if i in forced_segments else "transcribed")
+                    ),
                     "issues": segment_issues,
                 })
                 update_job_status(

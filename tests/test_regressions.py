@@ -2325,6 +2325,47 @@ class TaskRegressionTests(unittest.TestCase):
             self.assertIn("逐字稿品質警示", warnings)
             self.assertIn("第 1 段｜00:00-10:00", warnings)
 
+    def test_direct_recovery_splits_for_known_problem_segment_without_full_attempt(self):
+        import backend.tasks as tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            seg = root / "_seg_meeting_000.mp3"
+            sub1 = root / "_sub__seg_meeting_000_300s_000.mp3"
+            sub2 = root / "_sub__seg_meeting_000_300s_001.mp3"
+            for path in (seg, sub1, sub2):
+                path.write_bytes(path.name.encode("utf-8"))
+
+            with mock.patch.object(tasks, "_split_audio_to_subsegments", return_value=[(sub1, 0, 300), (sub2, 300, 600)]), \
+                 mock.patch.object(
+                     tasks,
+                     "_transcribe_segment",
+                     side_effect=[
+                         "[00:00] **[發言者 A]**：小段前半。\n[04:30] **[發言者 A]**：小段前半結束。",
+                         "[00:00] **[發言者 B]**：小段後半。\n[04:30] **[發言者 B]**：小段後半結束。",
+                     ],
+                 ) as transcribe_mock, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"):
+                transcript = tasks._transcribe_segment_with_recovery(
+                    object(),
+                    seg,
+                    0,
+                    2,
+                    "direct-recovery-job",
+                    "gemini-test",
+                    offset_seconds=0,
+                    duration_seconds=600,
+                    is_last_segment=False,
+                    temp_segment_paths=[],
+                    quality_events=[],
+                    direct_recovery=True,
+                )
+
+        self.assertEqual([call.args[1] for call in transcribe_mock.call_args_list], [sub1, sub2])
+        self.assertIn("[00:00] **[發言者 A]**：小段前半。", transcript)
+        self.assertIn("[05:00] **[發言者 B]**：小段後半。", transcript)
+
     def test_quality_report_label_does_not_say_good_when_review_is_needed(self):
         import backend.tasks as tasks
 
@@ -8835,6 +8876,77 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             self.assertIn("保留第三段", output_text)
             self.assertNotIn("舊第二段", output_text)
 
+    def test_partial_rerun_keeps_existing_segment_when_rerun_is_less_complete(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{"topic": "局部重跑擇優", "summary": "完成", "evidence_timecodes": ["10:00"]}],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **kwargs):
+                return type("Response", (), {"text": json.dumps(summary_payload, ensure_ascii=False)})()
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            slices = []
+            for index in range(3):
+                segment_path = root / f"_seg_meeting_{index:03d}.mp3"
+                segment_path.write_bytes(b"segment")
+                slices.append(tasks.AudioSlice(segment_path, index * 600, (index + 1) * 600))
+            source_path = root / "existing.md"
+            source_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n[00:00] **[發言者 A]**：保留第一段。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n"
+                "[10:00] **[發言者 B]**：舊第二段開頭。\n"
+                "[18:30] **[發言者 B]**：舊第二段接近段尾。\n"
+                "[18:50] **[發言者 B]**：舊第二段完整收尾。\n"
+                "### 【第 3 段｜20:00 – 30:00】\n[20:00] **[發言者 C]**：保留第三段。",
+                encoding="utf-8",
+            )
+            output_dir = root / "output"
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=slices), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
+                 mock.patch.object(
+                     tasks,
+                     "_transcribe_segment_with_recovery",
+                     return_value="[10:00] **[發言者 B]**：新第二段只有開頭。",
+                 ) as transcribe, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting") as save_meeting_mock:
+                output_path = tasks.process_audio_task(
+                    job_id="partial-rerun-best-existing-job",
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    force_segment_indices=[1],
+                    transcript_reuse_source_path=source_path,
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertTrue(transcribe.call_args.kwargs["direct_recovery"])
+            output_text = output_path.read_text(encoding="utf-8")
+            self.assertIn("舊第二段完整收尾", output_text)
+            self.assertNotIn("新第二段只有開頭", output_text)
+            quality_report = save_meeting_mock.call_args.kwargs["quality_report"]
+            second_segment = quality_report["segments"][1]
+            self.assertEqual(second_segment["status"], "kept_existing_after_rerun")
+            self.assertTrue(any("指定重跑未改善" in issue for issue in second_segment["issues"]))
+            self.assertTrue(any("重跑候選仍需複核" in issue for issue in second_segment["issues"]))
+
     def test_partial_rerun_reuses_timestamp_only_legacy_segments(self):
         from backend import tasks
 
@@ -9564,6 +9676,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const issueBadges = issues", html)
         self.assertIn("segment.status === 'recovered'", html)
         self.assertIn("已補救轉錄", html)
+        self.assertIn("segment.status === 'kept_existing_after_rerun'", html)
+        self.assertIn("沿用較佳舊稿", html)
         self.assertIn("report.warnings", html)
         self.assertIn("function renderQualityActions", html)
         self.assertIn("function normalizeSegmentIndices", html)
