@@ -204,6 +204,7 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `AUDIO_NORMALIZE_BELOW_DBFS` | `-28` | 平均音量低於此值才進行本機音量正規化。 |
 | `SEGMENT_SILENCE_WINDOW_SECONDS` | `45` | 在目標切點前後搜尋靜音位置的秒數。 |
 | `SEGMENT_OVERLAP_SECONDS` | `2` | 相鄰分段保留的短暫重疊秒數；切點優先位於靜音處。 |
+| `SEGMENT_OVERLAP_DEDUPLICATION_WINDOW_SECONDS` | `15` | 輸出組裝時，在切點前後檢查精確重複發言的秒數；只移除下一段開頭、完全相同且有時間戳的重疊內容。 |
 | `TRANSCRIPT_SPEECH_GAP_VALIDATION` | `1` | 啟用本機語音活動比對；只有長時間未標時間戳的區間仍有說話聲時，才觸發小段補救。 |
 | `TRANSCRIPT_SPEECH_GAP_SECONDS` | `75` | 兩個時間戳相隔超過此秒數時，才進行本機語音活動確認。 |
 | `TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_SECONDS` | `12` | 缺口內至少需有多少秒非靜音音訊，才視為可能漏字。 |

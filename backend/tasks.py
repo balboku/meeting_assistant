@@ -80,6 +80,11 @@ SEGMENT_CACHE_DIRNAME   = "segment_cache"
 SEGMENT_TARGET_SECONDS  = SEGMENT_MINUTES * 60
 SEGMENT_SILENCE_WINDOW_SECONDS = int(os.getenv("SEGMENT_SILENCE_WINDOW_SECONDS", "45"))
 SEGMENT_OVERLAP_SECONDS = int(os.getenv("SEGMENT_OVERLAP_SECONDS", "2"))
+SEGMENT_OVERLAP_DEDUPLICATION_WINDOW_SECONDS = max(
+    5,
+    int(os.getenv("SEGMENT_OVERLAP_DEDUPLICATION_WINDOW_SECONDS", "15")),
+)
+SEGMENT_OVERLAP_DEDUPLICATION_MIN_CHARS = 12
 AUDIO_PREPROCESSING_ENABLED = os.getenv("AUDIO_PREPROCESSING", "1").strip().lower() not in {
     "0", "false", "no", "off",
 }
@@ -939,21 +944,27 @@ def _segment_repetition_quality_issue(transcript: str) -> Optional[str]:
     return None
 
 
-def _timestamped_transcript_turns(transcript: str) -> list[dict[str, Any]]:
-    """Return complete, timecoded transcript turns without discarding duplicates."""
-    turns: list[dict[str, Any]] = []
+def _timestamped_transcript_blocks_in_order(
+    transcript: str,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Parse untimed prefix and ordered timestamp blocks without losing duplicates."""
+    prefix: list[str] = []
+    blocks: list[dict[str, Any]] = []
     current_timestamp: Optional[int] = None
     current_lines: list[str] = []
 
     def flush() -> None:
         nonlocal current_timestamp, current_lines
         body = "\n".join(current_lines).strip()
-        if current_timestamp is not None and body:
-            turns.append({
-                "timestamp_seconds": current_timestamp,
-                "body": body,
-                "normalized": _normalized_transcript_line_content(body),
-            })
+        if body:
+            if current_timestamp is None:
+                prefix.append(body)
+            else:
+                blocks.append({
+                    "timestamp_seconds": current_timestamp,
+                    "body": body,
+                    "normalized": _normalized_transcript_line_content(body),
+                })
         current_timestamp = None
         current_lines = []
 
@@ -965,10 +976,77 @@ def _timestamped_transcript_turns(transcript: str) -> list[dict[str, Any]]:
                 int(match.group("minutes")) * 60
                 + int(match.group("seconds"))
             )
-        if current_timestamp is not None:
-            current_lines.append(raw_line.rstrip())
+        current_lines.append(raw_line.rstrip())
     flush()
-    return turns
+    return prefix, blocks
+
+
+def _timestamped_transcript_turns(transcript: str) -> list[dict[str, Any]]:
+    """Return complete, timecoded transcript turns without discarding duplicates."""
+    _prefix, blocks = _timestamped_transcript_blocks_in_order(transcript)
+    return blocks
+
+
+def _deduplicate_adjacent_segment_overlap(
+    previous_transcript: Optional[str],
+    current_transcript: str,
+    *,
+    boundary_seconds: int,
+) -> tuple[str, Optional[str]]:
+    """Remove only exact duplicate leading blocks caused by audio-segment overlap.
+
+    Timestamps are model estimates, so the comparison permits a small window on
+    both sides of the physical cut. It never removes a merely similar or longer
+    continuation, and it leaves cache/source transcripts untouched.
+    """
+    if not previous_transcript or not current_transcript:
+        return current_transcript, None
+
+    _previous_prefix, previous_blocks = _timestamped_transcript_blocks_in_order(
+        previous_transcript
+    )
+    current_prefix, current_blocks = _timestamped_transcript_blocks_in_order(
+        current_transcript
+    )
+    if not previous_blocks or not current_blocks:
+        return current_transcript, None
+
+    window = SEGMENT_OVERLAP_DEDUPLICATION_WINDOW_SECONDS
+    previous_tail = [
+        block
+        for block in previous_blocks
+        if abs(int(block["timestamp_seconds"]) - boundary_seconds) <= window
+        and len(str(block["normalized"])) >= SEGMENT_OVERLAP_DEDUPLICATION_MIN_CHARS
+    ]
+    if not previous_tail:
+        return current_transcript, None
+
+    duplicate_count = 0
+    for block in current_blocks:
+        timestamp_seconds = int(block["timestamp_seconds"])
+        normalized = str(block["normalized"])
+        if (
+            abs(timestamp_seconds - boundary_seconds) > window
+            or len(normalized) < SEGMENT_OVERLAP_DEDUPLICATION_MIN_CHARS
+            or not any(normalized == str(previous["normalized"]) for previous in previous_tail)
+        ):
+            break
+        duplicate_count += 1
+
+    if not duplicate_count or duplicate_count >= len(current_blocks):
+        return current_transcript, None
+
+    deduplicated = "\n\n".join([
+        *current_prefix,
+        *(str(block["body"]).strip() for block in current_blocks[duplicate_count:]),
+    ]).strip()
+    if not deduplicated:
+        return current_transcript, None
+    note = (
+        f"已移除與前段重疊的 {duplicate_count} 個重複發言區塊"
+        f"（邊界 {_format_mmss(boundary_seconds)}）"
+    )
+    return deduplicated, note
 
 
 def _timestamped_turn_repair_range(
@@ -4154,6 +4232,7 @@ def process_audio_task(
             )
 
         elif is_segmented:
+            previous_output_transcript: Optional[str] = None
             for i, audio_slice in enumerate(audio_slices):
                 _raise_if_cancelled(job_id)
                 seg_path = audio_slice.path
@@ -4236,7 +4315,15 @@ def process_audio_task(
                                 context=segment_cache_context or {},
                                 transcript=transcript,
                             )
-                    all_transcripts.append(f"\n\n### 【第 {i + 1} 段｜{segment_start} – {segment_end}】\n\n{transcript}")
+                    output_transcript, overlap_note = _deduplicate_adjacent_segment_overlap(
+                        previous_output_transcript,
+                        transcript,
+                        boundary_seconds=audio_slice.start_seconds,
+                    )
+                    all_transcripts.append(
+                        f"\n\n### 【第 {i + 1} 段｜{segment_start} – {segment_end}】\n\n{output_transcript}"
+                    )
+                    previous_output_transcript = output_transcript
                     update_job_status(
                         job_id, "processing",
                         f"♻️ 已沿用第 {i + 1}/{total_segs} 段既有逐字稿",
@@ -4249,6 +4336,7 @@ def process_audio_task(
                         "end_seconds": audio_slice.end_seconds,
                         "status": "reused",
                         "issues": [],
+                        "recovery_notes": [overlap_note] if overlap_note else [],
                     })
                     continue
 
@@ -4386,7 +4474,19 @@ def process_audio_task(
                         i + 1,
                         "；".join(segment_issues),
                     )
-                all_transcripts.append(f"\n\n### 【第 {i + 1} 段｜{segment_start} – {segment_end}】\n\n{transcript}")
+                output_transcript, overlap_note = _deduplicate_adjacent_segment_overlap(
+                    previous_output_transcript,
+                    transcript,
+                    boundary_seconds=audio_slice.start_seconds,
+                )
+                previous_output_transcript = output_transcript
+                output_recovery_notes = list(dict.fromkeys([
+                    *recovery_notes,
+                    *([overlap_note] if overlap_note else []),
+                ]))
+                all_transcripts.append(
+                    f"\n\n### 【第 {i + 1} 段｜{segment_start} – {segment_end}】\n\n{output_transcript}"
+                )
                 segment_report.append({
                     "index": i,
                     "start_seconds": audio_slice.start_seconds,
@@ -4399,7 +4499,7 @@ def process_audio_task(
                         else ("rerun" if i in forced_segments else "transcribed")
                     ),
                     "issues": segment_issues,
-                    "recovery_notes": recovery_notes,
+                    "recovery_notes": output_recovery_notes,
                 })
                 update_job_status(
                     job_id, "processing",

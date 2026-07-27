@@ -9412,6 +9412,43 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             [],
         )
 
+    def test_overlap_deduplication_removes_only_duplicate_leading_blocks(self):
+        from backend import tasks
+
+        previous = (
+            "[09:50] **[發言者 A]**：前段仍需保留的內容。\n\n"
+            "[09:59] **[發言者 B]**：這一句因為音訊重疊會出現在下一段。"
+        )
+        current = (
+            "[10:00] **[發言者 A]**：這一句因為音訊重疊會出現在下一段。\n\n"
+            "[10:06] **[發言者 C]**：這是下一段的新內容。"
+        )
+
+        deduplicated, note = tasks._deduplicate_adjacent_segment_overlap(
+            previous,
+            current,
+            boundary_seconds=600,
+        )
+
+        self.assertNotIn("音訊重疊會出現在下一段", deduplicated)
+        self.assertIn("這是下一段的新內容", deduplicated)
+        self.assertEqual(note, "已移除與前段重疊的 1 個重複發言區塊（邊界 10:00）")
+
+    def test_overlap_deduplication_keeps_nonidentical_continuation(self):
+        from backend import tasks
+
+        previous = "[09:59] **[發言者 A]**：這一句話會在切點之前開始。"
+        current = "[10:00] **[發言者 A]**：這一句話會在切點之前開始，並在下一段繼續。"
+
+        deduplicated, note = tasks._deduplicate_adjacent_segment_overlap(
+            previous,
+            current,
+            boundary_seconds=600,
+        )
+
+        self.assertEqual(deduplicated, current)
+        self.assertIsNone(note)
+
     def test_partial_rerun_keeps_existing_segment_when_rerun_is_less_complete(self):
         from backend import tasks
 
