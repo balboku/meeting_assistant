@@ -2316,9 +2316,7 @@ class TaskRegressionTests(unittest.TestCase):
             self.assertEqual([call.args[1] for call in transcribe_mock.call_args_list], [seg1, sub1, sub2, seg2])
 
             content = output_path.read_text(encoding="utf-8")
-            self.assertIn("逐字稿品質複核提示", content)
-            self.assertIn("第 1 段 00:00-10:00", content)
-            self.assertIn("曾觸發轉錄補救", content)
+            self.assertNotIn("逐字稿品質複核提示", content)
             self.assertIn("[00:00] **[發言者 A]**：補救前半段。", content)
             self.assertIn("[05:00] **[發言者 B]**：補救後半段。", content)
             self.assertIn("[10:00] **[發言者 C]**：第二段。", content)
@@ -2330,14 +2328,15 @@ class TaskRegressionTests(unittest.TestCase):
             self.assertFalse(sub2.exists())
             quality_report = save_meeting_mock.call_args.kwargs["quality_report"]
             self.assertEqual(quality_report["segments"][0]["status"], "recovered")
-            self.assertTrue(any("曾觸發轉錄補救" in issue for issue in quality_report["segments"][0]["issues"]))
-            self.assertEqual(quality_report["review_segments"][0]["index"], 0)
-            self.assertEqual(quality_report["review_segments"][0]["start_seconds"], 0)
-            self.assertEqual(quality_report["review_segments"][0]["end_seconds"], 600)
+            self.assertEqual(quality_report["segments"][0]["issues"], [])
+            self.assertTrue(any(
+                "曾觸發轉錄補救" in note
+                for note in quality_report["segments"][0]["recovery_notes"]
+            ))
+            self.assertEqual(quality_report["review_segments"], [])
             self.assertEqual(quality_report["label"], "可用，建議抽查")
             warnings = "\n".join(quality_report["warnings"])
-            self.assertIn("逐字稿品質警示", warnings)
-            self.assertIn("第 1 段｜00:00-10:00", warnings)
+            self.assertNotIn("逐字稿品質警示", warnings)
 
     def test_direct_recovery_splits_for_known_problem_segment_without_full_attempt(self):
         import backend.tasks as tasks
@@ -7657,6 +7656,15 @@ console.log('summary_editor_quality_note_ok');
         self.assertIn("button.setAttribute('aria-busy', 'false');", html)
         self.assertIn("重跑", html)
 
+    def test_web_ui_shows_recovery_history_without_marking_segment_as_current_issue(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("const recoveryNotes = (segment.recovery_notes || [])", html)
+        self.assertIn("已自動補救 ${recoveryNotes.length} 次", html)
+        self.assertIn("segment-status${issues.length ? ' has-issue' : ''}", html)
+        self.assertIn(".segment-recovery-note", html)
+        self.assertIn("text-overflow: ellipsis;", html)
+
     def test_web_ui_has_wide_reading_mode_for_meeting_detail(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
@@ -8417,6 +8425,36 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
 
         self.assertEqual(issues, [])
 
+    def test_quality_report_keeps_recovery_history_out_of_review_targets(self):
+        from backend import tasks
+
+        report = tasks._build_quality_report(
+            audio_report={"warnings": []},
+            segment_report=[
+                {
+                    "index": 0,
+                    "start_seconds": 0,
+                    "end_seconds": 600,
+                    "status": "recovered",
+                    "issues": [],
+                    "recovery_notes": [
+                        "曾觸發轉錄補救：非最後分段時間戳只到 04:30，未接近段尾 10:00"
+                    ],
+                }
+            ],
+            full_transcript=(
+                "[00:00] **[發言者 A]**：補救後正常。\n"
+                "[09:30] **[發言者 A]**：第一段結束。"
+            ),
+        )
+
+        self.assertEqual(report["segments"][0]["status"], "recovered")
+        self.assertEqual(report["segments"][0]["issues"], [])
+        self.assertEqual(len(report["segments"][0]["recovery_notes"]), 1)
+        self.assertEqual(report["review_segments"], [])
+        self.assertEqual(report["warnings"], [])
+        self.assertEqual(report["label"], "良好")
+
     def test_audio_preflight_rejects_effectively_silent_recording(self):
         import backend.tasks as tasks
         from pydub import AudioSegment
@@ -9013,8 +9051,11 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             quality_report = save_meeting_mock.call_args.kwargs["quality_report"]
             second_segment = quality_report["segments"][1]
             self.assertEqual(second_segment["status"], "kept_existing_after_rerun")
-            self.assertTrue(any("指定重跑未改善" in issue for issue in second_segment["issues"]))
-            self.assertTrue(any("重跑候選仍需複核" in issue for issue in second_segment["issues"]))
+            self.assertEqual(second_segment["issues"], [])
+            self.assertTrue(any(
+                "指定重跑未改善" in note
+                for note in second_segment["recovery_notes"]
+            ))
 
     def test_partial_rerun_reuses_timestamp_only_legacy_segments(self):
         from backend import tasks

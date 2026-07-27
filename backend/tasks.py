@@ -707,10 +707,11 @@ def _quality_report_segment_warnings(review_segments: list[dict[str, Any]]) -> l
     ]
 
 
-def _quality_event_issues_for_segment(
+def _recovery_notes_for_segment(
     quality_events: list[dict[str, Any]],
     segment_index: int,
 ) -> list[str]:
+    """Keep failed-attempt evidence without turning a recovered segment into an issue."""
     issues: list[str] = []
     for event in quality_events:
         if not isinstance(event, dict):
@@ -1165,16 +1166,18 @@ def _speech_backed_timestamp_gap_quality_issues(
     return issues
 
 
-def _raise_if_segment_transcript_incomplete(
+def _segment_transcript_current_quality_issues(
     transcript: str,
     segment_index: int,
     total_segments: int,
+    *,
     segment_minutes: int = SEGMENT_MINUTES,
     expected_start_seconds: Optional[int] = None,
     expected_end_seconds: Optional[int] = None,
     is_last_segment: Optional[bool] = None,
     audio_path: Optional[Path] = None,
-) -> None:
+) -> list[str]:
+    """Return issues present in the final transcript, not its retry history."""
     issues = _segment_transcript_quality_issues(
         transcript=transcript,
         segment_index=segment_index,
@@ -1195,6 +1198,29 @@ def _raise_if_segment_transcript_incomplete(
             expected_start_seconds=expected_start_seconds,
             expected_end_seconds=expected_end_seconds,
         ))
+    return list(dict.fromkeys(issues))
+
+
+def _raise_if_segment_transcript_incomplete(
+    transcript: str,
+    segment_index: int,
+    total_segments: int,
+    segment_minutes: int = SEGMENT_MINUTES,
+    expected_start_seconds: Optional[int] = None,
+    expected_end_seconds: Optional[int] = None,
+    is_last_segment: Optional[bool] = None,
+    audio_path: Optional[Path] = None,
+) -> None:
+    issues = _segment_transcript_current_quality_issues(
+        transcript=transcript,
+        segment_index=segment_index,
+        total_segments=total_segments,
+        segment_minutes=segment_minutes,
+        expected_start_seconds=expected_start_seconds,
+        expected_end_seconds=expected_end_seconds,
+        is_last_segment=is_last_segment,
+        audio_path=audio_path,
+    )
     if issues:
         raise RuntimeError(
             f"第 {segment_index + 1}/{total_segments} 段轉錄不完整："
@@ -3486,17 +3512,51 @@ def process_audio_task(
                             else:
                                 transcript = record_transcript
                                 transcript_source = "record"
+                if transcript is not None and transcript_source == "record":
+                    # Older records may legitimately have sparse timestamps.
+                    # Their structural hallucination risks were already checked
+                    # above; only a newly detected audio-backed gap justifies
+                    # discarding otherwise reusable content.
+                    reused_current_issues = _speech_backed_timestamp_gap_quality_issues(
+                        seg_path,
+                        transcript,
+                        expected_start_seconds=audio_slice.start_seconds,
+                        expected_end_seconds=audio_slice.end_seconds,
+                    )
+                    if reused_current_issues:
+                        logger.warning(
+                            "[%s] ⚠️ 第 %s 段既有逐字稿仍有品質問題，改為重新轉錄：%s",
+                            job_id,
+                            i + 1,
+                            "；".join(reused_current_issues),
+                        )
+                        transcript = None
+                        transcript_source = ""
+
                 if transcript is not None:
                     source_label = "原會議逐字稿" if transcript_source == "record" else "轉錄快取"
                     logger.info(f"[{job_id}] ♻️  使用第 {i + 1}/{total_segs} 段{source_label}")
                     if transcript_source == "record":
-                        _save_segment_transcript_cache(
-                            output_dir=output_dir,
-                            job_id=job_id,
+                        cache_issues = _segment_cache_quality_issues(
+                            transcript,
                             segment_index=i,
                             context=segment_cache_context or {},
-                            transcript=transcript,
                         )
+                        if cache_issues:
+                            logger.info(
+                                "[%s] ℹ️ 第 %s 段既有逐字稿可沿用，但時間戳格式不足以寫入新版快取：%s",
+                                job_id,
+                                i + 1,
+                                "；".join(cache_issues),
+                            )
+                        else:
+                            _save_segment_transcript_cache(
+                                output_dir=output_dir,
+                                job_id=job_id,
+                                segment_index=i,
+                                context=segment_cache_context or {},
+                                transcript=transcript,
+                            )
                     all_transcripts.append(f"\n\n### 【第 {i + 1} 段｜{segment_start} – {segment_end}】\n\n{transcript}")
                     update_job_status(
                         job_id, "processing",
@@ -3572,21 +3632,38 @@ def process_audio_task(
                             progress_current=i + 1,
                             progress_total=total_segs,
                         )
-                _save_segment_transcript_cache(
-                    output_dir=output_dir,
-                    job_id=job_id,
-                    segment_index=i,
-                    context=segment_cache_context or {},
-                    transcript=transcript,
+                recovery_notes = _recovery_notes_for_segment(segment_quality_events, i)
+                segment_issues = _segment_transcript_current_quality_issues(
+                    transcript,
+                    i,
+                    total_segs,
+                    segment_minutes=SEGMENT_MINUTES,
+                    expected_start_seconds=audio_slice.start_seconds,
+                    expected_end_seconds=audio_slice.end_seconds,
+                    is_last_segment=i >= total_segs - 1,
+                    audio_path=seg_path,
                 )
-                all_transcripts.append(f"\n\n### 【第 {i + 1} 段｜{segment_start} – {segment_end}】\n\n{transcript}")
-                segment_issues = _quality_event_issues_for_segment(segment_quality_events, i)
                 if kept_existing_after_rerun:
-                    segment_issues = list(dict.fromkeys([
+                    recovery_notes = list(dict.fromkeys([
                         f"指定重跑未改善，已沿用較完整舊逐字稿：{kept_existing_reason}",
-                        *kept_existing_issues,
-                        *[f"重跑候選仍需複核：{issue}" for issue in rerun_candidate_issues],
+                        *recovery_notes,
                     ]))
+                if not segment_issues:
+                    _save_segment_transcript_cache(
+                        output_dir=output_dir,
+                        job_id=job_id,
+                        segment_index=i,
+                        context=segment_cache_context or {},
+                        transcript=transcript,
+                    )
+                else:
+                    logger.warning(
+                        "[%s] ⚠️ 第 %s 段最終逐字稿仍需複核，未寫入快取：%s",
+                        job_id,
+                        i + 1,
+                        "；".join(segment_issues),
+                    )
+                all_transcripts.append(f"\n\n### 【第 {i + 1} 段｜{segment_start} – {segment_end}】\n\n{transcript}")
                 segment_report.append({
                     "index": i,
                     "start_seconds": audio_slice.start_seconds,
@@ -3595,10 +3672,11 @@ def process_audio_task(
                         "kept_existing_after_rerun"
                         if kept_existing_after_rerun
                         else "recovered"
-                        if segment_issues
+                        if recovery_notes
                         else ("rerun" if i in forced_segments else "transcribed")
                     ),
                     "issues": segment_issues,
+                    "recovery_notes": recovery_notes,
                 })
                 update_job_status(
                     job_id, "processing",
