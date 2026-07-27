@@ -8554,6 +8554,48 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(transcribe_mock.call_args.kwargs["offset_seconds"], 654)
         self.assertEqual(transcribe_mock.call_args.kwargs["duration_seconds"], 132)
 
+    def test_targeted_long_gap_repair_uses_direct_recovery_split(self):
+        from backend import tasks
+
+        existing = "[59:54] **[發言者 A]**：長缺口前的內容。"
+        repaired = (
+            "[59:54] **[發言者 A]**：接續討論。\n\n"
+            "[60:30] **[發言者 B]**：補回長缺口中的內容。\n\n"
+            "[64:00] **[發言者 A]**：這段討論結束。"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gap_path = Path(tmpdir) / "long-gap.mp3"
+            gap_path.write_bytes(b"gap")
+            with mock.patch.object(tasks, "_export_audio_gap_segment", return_value=gap_path), \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", return_value=repaired) as transcribe_mock, \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "update_job_status"):
+                result, notes = tasks._repair_existing_segment_timestamp_gaps(
+                    None,
+                    Path(tmpdir) / "segment.mp3",
+                    existing,
+                    gap_ranges=[{
+                        "start_seconds": 3594,
+                        "end_seconds": 3841,
+                        "issue": "音訊含持續語音但時間戳在 59:54 至 64:01 間隔 247 秒",
+                    }],
+                    segment_index=6,
+                    total_segments=7,
+                    job_id="long-gap-repair-job",
+                    model="gemini-test",
+                    segment_start_seconds=3589,
+                    segment_end_seconds=3841,
+                    is_last_segment=True,
+                    speaker_context="",
+                    temp_segment_paths=[],
+                    quality_events=[],
+                )
+
+        self.assertIn("補回長缺口中的內容", result)
+        self.assertEqual(notes, ["已局部補救時間缺口：59:54-64:01"])
+        self.assertEqual(transcribe_mock.call_args.kwargs["duration_seconds"], 252)
+        self.assertTrue(transcribe_mock.call_args.kwargs["direct_recovery"])
+
     def test_quality_recheck_keeps_retry_history_but_only_reviews_current_issues(self):
         from backend import tasks
 

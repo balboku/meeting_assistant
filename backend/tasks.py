@@ -141,6 +141,10 @@ TRANSCRIPT_REPAIR_CONTEXT_SECONDS = max(
     0,
     int(os.getenv("TRANSCRIPT_REPAIR_CONTEXT_SECONDS", "6")),
 )
+TRANSCRIPT_REPAIR_DIRECT_SPLIT_SECONDS = max(
+    60,
+    int(os.getenv("TRANSCRIPT_REPAIR_DIRECT_SPLIT_SECONDS", "180")),
+)
 TRANSCRIPT_REPAIR_MERGE_GUARD_SECONDS = 2
 TRANSCRIPT_INTEGRITY_MIN_CHAR_RATIO = 0.95
 TRANSCRIPT_INTEGRITY_MIN_TIMESTAMP_RATIO = 0.95
@@ -3129,6 +3133,18 @@ def _repair_existing_segment_timestamp_gaps(
                 existing_transcript,
                 *(str(item.get("transcript") or "") for item in repairs),
             ])
+            repair_duration_seconds = context_end_seconds - context_start_seconds
+            direct_recovery = (
+                repair_duration_seconds >= TRANSCRIPT_REPAIR_DIRECT_SPLIT_SECONDS
+            )
+            if direct_recovery:
+                logger.info(
+                    "[%s] 🩹 第 %s/%s 段局部補救區間約 %s 秒，直接切小段穩定轉錄",
+                    job_id,
+                    segment_index + 1,
+                    total_segments,
+                    repair_duration_seconds,
+                )
             repaired_transcript = _transcribe_segment_with_recovery(
                 client,
                 gap_path,
@@ -3142,7 +3158,7 @@ def _repair_existing_segment_timestamp_gaps(
                 speaker_context=gap_context,
                 temp_segment_paths=temp_segment_paths,
                 quality_events=quality_events,
-                direct_recovery=False,
+                direct_recovery=direct_recovery,
             )
             repairs.append({
                 "start_seconds": gap_start_seconds,
