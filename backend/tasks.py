@@ -1871,6 +1871,9 @@ def _shared_segment_cache_file(
         "bounds": context.get("segment_bounds") or [],
         "preprocessing": context.get("audio_preprocessing_version"),
     }
+    custom_vocabulary = normalize_custom_vocabulary(context.get("custom_vocabulary"))
+    if custom_vocabulary:
+        profile_data["custom_vocabulary"] = custom_vocabulary
     profile_hash = hashlib.sha256(
         json.dumps(profile_data, sort_keys=True, ensure_ascii=True).encode("utf-8")
     ).hexdigest()[:16]
@@ -1884,6 +1887,7 @@ def _segment_cache_context(
     total_segments: int,
     segment_minutes: int,
     segment_bounds: Optional[list[list[int]]] = None,
+    custom_vocabulary: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     stat = audio_path.stat()
     try:
@@ -1903,6 +1907,7 @@ def _segment_cache_context(
         "segment_minutes": segment_minutes,
         "segment_bounds": segment_bounds or [],
         "audio_preprocessing_version": AUDIO_PREPROCESSING_VERSION,
+        "custom_vocabulary": normalize_custom_vocabulary(custom_vocabulary),
     }
 
 
@@ -1913,7 +1918,15 @@ def _segment_cache_matches(
 ) -> bool:
     expected = dict(context)
     expected["segment_index"] = segment_index
-    return all(payload.get(key) == value for key, value in expected.items())
+    for key, value in expected.items():
+        actual = payload.get(key)
+        # Caches created before custom vocabulary support do not carry this
+        # field. They remain valid only when the current job has no terms.
+        if key == "custom_vocabulary":
+            actual = normalize_custom_vocabulary(actual)
+        if actual != value:
+            return False
+    return True
 
 
 def _segment_cache_quality_issues(
@@ -4621,6 +4634,7 @@ def process_audio_task(
             total_segs,
             SEGMENT_MINUTES,
             segment_bounds=segment_bounds,
+            custom_vocabulary=custom_vocabulary,
         )
 
         # ------------------------------------------------------------------

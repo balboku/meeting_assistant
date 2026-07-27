@@ -2063,6 +2063,57 @@ class TaskRegressionTests(unittest.TestCase):
             mismatched["model"] = "another-model"
             self.assertIsNone(_load_segment_transcript_cache(output_dir, "resume-job", 0, mismatched))
 
+    def test_segment_cache_isolated_by_custom_vocabulary_but_accepts_legacy_empty_cache(self):
+        from backend.tasks import (
+            _load_segment_transcript_cache,
+            _save_segment_transcript_cache,
+            _segment_cache_context,
+            _segment_cache_file,
+        )
+
+        transcript = (
+            "[00:00] **[發言者 A]**：佳世達的方案已更新。\n"
+            "[09:30] **[發言者 A]**：第一段結束。"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "output"
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            vocabulary_context = _segment_cache_context(
+                audio_path, "gemini-test", 2, 10,
+                custom_vocabulary=["佳世達"],
+            )
+            _save_segment_transcript_cache(
+                output_dir, "vocabulary-job", 0, vocabulary_context, transcript
+            )
+
+            changed_vocabulary_context = _segment_cache_context(
+                audio_path, "gemini-test", 2, 10,
+                custom_vocabulary=["Qisda"],
+            )
+            self.assertIsNone(
+                _load_segment_transcript_cache(
+                    output_dir, "another-job", 0, changed_vocabulary_context
+                )
+            )
+
+            empty_context = _segment_cache_context(audio_path, "gemini-test", 2, 10)
+            legacy_cache = _segment_cache_file(output_dir, "legacy-job", 0)
+            legacy_cache.parent.mkdir(parents=True, exist_ok=True)
+            legacy_cache.write_text(
+                json.dumps({
+                    **{key: value for key, value in empty_context.items() if key != "custom_vocabulary"},
+                    "segment_index": 0,
+                    "transcript": transcript,
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            self.assertIn(
+                "佳世達",
+                _load_segment_transcript_cache(output_dir, "legacy-job", 0, empty_context),
+            )
+
     def test_segment_transcript_cache_rejects_incomplete_cached_segment(self):
         from backend.tasks import (
             _load_segment_transcript_cache,
