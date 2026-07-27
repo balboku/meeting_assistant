@@ -9312,6 +9312,88 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                 quality_report["segments"][1]["recovery_notes"],
             )
 
+    def test_cached_segment_with_speech_gap_uses_targeted_repair_before_reuse(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{"topic": "快取缺口補救", "summary": "完成", "evidence_timecodes": ["10:00"]}],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                return type("Response", (), {"text": json.dumps(summary_payload, ensure_ascii=False)})()
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            slices = []
+            for index in range(3):
+                segment_path = root / f"_seg_meeting_{index:03d}.mp3"
+                segment_path.write_bytes(b"segment")
+                slices.append(tasks.AudioSlice(segment_path, index * 600, (index + 1) * 600))
+            cached = {
+                0: "[00:00] **[發言者 A]**：保留快取第一段。",
+                1: "[10:00] **[發言者 B]**：快取第二段缺少中段內容。\n[19:40] **[發言者 B]**：保留第二段收尾。",
+                2: "[20:00] **[發言者 C]**：保留快取第三段。",
+            }
+            repaired_second = (
+                "[10:00] **[發言者 B]**：快取第二段開頭。\n"
+                "[11:00] **[發言者 B]**：補回快取遺漏的內容。\n"
+                "[19:40] **[發言者 B]**：保留第二段收尾。"
+            )
+
+            def cached_gap_ranges(segment_path, *_args, **_kwargs):
+                if segment_path.name.endswith("_001.mp3"):
+                    return [{
+                        "start_seconds": 660,
+                        "end_seconds": 780,
+                        "issue": "音訊含持續語音但時間戳在 11:00 至 13:00 間隔 120 秒",
+                    }]
+                return []
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=slices), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", side_effect=lambda **kwargs: cached[kwargs["segment_index"]]), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", side_effect=cached_gap_ranges), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(
+                     tasks,
+                     "_repair_existing_segment_timestamp_gaps",
+                     return_value=(repaired_second, ["已局部補救時間缺口：11:00-13:00"]),
+                 ) as repair_mock, \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery") as full_rerun_mock, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting") as save_meeting_mock:
+                output_path = tasks.process_audio_task(
+                    job_id="cached-gap-repair-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                )
+
+            self.assertIsNotNone(output_path)
+            repair_mock.assert_called_once()
+            self.assertIn("快取第二段缺少中段內容", repair_mock.call_args.args[2])
+            full_rerun_mock.assert_not_called()
+            output_text = output_path.read_text(encoding="utf-8")
+            self.assertIn("補回快取遺漏的內容", output_text)
+            quality_report = save_meeting_mock.call_args.kwargs["quality_report"]
+            self.assertEqual(quality_report["segments"][1]["status"], "recovered")
+            self.assertIn(
+                "已局部補救時間缺口：11:00-13:00",
+                quality_report["segments"][1]["recovery_notes"],
+            )
+
     def test_repetition_repair_ranges_pinpoint_contiguous_loop(self):
         from backend import tasks
 

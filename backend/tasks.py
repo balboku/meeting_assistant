@@ -4242,6 +4242,8 @@ def process_audio_task(
 
                 transcript = None
                 transcript_source = ""
+                cached_transcript_for_repair: Optional[str] = None
+                cached_gap_ranges: list[dict[str, Any]] = []
                 if i not in forced_segments:
                     transcript = _load_segment_transcript_cache(
                         output_dir=output_dir,
@@ -4250,7 +4252,31 @@ def process_audio_task(
                         context=segment_cache_context or {},
                     )
                     transcript_source = "cache" if transcript is not None else ""
-                    if transcript is None:
+                    if transcript is not None and transcript_source == "cache":
+                        # Cache validation used to stop at structural checks made
+                        # when it was written. Recheck it against this segment's
+                        # audio so an older cache cannot silently preserve an
+                        # omitted spoken tail or interior range.
+                        cached_gap_ranges = _speech_backed_timestamp_gap_quality_ranges(
+                            seg_path,
+                            transcript,
+                            expected_start_seconds=audio_slice.start_seconds,
+                            expected_end_seconds=audio_slice.end_seconds,
+                        )
+                        if cached_gap_ranges:
+                            cached_transcript_for_repair = transcript
+                            logger.warning(
+                                "[%s] ⚠️ 第 %s 段轉錄快取有音訊支持的時間缺口，改為局部補救：%s",
+                                job_id,
+                                i + 1,
+                                "；".join(
+                                    str(item.get("issue") or "")
+                                    for item in cached_gap_ranges
+                                ),
+                            )
+                            transcript = None
+                            transcript_source = ""
+                    if transcript is None and cached_transcript_for_repair is None:
                         record_transcript = existing_segment_transcripts.get(i)
                         if record_transcript is not None:
                             reuse_issues = _record_segment_reuse_blocking_issues(
@@ -4348,17 +4374,27 @@ def process_audio_task(
                 )
                 logger.info(f"[{job_id}] 🎙 轉錄分段 {i + 1}/{total_segs}：{seg_path.name}")
                 speaker_context = _speaker_context_from_transcripts(all_transcripts)
-                existing_forced_transcript = existing_segment_transcripts.get(i)
-                use_stable_rerun = i in forced_segments and existing_forced_transcript is not None
+                existing_forced_transcript = (
+                    cached_transcript_for_repair
+                    or existing_segment_transcripts.get(i)
+                )
+                use_stable_rerun = (
+                    existing_forced_transcript is not None
+                    and (i in forced_segments or cached_transcript_for_repair is not None)
+                )
                 targeted_gap_repair_notes: list[str] = []
                 transcript = None
                 if use_stable_rerun:
                     gap_ranges = [
-                        *_speech_backed_timestamp_gap_quality_ranges(
-                            seg_path,
-                            existing_forced_transcript,
-                            expected_start_seconds=audio_slice.start_seconds,
-                            expected_end_seconds=audio_slice.end_seconds,
+                        *(
+                            cached_gap_ranges
+                            if cached_transcript_for_repair is not None
+                            else _speech_backed_timestamp_gap_quality_ranges(
+                                seg_path,
+                                existing_forced_transcript,
+                                expected_start_seconds=audio_slice.start_seconds,
+                                expected_end_seconds=audio_slice.end_seconds,
+                            )
                         ),
                         *_transcript_repetition_repair_ranges(
                             existing_forced_transcript,
