@@ -78,6 +78,7 @@ from backend.models import (
     MeetingRecord,
     MeetingDetail,
     MeetingRerunRequest,
+    MeetingQualityRecheckResponse,
     MeetingSummaryUpdateRequest,
     MeetingTranscriptUpdateRequest,
     MeetingSummaryUpdateResponse,
@@ -132,6 +133,7 @@ from backend.tasks import (
     _replace_transcript_section,
     _transcript_integrity_issues,
     _transcript_segment_metadata,
+    recheck_transcript_quality_report,
 )
 from backend.logging_utils import configure_utf8_logging
 
@@ -3074,6 +3076,58 @@ async def get_meeting_detail(meeting_id: int):
         source_media_sha256=source_media_metadata["source_media_sha256"],
         source_media_restored_at=source_media_metadata["source_media_restored_at"],
         source_media_restored_name=source_media_metadata["source_media_restored_name"],
+    )
+
+
+@app.post(
+    "/meetings/{meeting_id}/quality/recheck",
+    response_model=MeetingQualityRecheckResponse,
+    summary="以既有逐字稿重新檢核轉錄品質",
+    tags=["會議記錄"],
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
+async def recheck_meeting_transcript_quality(meeting_id: int):
+    """Refresh saved transcript-quality findings without spending model tokens."""
+    record = get_meeting(meeting_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
+
+    transcript = _extract_transcript_section_body(record.get("full_content") or "") or ""
+    if not transcript.strip():
+        raise HTTPException(status_code=409, detail="此會議紀錄缺少完整逐字稿，無法重新檢核。")
+
+    source_path = _optional_source_media_path(record)
+    quality_report = recheck_transcript_quality_report(
+        transcript,
+        record.get("quality_report"),
+        source_audio_path=source_path,
+    )
+    recheck_metadata = quality_report.get("recheck")
+    if not isinstance(recheck_metadata, dict):
+        recheck_metadata = {}
+        quality_report["recheck"] = recheck_metadata
+    recheck_metadata["rechecked_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if not update_meeting_quality_report(meeting_id, quality_report):
+        raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
+
+    source_audio_checked = bool(recheck_metadata.get("source_audio_checked"))
+    logger.info(
+        "🔎 已重新檢核會議逐字稿品質：meeting_id=%s source_audio_checked=%s review_segments=%s",
+        meeting_id,
+        source_audio_checked,
+        len(quality_report.get("review_segments") or []),
+    )
+    return MeetingQualityRecheckResponse(
+        status="success",
+        meeting_id=meeting_id,
+        message=(
+            "已以既有逐字稿與原始媒體檔重新檢核；未使用 Gemini。"
+            if source_audio_checked
+            else "已以既有逐字稿重新檢核；原始媒體檔不存在，未進行音訊活動比對。"
+        ),
+        source_audio_checked=source_audio_checked,
+        quality_report=quality_report,
     )
 
 

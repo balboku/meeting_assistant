@@ -3884,13 +3884,52 @@ async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQu
   }
 }
 
+async function recheckMeetingTranscriptQuality(id, triggerButtonId = 'quality-recheck-button') {
+  if (!id) return;
+  if (!confirm('確定要重新檢核逐字稿品質嗎？\n這會檢查既有逐字稿與原始音檔的時間缺口，不會呼叫 AI，也不會建立新會議。')) {
+    return;
+  }
+
+  const button = document.getElementById(triggerButtonId);
+  const originalButtonText = button?.innerHTML;
+  setDetailStatus('正在重新檢核逐字稿品質（不使用 AI）...');
+  if (button) {
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.innerHTML = '<span class="loading-spinner"></span> 檢核中';
+  }
+
+  try {
+    const res = await fetch(`${API}/meetings/${id}/quality/recheck`, { method: 'POST' });
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    const data = await res.json();
+    await Promise.all([
+      openDetail(id),
+      loadMeetings(document.getElementById('search-input')?.value.trim() || ''),
+      loadMetrics(),
+    ]);
+    setDetailStatus(data.message || '逐字稿品質已重新檢核。');
+  } catch (err) {
+    setDetailStatus(`重新檢核失敗：${err.message}`);
+    alert(`重新檢核失敗：${err.message}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.setAttribute('aria-busy', 'false');
+      button.innerHTML = originalButtonText;
+    }
+  }
+}
+
 function renderQualityActions(meeting, warnings = []) {
   const meetingId = Number(meeting?.id) || 0;
-  if (!meetingId || !warnings.length) return '';
+  if (!meetingId) return '';
   const hasSummaryWarning = warnings.some(warning => String(warning).startsWith('摘要品質警示'));
   const hasTranscriptWarning = warnings.some(isTranscriptQualityWarning);
   const hasRecordingWarning = warnings.some(isRecordingQualityWarning);
-  const actions = [];
+  const actions = [
+    `<button id="quality-recheck-button" class="quality-action" aria-describedby="detail-status" aria-busy="false" title="用既有逐字稿與原始媒體檔重新檢核，不會呼叫 AI" onclick="recheckMeetingTranscriptQuality(${meetingId})">⌁ 重新檢核</button>`,
+  ];
   if (hasSummaryWarning) {
     actions.push(
       `<button id="quality-rerun-summary-button" class="quality-action" aria-describedby="detail-status" aria-busy="false" title="沿用逐字稿，只重新產生摘要、決議與待辦" onclick="rerunMeeting(${meetingId}, null, true, false, 'quality-rerun-summary-button')">↻ 重整摘要</button>`
@@ -4627,6 +4666,14 @@ function renderQualityReport(meeting) {
   const report = detailQualityReport(meeting);
   if (!report) return '';
   const warningItems = Array.isArray(report.warnings) ? report.warnings : [];
+  const recheck = report.recheck && typeof report.recheck === 'object' ? report.recheck : null;
+  const recheckTimestamp = String(recheck?.rechecked_at || '').trim();
+  const recheckText = recheckTimestamp
+    ? `已重檢 ${recheckTimestamp}`
+    : '';
+  const recheckTitle = recheck?.source_audio_checked
+    ? '已比對既有逐字稿與原始媒體檔，未呼叫 AI'
+    : '已比對既有逐字稿；原始媒體檔不可用，未進行音訊活動比對';
   const qualityActions = renderQualityActions(meeting, warningItems);
   const segmentItems = Array.isArray(report.segments) ? report.segments : [];
   const rerunnableSegmentIndices = normalizeSegmentIndices(meeting?.quality_review_rerunnable_segments || []);
@@ -4692,6 +4739,7 @@ function renderQualityReport(meeting) {
       <span>${escapeHtml(report.label || '')}</span>
       <span class="meta-chip">${escapeHtml((report.speaker_labels || []).length)} 個發言者標籤</span>
       <span class="meta-chip">${escapeHtml(report.timestamp_count || 0)} 個時間戳</span>
+      ${recheckText ? `<span class="meta-chip" title="${escapeHtml(recheckTitle)}">${escapeHtml(recheckText)}</span>` : ''}
     </div>
     ${reviewSegments}
     ${warnings}

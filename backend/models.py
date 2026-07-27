@@ -344,6 +344,15 @@ class MeetingRerunRequest(BaseModel):
     high_quality: bool = Field(False, description="摘要完成後，再用第二模型做一次證據查核")
 
 
+class MeetingQualityRecheckResponse(BaseModel):
+    """Local recheck result; it does not create a new meeting or call Gemini."""
+    status: str
+    meeting_id: int
+    message: str
+    source_audio_checked: bool
+    quality_report: dict[str, Any]
+
+
 class MeetingSummaryUpdateRequest(BaseModel):
     summary_markdown: str = Field(
         ...,

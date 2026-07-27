@@ -1086,6 +1086,8 @@ def _speech_backed_timestamp_gap_quality_issues(
     *,
     expected_start_seconds: int,
     expected_end_seconds: int,
+    audio_offset_seconds: Optional[int] = None,
+    audio_cache: Optional[dict[str, Any]] = None,
 ) -> list[str]:
     """Flag long transcript gaps only when the matching audio contains speech.
 
@@ -1103,22 +1105,30 @@ def _speech_backed_timestamp_gap_quality_issues(
             int(match.group("minutes")) * 60 + int(match.group("seconds"))
         ) <= expected_end_seconds
     })
-    if len(timestamps) < 2:
-        return []
-
+    # Check both the gaps between timecodes and the two segment edges.  The
+    # latter catches a model that stops early in the final segment, where a
+    # missing end timestamp used to be treated as a normal meeting ending.
+    boundaries = [expected_start_seconds, *timestamps, expected_end_seconds]
     candidate_gaps = [
         (previous, current)
-        for previous, current in zip(timestamps, timestamps[1:])
+        for previous, current in zip(boundaries, boundaries[1:])
         if current - previous > TRANSCRIPT_SPEECH_GAP_SECONDS
     ]
     if not candidate_gaps:
         return []
 
     try:
-        _configure_ffmpeg_tools()
-        from pydub import AudioSegment, silence
+        cache_key = str(audio_path)
+        audio = audio_cache.get(cache_key) if audio_cache is not None else None
+        if audio is None:
+            _configure_ffmpeg_tools()
+            from pydub import AudioSegment
 
-        audio = AudioSegment.from_file(str(audio_path))
+            audio = AudioSegment.from_file(str(audio_path))
+            if audio_cache is not None:
+                audio_cache[cache_key] = audio
+        from pydub import silence
+
         dbfs = float(audio.dBFS)
         if not math.isfinite(dbfs):
             return []
@@ -1132,11 +1142,16 @@ def _speech_backed_timestamp_gap_quality_issues(
         return []
 
     issues: list[str] = []
+    if audio_offset_seconds is None:
+        # During normal processing audio_path is a cut segment, whose first
+        # sample matches the absolute start of that segment.  Quality recheck
+        # uses the retained full recording and explicitly passes zero instead.
+        audio_offset_seconds = expected_start_seconds
     for previous, current in candidate_gaps:
         # A timestamp represents an approximate point in a spoken turn. Trim a
         # little at both boundaries so its own words do not count as a gap.
-        relative_start_ms = max(0, (previous - expected_start_seconds) * 1000 + 1500)
-        relative_end_ms = min(len(audio), (current - expected_start_seconds) * 1000 - 1500)
+        relative_start_ms = max(0, (previous - audio_offset_seconds) * 1000 + 1500)
+        relative_end_ms = min(len(audio), (current - audio_offset_seconds) * 1000 - 1500)
         if relative_end_ms <= relative_start_ms:
             continue
 
@@ -1176,6 +1191,8 @@ def _segment_transcript_current_quality_issues(
     expected_end_seconds: Optional[int] = None,
     is_last_segment: Optional[bool] = None,
     audio_path: Optional[Path] = None,
+    audio_offset_seconds: Optional[int] = None,
+    audio_cache: Optional[dict[str, Any]] = None,
 ) -> list[str]:
     """Return issues present in the final transcript, not its retry history."""
     issues = _segment_transcript_quality_issues(
@@ -1197,6 +1214,8 @@ def _segment_transcript_current_quality_issues(
             transcript,
             expected_start_seconds=expected_start_seconds,
             expected_end_seconds=expected_end_seconds,
+            audio_offset_seconds=audio_offset_seconds,
+            audio_cache=audio_cache,
         ))
     return list(dict.fromkeys(issues))
 
@@ -3328,6 +3347,157 @@ def _build_quality_report(
         "timestamp_count": _timestamp_count(full_transcript),
         "speaker_labels": speakers,
     }
+
+
+def _historical_segment_recovery_notes(segment: dict[str, Any]) -> list[str]:
+    """Keep only retry history that is safe to remove from current issues."""
+    notes = [
+        str(note).strip()
+        for note in segment.get("recovery_notes") or []
+        if str(note).strip()
+    ]
+    for issue in segment.get("issues") or []:
+        issue_text = str(issue).strip()
+        if issue_text.startswith("曾觸發轉錄補救：") or issue_text.startswith("指定重跑未改善"):
+            notes.append(issue_text)
+    return list(dict.fromkeys(notes))
+
+
+def recheck_transcript_quality_report(
+    full_transcript: str,
+    existing_quality_report: Optional[dict[str, Any]] = None,
+    *,
+    source_audio_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Re-evaluate a saved transcript without calling a transcription model.
+
+    Historical records can retain failures from an intermediate retry even when
+    the final transcript was recovered.  This uses the final transcript as the
+    source of truth, preserves those retry messages as recovery history, and
+    keeps only issues that still exist now.  When the retained original media
+    is available, long timestamp gaps are additionally checked against local
+    speech activity.
+    """
+    transcript = (full_transcript or "").strip()
+    previous_report = (
+        dict(existing_quality_report)
+        if isinstance(existing_quality_report, dict)
+        else {}
+    )
+    previous_segments_by_index: dict[int, dict[str, Any]] = {}
+    for position, segment in enumerate(previous_report.get("segments") or []):
+        if not isinstance(segment, dict):
+            continue
+        try:
+            segment_index = int(segment.get("index", position))
+        except (TypeError, ValueError):
+            continue
+        if segment_index >= 0:
+            previous_segments_by_index[segment_index] = dict(segment)
+
+    metadata_by_index: dict[int, dict[str, Any]] = {}
+    for position, segment in enumerate(_transcript_segment_metadata(transcript)):
+        try:
+            segment_index = int(segment.get("index", position))
+        except (TypeError, ValueError):
+            continue
+        if segment_index >= 0:
+            metadata_by_index[segment_index] = dict(segment)
+    segment_bodies = _transcript_segments_by_index(transcript)
+    segment_indices = sorted(set(metadata_by_index) | set(segment_bodies))
+    if not segment_indices and transcript:
+        segment_indices = [0]
+        metadata_by_index[0] = {
+            "index": 0,
+            "start_seconds": 0,
+            "end_seconds": SEGMENT_TARGET_SECONDS,
+            "status": "existing_record",
+            "issues": [],
+        }
+        segment_bodies[0] = transcript
+
+    shared_audio_cache: dict[str, Any] = {}
+    audio_available = bool(source_audio_path and source_audio_path.is_file())
+    last_segment_index = max(segment_indices, default=0)
+    segment_report: list[dict[str, Any]] = []
+    for segment_index in segment_indices:
+        previous_segment = previous_segments_by_index.get(segment_index, {})
+        metadata = metadata_by_index.get(segment_index, {})
+        try:
+            start_seconds = int(metadata.get("start_seconds", previous_segment.get("start_seconds", 0)))
+        except (TypeError, ValueError):
+            start_seconds = segment_index * SEGMENT_TARGET_SECONDS
+        try:
+            end_seconds = int(
+                metadata.get(
+                    "end_seconds",
+                    previous_segment.get("end_seconds", start_seconds + SEGMENT_TARGET_SECONDS),
+                )
+            )
+        except (TypeError, ValueError):
+            end_seconds = start_seconds + SEGMENT_TARGET_SECONDS
+        end_seconds = max(start_seconds + 1, end_seconds)
+        transcript_body = segment_bodies.get(segment_index, "")
+        issues = _segment_transcript_current_quality_issues(
+            transcript_body,
+            segment_index,
+            last_segment_index + 1,
+            segment_minutes=SEGMENT_MINUTES,
+            expected_start_seconds=start_seconds,
+            expected_end_seconds=end_seconds,
+            is_last_segment=segment_index == last_segment_index,
+            audio_path=source_audio_path if audio_available else None,
+            audio_offset_seconds=0 if audio_available else None,
+            audio_cache=shared_audio_cache if audio_available else None,
+        )
+        recovery_notes = _historical_segment_recovery_notes(previous_segment)
+        prior_status = str(previous_segment.get("status") or "").strip()
+        segment_report.append({
+            "index": segment_index,
+            "start_seconds": start_seconds,
+            "end_seconds": end_seconds,
+            "status": prior_status or "rechecked",
+            "issues": issues,
+            "recovery_notes": recovery_notes,
+        })
+
+    audio_report = previous_report.get("audio")
+    if not isinstance(audio_report, dict):
+        audio_report = {"warnings": []}
+    else:
+        audio_report = dict(audio_report)
+        audio_report["warnings"] = [
+            str(warning).strip()
+            for warning in audio_report.get("warnings") or []
+            if str(warning).strip()
+        ]
+    report = _build_quality_report(audio_report, segment_report, transcript)
+    retained_warnings = [
+        str(warning).strip()
+        for warning in previous_report.get("warnings") or []
+        if str(warning).strip()
+        and not str(warning).strip().startswith("逐字稿品質警示：")
+    ]
+    additional_warnings = [
+        warning for warning in retained_warnings
+        if warning not in report["warnings"]
+    ]
+    if additional_warnings:
+        report["warnings"] = list(dict.fromkeys([*report["warnings"], *additional_warnings]))
+        report["score"] = max(0, int(report["score"]) - min(20, len(additional_warnings) * 5))
+        report["label"] = (
+            "需人工確認"
+            if report["score"] < 75
+            else "可用，建議抽查"
+        )
+    for key, value in previous_report.items():
+        if key not in report and key not in {"review_segments", "recheck"}:
+            report[key] = value
+    report["recheck"] = {
+        "method": "local_transcript_and_audio" if audio_available else "local_transcript_only",
+        "source_audio_checked": audio_available,
+    }
+    return report
 
 
 def process_audio_task(

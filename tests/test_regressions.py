@@ -7656,6 +7656,18 @@ console.log('summary_editor_quality_note_ok');
         self.assertIn("button.setAttribute('aria-busy', 'false');", html)
         self.assertIn("重跑", html)
 
+    def test_web_ui_can_recheck_transcript_quality_without_calling_ai(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("async function recheckMeetingTranscriptQuality", html)
+        self.assertIn("/meetings/${id}/quality/recheck", html)
+        self.assertIn("不會呼叫 AI，也不會建立新會議", html)
+        self.assertIn("id=\"quality-recheck-button\"", html)
+        self.assertIn("⌁ 重新檢核", html)
+        self.assertIn("await Promise.all([", html)
+        self.assertIn("const recheck = report.recheck", html)
+        self.assertIn("已重檢 ${recheckTimestamp}", html)
+
     def test_web_ui_shows_recovery_history_without_marking_segment_as_current_issue(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
@@ -8425,6 +8437,82 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
 
         self.assertEqual(issues, [])
 
+    def test_speech_backed_timestamp_gap_detects_active_tail_after_final_timecode(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -20.0
+
+            def __len__(self):
+                return 180_000
+
+            def __getitem__(self, _slice):
+                return self
+
+        transcript = "[00:00] **[發言者 A]**：開始討論。"
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 170_000)]):
+            issues = tasks._speech_backed_timestamp_gap_quality_issues(
+                Path("segment.mp3"),
+                transcript,
+                expected_start_seconds=0,
+                expected_end_seconds=180,
+            )
+
+        self.assertTrue(any("00:00 至 03:00" in issue for issue in issues))
+
+    def test_quality_recheck_keeps_retry_history_but_only_reviews_current_issues(self):
+        from backend import tasks
+
+        transcript = (
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：第一段開始。\n"
+            "[09:40] **[發言者 A]**：第一段結束。\n\n"
+            "### 【第 2 段｜10:00 – 20:00】\n"
+            "[10:00] **[發言者 B]**：第二段開始。\n"
+            "[19:40] **[發言者 B]**：第二段結束。"
+        )
+        previous_report = {
+            "audio": {"warnings": ["原始音檔有爆音，建議抽查。"]},
+            "recording": {"profile": "audio_standard"},
+            "warnings": [
+                "原始音檔有爆音，建議抽查。",
+                "逐字稿品質警示：以下分段曾觸發轉錄品質補救或需複核：第 1 段。",
+            ],
+            "segments": [
+                {
+                    "index": 0,
+                    "start_seconds": 0,
+                    "end_seconds": 600,
+                    "status": "recovered",
+                    "issues": ["曾觸發轉錄補救：非最後分段時間戳只到 04:00"],
+                },
+                {
+                    "index": 1,
+                    "start_seconds": 600,
+                    "end_seconds": 1200,
+                    "status": "recovered",
+                    "issues": ["曾觸發轉錄補救：非最後分段時間戳只到 14:00"],
+                },
+            ],
+        }
+        current_issue = "音訊含持續語音但時間戳在 15:00 至 16:30 間隔 90 秒"
+        with mock.patch.object(
+            tasks,
+            "_segment_transcript_current_quality_issues",
+            side_effect=[[], [current_issue]],
+        ):
+            report = tasks.recheck_transcript_quality_report(transcript, previous_report)
+
+        self.assertEqual(report["segments"][0]["issues"], [])
+        self.assertIn("曾觸發轉錄補救", report["segments"][0]["recovery_notes"][0])
+        self.assertEqual(report["segments"][1]["issues"], [current_issue])
+        self.assertEqual([item["index"] for item in report["review_segments"]], [1])
+        self.assertNotIn("第 1 段｜00:00-10:00", "\n".join(report["warnings"]))
+        self.assertIn("原始音檔有爆音", "\n".join(report["warnings"]))
+        self.assertEqual(report["recording"]["profile"], "audio_standard")
+        self.assertEqual(report["recheck"]["method"], "local_transcript_only")
+
     def test_quality_report_keeps_recovery_history_out_of_review_targets(self):
         from backend import tasks
 
@@ -8617,6 +8705,52 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(media_head_response.content, b"")
         self.assertEqual(media_download_head_response.status_code, 200)
         self.assertIn("attachment", media_download_head_response.headers.get("content-disposition", ""))
+
+    def test_meeting_quality_recheck_updates_report_without_queueing_a_job(self):
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "source.webm"
+            audio_path.write_bytes(b"webm")
+            record = {
+                "id": 61,
+                "source_audio": str(audio_path),
+                "quality_report": {"segments": []},
+                "full_content": (
+                    "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                    "### 【第 1 段｜00:00 – 10:00】\n"
+                    "[00:00] **[發言者 A]**：測試。"
+                ),
+            }
+            refreshed_report = {
+                "score": 100,
+                "label": "良好",
+                "warnings": [],
+                "segments": [{"index": 0, "issues": []}],
+                "review_segments": [],
+                "recheck": {
+                    "method": "local_transcript_and_audio",
+                    "source_audio_checked": True,
+                },
+            }
+            with mock.patch.object(main, "get_meeting", return_value=record), \
+                 mock.patch.object(
+                     main,
+                     "recheck_transcript_quality_report",
+                     return_value=refreshed_report,
+                 ) as recheck_mock, \
+                 mock.patch.object(main, "update_meeting_quality_report", return_value=True) as update_mock, \
+                 mock.patch.object(main, "enqueue_audio_job") as enqueue_mock:
+                response = asgi_request(main.app, "POST", "/meetings/61/quality/recheck")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "success")
+        self.assertTrue(payload["source_audio_checked"])
+        self.assertIn("未使用 Gemini", payload["message"])
+        self.assertEqual(recheck_mock.call_args.kwargs["source_audio_path"], audio_path)
+        update_mock.assert_called_once_with(61, refreshed_report)
+        enqueue_mock.assert_not_called()
 
     def test_webm_source_audio_endpoint_uses_recording_profile_media_type(self):
         import backend.main as main
