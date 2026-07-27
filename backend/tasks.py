@@ -1080,7 +1080,7 @@ def _segment_transcript_quality_issues(
     return issues
 
 
-def _speech_backed_timestamp_gap_quality_issues(
+def _speech_backed_timestamp_gap_quality_ranges(
     audio_path: Path,
     transcript: str,
     *,
@@ -1088,12 +1088,13 @@ def _speech_backed_timestamp_gap_quality_issues(
     expected_end_seconds: int,
     audio_offset_seconds: Optional[int] = None,
     audio_cache: Optional[dict[str, Any]] = None,
-) -> list[str]:
-    """Flag long transcript gaps only when the matching audio contains speech.
+) -> list[dict[str, Any]]:
+    """Return long timestamp gaps that are backed by local audio activity.
 
     Timestamp spacing alone is not enough evidence: a meeting may genuinely be
     quiet for a while. This local check therefore looks for sustained non-silent
     audio inside a large gap before treating it as an omitted-transcript signal.
+    Structured ranges let a selected-segment rerun repair only the missing part.
     """
     if not TRANSCRIPT_SPEECH_GAP_VALIDATION_ENABLED:
         return []
@@ -1141,7 +1142,7 @@ def _speech_backed_timestamp_gap_quality_issues(
         )
         return []
 
-    issues: list[str] = []
+    ranges: list[dict[str, Any]] = []
     if audio_offset_seconds is None:
         # During normal processing audio_path is a cut segment, whose first
         # sample matches the absolute start of that segment.  Quality recheck
@@ -1171,14 +1172,43 @@ def _speech_backed_timestamp_gap_quality_issues(
             active_ms >= TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_SECONDS * 1000
             and active_ratio >= TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO
         ):
-            issues.append(
+            issue = (
                 "音訊含持續語音但時間戳在 "
                 f"{_format_mmss(previous)} 至 {_format_mmss(current)} 間隔 "
                 f"{current - previous} 秒"
             )
-        if len(issues) >= 2:
+            ranges.append({
+                "start_seconds": previous,
+                "end_seconds": current,
+                "issue": issue,
+            })
+        if len(ranges) >= 2:
             break
-    return issues
+    return ranges
+
+
+def _speech_backed_timestamp_gap_quality_issues(
+    audio_path: Path,
+    transcript: str,
+    *,
+    expected_start_seconds: int,
+    expected_end_seconds: int,
+    audio_offset_seconds: Optional[int] = None,
+    audio_cache: Optional[dict[str, Any]] = None,
+) -> list[str]:
+    """Return human-readable issues for audio-backed timestamp gaps."""
+    return [
+        str(item.get("issue") or "").strip()
+        for item in _speech_backed_timestamp_gap_quality_ranges(
+            audio_path,
+            transcript,
+            expected_start_seconds=expected_start_seconds,
+            expected_end_seconds=expected_end_seconds,
+            audio_offset_seconds=audio_offset_seconds,
+            audio_cache=audio_cache,
+        )
+        if str(item.get("issue") or "").strip()
+    ]
 
 
 def _segment_transcript_current_quality_issues(
@@ -2518,6 +2548,230 @@ def _transcribe_segment_with_recovery(
     return recovered_transcript
 
 
+def _coalesce_audio_gap_ranges(gap_ranges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge adjacent detected gaps so a single discussion turn is repaired once."""
+    normalized: list[dict[str, Any]] = []
+    for item in gap_ranges:
+        try:
+            start_seconds = int(item.get("start_seconds"))
+            end_seconds = int(item.get("end_seconds"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if end_seconds <= start_seconds:
+            continue
+        normalized.append({
+            "start_seconds": start_seconds,
+            "end_seconds": end_seconds,
+            "issues": [str(item.get("issue") or "").strip()],
+        })
+    merged: list[dict[str, Any]] = []
+    for item in sorted(normalized, key=lambda value: (value["start_seconds"], value["end_seconds"])):
+        if merged and item["start_seconds"] <= merged[-1]["end_seconds"] + 2:
+            merged[-1]["end_seconds"] = max(merged[-1]["end_seconds"], item["end_seconds"])
+            merged[-1]["issues"] = list(dict.fromkeys([
+                *merged[-1]["issues"],
+                *item["issues"],
+            ]))
+            continue
+        merged.append(item)
+    return merged
+
+
+def _export_audio_gap_segment(
+    segment_path: Path,
+    *,
+    segment_start_seconds: int,
+    gap_start_seconds: int,
+    gap_end_seconds: int,
+) -> Optional[Path]:
+    """Export a small absolute-time audio interval from an already split segment."""
+    _configure_ffmpeg_tools()
+    from pydub import AudioSegment
+
+    ffmpeg_path = os.getenv("FFMPEG_PATH") or os.getenv("FFMPEG_BINARY")
+    if ffmpeg_path and Path(ffmpeg_path).is_file():
+        AudioSegment.converter = ffmpeg_path
+    audio = AudioSegment.from_file(str(segment_path))
+    start_ms = max(0, (gap_start_seconds - segment_start_seconds) * 1000)
+    end_ms = min(len(audio), (gap_end_seconds - segment_start_seconds) * 1000)
+    if end_ms <= start_ms:
+        return None
+    gap_path = segment_path.parent / (
+        f"_gap_{segment_path.stem}_{gap_start_seconds}_{gap_end_seconds}.mp3"
+    )
+    audio[start_ms:end_ms].export(str(gap_path), format="mp3", parameters=["-q:a", "3"])
+    return gap_path
+
+
+def _timestamped_transcript_blocks(transcript: str) -> tuple[list[str], dict[int, str]]:
+    """Split a segment transcript into its untimed prefix and timestamp blocks."""
+    prefix: list[str] = []
+    blocks: dict[int, str] = {}
+    current_lines: list[str] = []
+    current_timestamp: Optional[int] = None
+
+    def flush() -> None:
+        nonlocal current_lines, current_timestamp
+        body = "\n".join(current_lines).strip()
+        if body:
+            if current_timestamp is None:
+                prefix.append(body)
+            else:
+                blocks[current_timestamp] = body
+        current_lines = []
+        current_timestamp = None
+
+    for raw_line in (transcript or "").splitlines():
+        line = raw_line.rstrip()
+        match = TIMESTAMP_PATTERN.match(line.strip())
+        if match:
+            flush()
+            current_timestamp = int(match.group("minutes")) * 60 + int(match.group("seconds"))
+        current_lines.append(line)
+    flush()
+    return prefix, blocks
+
+
+def _merge_transcript_gap_repairs(
+    existing_transcript: str,
+    repairs: list[dict[str, Any]],
+) -> str:
+    """Replace timestamp blocks inside repaired gaps while retaining verified text."""
+    prefix, blocks = _timestamped_transcript_blocks(existing_transcript)
+    repair_windows: list[tuple[int, int]] = []
+    replacement_blocks: dict[int, str] = {}
+    for repair in repairs:
+        try:
+            start_seconds = int(repair["start_seconds"])
+            end_seconds = int(repair["end_seconds"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        repair_windows.append((start_seconds, end_seconds))
+        _repair_prefix, repair_blocks = _timestamped_transcript_blocks(
+            str(repair.get("transcript") or "")
+        )
+        replacement_blocks.update(repair_blocks)
+
+    for timestamp in list(blocks):
+        if any(start_seconds <= timestamp <= end_seconds for start_seconds, end_seconds in repair_windows):
+            blocks.pop(timestamp, None)
+    blocks.update(replacement_blocks)
+    body_blocks = [blocks[timestamp] for timestamp in sorted(blocks)]
+    return "\n\n".join([*prefix, *body_blocks]).strip()
+
+
+def _repair_existing_segment_timestamp_gaps(
+    client,
+    segment_path: Path,
+    existing_transcript: str,
+    *,
+    gap_ranges: list[dict[str, Any]],
+    segment_index: int,
+    total_segments: int,
+    job_id: str,
+    model: str,
+    segment_start_seconds: int,
+    segment_end_seconds: int,
+    is_last_segment: bool,
+    speaker_context: str,
+    temp_segment_paths: Optional[list[Path]],
+    quality_events: Optional[list[dict[str, Any]]],
+) -> tuple[Optional[str], list[str]]:
+    """Repair only audio-backed timestamp gaps; return None to use full rerun."""
+    coalesced_ranges = _coalesce_audio_gap_ranges(gap_ranges)
+    if not coalesced_ranges:
+        return None, []
+
+    repairs: list[dict[str, Any]] = []
+    try:
+        for repair_index, gap in enumerate(coalesced_ranges):
+            gap_start_seconds = max(segment_start_seconds, int(gap["start_seconds"]))
+            gap_end_seconds = min(segment_end_seconds, int(gap["end_seconds"]))
+            if gap_end_seconds <= gap_start_seconds:
+                continue
+            update_job_status(
+                job_id,
+                "processing",
+                f"🩹 正在局部補救第 {segment_index + 1}/{total_segments} 段缺口 "
+                f"{repair_index + 1}/{len(coalesced_ranges)}...",
+                progress_current=segment_index,
+                progress_total=total_segments,
+            )
+            gap_path = _export_audio_gap_segment(
+                segment_path,
+                segment_start_seconds=segment_start_seconds,
+                gap_start_seconds=gap_start_seconds,
+                gap_end_seconds=gap_end_seconds,
+            )
+            if gap_path is None:
+                return None, []
+            if temp_segment_paths is not None and gap_path not in temp_segment_paths:
+                temp_segment_paths.append(gap_path)
+            gap_context = _speaker_context_from_transcripts([
+                speaker_context,
+                existing_transcript,
+                *(str(item.get("transcript") or "") for item in repairs),
+            ])
+            repaired_transcript = _transcribe_segment_with_recovery(
+                client,
+                gap_path,
+                segment_index,
+                total_segments,
+                job_id,
+                model,
+                offset_seconds=gap_start_seconds,
+                duration_seconds=gap_end_seconds - gap_start_seconds,
+                is_last_segment=is_last_segment and gap_end_seconds >= segment_end_seconds,
+                speaker_context=gap_context,
+                temp_segment_paths=temp_segment_paths,
+                quality_events=quality_events,
+                direct_recovery=False,
+            )
+            repairs.append({
+                "start_seconds": gap_start_seconds,
+                "end_seconds": gap_end_seconds,
+                "transcript": repaired_transcript,
+            })
+    except Exception as exc:
+        logger.warning(
+            "[%s] ⚠️ 第 %s/%s 段局部缺口補救失敗，改用整段穩定重跑：%s",
+            job_id,
+            segment_index + 1,
+            total_segments,
+            str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__,
+        )
+        return None, []
+
+    if not repairs:
+        return None, []
+    merged_transcript = _merge_transcript_gap_repairs(existing_transcript, repairs)
+    final_issues = _segment_transcript_current_quality_issues(
+        merged_transcript,
+        segment_index,
+        total_segments,
+        segment_minutes=SEGMENT_MINUTES,
+        expected_start_seconds=segment_start_seconds,
+        expected_end_seconds=segment_end_seconds,
+        is_last_segment=is_last_segment,
+        audio_path=segment_path,
+    )
+    if final_issues:
+        logger.warning(
+            "[%s] ⚠️ 第 %s/%s 段局部缺口補救後仍有問題，改用整段穩定重跑：%s",
+            job_id,
+            segment_index + 1,
+            total_segments,
+            "；".join(final_issues),
+        )
+        return None, []
+    notes = [
+        "已局部補救時間缺口："
+        f"{_format_mmss(int(gap['start_seconds']))}-{_format_mmss(int(gap['end_seconds']))}"
+        for gap in coalesced_ranges
+    ]
+    return merged_transcript, notes
+
+
 def _transcribe_segment(
     client,
     seg_path: Path,
@@ -3753,26 +4007,60 @@ def process_audio_task(
                 speaker_context = _speaker_context_from_transcripts(all_transcripts)
                 existing_forced_transcript = existing_segment_transcripts.get(i)
                 use_stable_rerun = i in forced_segments and existing_forced_transcript is not None
-                transcript = _transcribe_segment_with_recovery(
-                    client,
-                    seg_path,
-                    i,
-                    total_segs,
-                    job_id,
-                    model,
-                    offset_seconds=offset_seconds,
-                    duration_seconds=max(1, audio_slice.end_seconds - audio_slice.start_seconds),
-                    is_last_segment=i >= total_segs - 1,
-                    speaker_context=speaker_context,
-                    temp_segment_paths=temporary_segment_paths,
-                    quality_events=segment_quality_events,
-                    direct_recovery=use_stable_rerun,
-                )
+                targeted_gap_repair_notes: list[str] = []
+                transcript = None
+                if use_stable_rerun:
+                    gap_ranges = _speech_backed_timestamp_gap_quality_ranges(
+                        seg_path,
+                        existing_forced_transcript,
+                        expected_start_seconds=audio_slice.start_seconds,
+                        expected_end_seconds=audio_slice.end_seconds,
+                    )
+                    transcript, targeted_gap_repair_notes = _repair_existing_segment_timestamp_gaps(
+                        client,
+                        seg_path,
+                        existing_forced_transcript,
+                        gap_ranges=gap_ranges,
+                        segment_index=i,
+                        total_segments=total_segs,
+                        job_id=job_id,
+                        model=model,
+                        segment_start_seconds=audio_slice.start_seconds,
+                        segment_end_seconds=audio_slice.end_seconds,
+                        is_last_segment=i >= total_segs - 1,
+                        speaker_context=speaker_context,
+                        temp_segment_paths=temporary_segment_paths,
+                        quality_events=segment_quality_events,
+                    )
+                    if transcript is not None:
+                        logger.info(
+                            "[%s] 🩹 第 %s/%s 段已完成局部時間缺口補救：%s",
+                            job_id,
+                            i + 1,
+                            total_segs,
+                            "；".join(targeted_gap_repair_notes),
+                        )
+                if transcript is None:
+                    transcript = _transcribe_segment_with_recovery(
+                        client,
+                        seg_path,
+                        i,
+                        total_segs,
+                        job_id,
+                        model,
+                        offset_seconds=offset_seconds,
+                        duration_seconds=max(1, audio_slice.end_seconds - audio_slice.start_seconds),
+                        is_last_segment=i >= total_segs - 1,
+                        speaker_context=speaker_context,
+                        temp_segment_paths=temporary_segment_paths,
+                        quality_events=segment_quality_events,
+                        direct_recovery=use_stable_rerun,
+                    )
                 kept_existing_after_rerun = False
                 kept_existing_reason = ""
                 kept_existing_issues: list[str] = []
                 rerun_candidate_issues: list[str] = []
-                if use_stable_rerun:
+                if use_stable_rerun and not targeted_gap_repair_notes:
                     (
                         kept_existing_after_rerun,
                         kept_existing_issues,
@@ -3802,7 +4090,10 @@ def process_audio_task(
                             progress_current=i + 1,
                             progress_total=total_segs,
                         )
-                recovery_notes = _recovery_notes_for_segment(segment_quality_events, i)
+                recovery_notes = list(dict.fromkeys([
+                    *targeted_gap_repair_notes,
+                    *_recovery_notes_for_segment(segment_quality_events, i),
+                ]))
                 segment_issues = _segment_transcript_current_quality_issues(
                     transcript,
                     i,

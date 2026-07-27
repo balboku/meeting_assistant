@@ -7649,8 +7649,8 @@ console.log('summary_editor_quality_note_ok');
         self.assertIn("setDetailStatus(`已建立重跑任務：${data.job_id}`)", html)
         self.assertIn("setDetailStatus(`重跑失敗：${err.message}`)", html)
         self.assertIn("function segmentIndicesDisplayText", html)
-        self.assertIn("`只重跑 ${segmentIndices.length} 個問題分段（${segmentTextLabel}）`", html)
-        self.assertIn("`只重跑${segmentTextLabel}`", html)
+        self.assertIn("`優先局部補救 ${segmentIndices.length} 個問題分段（${segmentTextLabel}）`", html)
+        self.assertIn("`優先局部補救${segmentTextLabel}`", html)
         self.assertNotIn("個需複核分段", html)
         self.assertIn("button.setAttribute('aria-busy', 'true');", html)
         self.assertIn("button.setAttribute('aria-busy', 'false');", html)
@@ -8461,6 +8461,81 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
 
         self.assertTrue(any("00:00 至 03:00" in issue for issue in issues))
 
+    def test_audio_backed_gap_ranges_keep_precise_repair_bounds(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -20.0
+
+            def __len__(self):
+                return 180_000
+
+            def __getitem__(self, _slice):
+                return self
+
+        transcript = (
+            "[00:00] **[發言者 A]**：開始。\n"
+            "[01:40] **[發言者 A]**：接續。"
+        )
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 90_000)]):
+            ranges = tasks._speech_backed_timestamp_gap_quality_ranges(
+                Path("segment.mp3"),
+                transcript,
+                expected_start_seconds=0,
+                expected_end_seconds=180,
+            )
+
+        self.assertEqual(len(ranges), 2)
+        self.assertEqual(ranges[0]["start_seconds"], 0)
+        self.assertEqual(ranges[0]["end_seconds"], 100)
+        self.assertIn("00:00 至 01:40", ranges[0]["issue"])
+        self.assertEqual(ranges[1]["start_seconds"], 100)
+        self.assertEqual(ranges[1]["end_seconds"], 180)
+
+    def test_targeted_gap_repair_replaces_only_timestamp_blocks_inside_gap(self):
+        from backend import tasks
+
+        existing = (
+            "[10:00] **[發言者 A]**：保留的前文。\n\n"
+            "[12:00] **[發言者 A]**：應被取代的舊內容。\n\n"
+            "[15:00] **[發言者 B]**：保留的後文。"
+        )
+        repaired = "[11:00] **[發言者 A]**：補回的討論內容。"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gap_path = Path(tmpdir) / "gap.mp3"
+            gap_path.write_bytes(b"gap")
+            with mock.patch.object(tasks, "_export_audio_gap_segment", return_value=gap_path), \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", return_value=repaired), \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "update_job_status"):
+                result, notes = tasks._repair_existing_segment_timestamp_gaps(
+                    None,
+                    Path(tmpdir) / "segment.mp3",
+                    existing,
+                    gap_ranges=[{
+                        "start_seconds": 660,
+                        "end_seconds": 780,
+                        "issue": "音訊含持續語音但時間戳在 11:00 至 13:00 間隔 120 秒",
+                    }],
+                    segment_index=1,
+                    total_segments=3,
+                    job_id="gap-repair-job",
+                    model="gemini-test",
+                    segment_start_seconds=600,
+                    segment_end_seconds=1200,
+                    is_last_segment=False,
+                    speaker_context="",
+                    temp_segment_paths=[],
+                    quality_events=[],
+                )
+
+        self.assertIn("保留的前文", result)
+        self.assertIn("補回的討論內容", result)
+        self.assertIn("保留的後文", result)
+        self.assertNotIn("應被取代的舊內容", result)
+        self.assertEqual(notes, ["已局部補救時間缺口：11:00-13:00"])
+
     def test_quality_recheck_keeps_retry_history_but_only_reviews_current_issues(self):
         from backend import tasks
 
@@ -9116,6 +9191,96 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             self.assertIn("新第二段", output_text)
             self.assertIn("保留第三段", output_text)
             self.assertNotIn("舊第二段", output_text)
+
+    def test_partial_rerun_uses_targeted_gap_repair_before_full_segment_rerun(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{"topic": "局部缺口補救", "summary": "完成", "evidence_timecodes": ["10:00"]}],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                return type("Response", (), {"text": json.dumps(summary_payload, ensure_ascii=False)})()
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            slices = []
+            for index in range(3):
+                segment_path = root / f"_seg_meeting_{index:03d}.mp3"
+                segment_path.write_bytes(b"segment")
+                slices.append(tasks.AudioSlice(segment_path, index * 600, (index + 1) * 600))
+            source_path = root / "existing.md"
+            source_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n[00:00] **[發言者 A]**：保留第一段。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n"
+                "[10:00] **[發言者 B]**：保留第二段開頭。\n"
+                "[12:00] **[發言者 B]**：舊的缺口內容。\n"
+                "[19:40] **[發言者 B]**：保留第二段收尾。\n"
+                "### 【第 3 段｜20:00 – 30:00】\n[20:00] **[發言者 C]**：保留第三段。",
+                encoding="utf-8",
+            )
+            output_dir = root / "output"
+            repaired_second = (
+                "[10:00] **[發言者 B]**：保留第二段開頭。\n"
+                "[11:00] **[發言者 B]**：補回的缺口內容。\n"
+                "[19:40] **[發言者 B]**：保留第二段收尾。"
+            )
+
+            def targeted_gap_ranges(segment_path, *_args, **_kwargs):
+                return [{
+                    "start_seconds": 660,
+                    "end_seconds": 780,
+                    "issue": "音訊含持續語音但時間戳在 11:00 至 13:00 間隔 120 秒",
+                }] if segment_path.name.endswith("_001.mp3") else []
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=slices), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
+                 mock.patch.object(
+                     tasks,
+                     "_speech_backed_timestamp_gap_quality_ranges",
+                     side_effect=targeted_gap_ranges,
+                 ), \
+                 mock.patch.object(
+                     tasks,
+                     "_repair_existing_segment_timestamp_gaps",
+                     return_value=(repaired_second, ["已局部補救時間缺口：11:00-13:00"]),
+                 ) as repair_mock, \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery") as full_rerun_mock, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting") as save_meeting_mock:
+                output_path = tasks.process_audio_task(
+                    job_id="targeted-gap-rerun-job",
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    force_segment_indices=[1],
+                    transcript_reuse_source_path=source_path,
+                )
+
+            self.assertIsNotNone(output_path)
+            repair_mock.assert_called_once()
+            full_rerun_mock.assert_not_called()
+            output_text = output_path.read_text(encoding="utf-8")
+            self.assertIn("補回的缺口內容", output_text)
+            self.assertNotIn("舊的缺口內容", output_text)
+            quality_report = save_meeting_mock.call_args.kwargs["quality_report"]
+            self.assertIn(
+                "已局部補救時間缺口：11:00-13:00",
+                quality_report["segments"][1]["recovery_notes"],
+            )
 
     def test_partial_rerun_keeps_existing_segment_when_rerun_is_less_complete(self):
         from backend import tasks
@@ -9982,8 +10147,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("const focusArgs = hasFocusSeconds ? `${index}, ${focusSeconds}` : `${index}`;", html)
         self.assertIn("quality-review-segment unavailable", html)
         self.assertIn("quality-review-segment media-only", html)
-        self.assertIn("此紀錄可重跑本段，也可定位原始檔時間；${reviewSegmentTitle}", html)
-        self.assertIn("此紀錄可重跑本段，但缺少可定位的分段控制；${reviewSegmentTitle}", html)
+        self.assertIn("此紀錄可局部補救本段，也可定位原始檔時間；${reviewSegmentTitle}", html)
+        self.assertIn("此紀錄可局部補救本段，但缺少可定位的分段控制；${reviewSegmentTitle}", html)
         self.assertIn('此舊紀錄沒有可定位的分段控制；${reviewSegmentTitle}', html)
         self.assertIn('此舊紀錄沒有可重跑的分段控制，可定位原始檔時間；${reviewSegmentTitle}', html)
         self.assertIn("const titleText = reviewCount ? `問題分段 ${reviewCount} 段` : '問題分段';", html)
@@ -10218,7 +10383,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('data-start-seconds="${startSeconds}"', html)
         self.assertIn('data-end-seconds="${endSeconds}"', html)
         self.assertIn('id="rerun-segment-${index}" type="button" aria-describedby="detail-status" aria-busy="false"', html)
-        self.assertIn('title="只重跑第 ${index + 1} 段"', html)
+        self.assertIn('title="優先局部補救第 ${index + 1} 段已偵測的時間缺口；無法安全合併才重跑整段"', html)
         self.assertIn("const segmentIndices = normalizeSegmentIndices(segmentIndex);", html)
         self.assertIn("JSON.stringify({ segments: segmentIndices })", html)
         self.assertIn('id="rerun-summary-button"', html)
@@ -11880,7 +12045,7 @@ if (!sandbox.authoritative.includes("rerunMeeting(57, [10], false, false, 'quali
   console.error(sandbox.authoritative);
   process.exit(27);
 }}
-if (!sandbox.authoritative.includes('此紀錄可重跑本段，也可定位原始檔時間')) {{
+if (!sandbox.authoritative.includes('此紀錄可局部補救本段，也可定位原始檔時間')) {{
   console.error(sandbox.authoritative);
   process.exit(28);
 }}

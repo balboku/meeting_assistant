@@ -3451,7 +3451,7 @@ function renderCardQuality(record, qualityType = 'all') {
     }
     if (hasRecordId && rerunnableSegmentIndices.length) {
       const rerunSegmentText = segmentIndicesDisplayText(rerunnableSegmentIndices, 3);
-      chips.push(`<button type="button" id="card-rerun-review-segments-${recordId}" class="card-quality-chip needs-review card-quality-action" title="只重跑已標記的問題分段（${escapeHtml(rerunSegmentText)}），其他分段沿用快取" aria-label="重跑問題分段（${escapeHtml(rerunSegmentText)}）：${escapeHtml(record?.title || `#${recordId}`)}" onclick="rerunReviewSegmentsFromCard(event, ${recordId}, [${rerunnableSegmentIndices.join(',')}])">↻ 重跑${escapeHtml(rerunSegmentText)}</button>`);
+      chips.push(`<button type="button" id="card-rerun-review-segments-${recordId}" class="card-quality-chip needs-review card-quality-action" title="優先局部補救已標記分段中的時間缺口（${escapeHtml(rerunSegmentText)}）；無法安全合併才重跑整段，其他分段沿用快取" aria-label="重跑問題分段（${escapeHtml(rerunSegmentText)}）：${escapeHtml(record?.title || `#${recordId}`)}" onclick="rerunReviewSegmentsFromCard(event, ${recordId}, [${rerunnableSegmentIndices.join(',')}])">↻ 重跑${escapeHtml(rerunSegmentText)}</button>`);
     } else if (hasRecordId) {
       chips.push(`<span class="card-quality-chip needs-review review-segment-note" title="此紀錄缺少可直接重跑的分段資料；請開啟問題分段後依原始檔時間複核">需詳情複核</span>`);
     }
@@ -3829,9 +3829,9 @@ async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQu
     : summaryOnly
     ? '只重整摘要、決議與待辦（沿用既有逐字稿）'
     : segmentIndices.length > 1
-    ? `只重跑 ${segmentIndices.length} 個問題分段（${segmentTextLabel}）`
+    ? `優先局部補救 ${segmentIndices.length} 個問題分段（${segmentTextLabel}）`
     : segmentIndices.length === 1
-    ? `只重跑${segmentTextLabel}`
+    ? `優先局部補救${segmentTextLabel}`
     : '完整重跑';
   if (!confirm(`確定要${segmentText}嗎？\n完成後會產生一筆新的會議紀錄，原本這筆會保留。`)) {
     return;
@@ -4337,12 +4337,12 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
       const rerunButtonId = `quality-rerun-review-segment-${index}`;
       const reviewSegmentTitle = `第 ${index + 1} 段${plainTimeText}：${allIssueText}`;
       const rerunControl = canRerunSegment
-        ? `<button id="${rerunButtonId}" type="button" class="quality-review-segment-rerun" aria-describedby="detail-status" aria-busy="false" title="只重跑第 ${index + 1} 段，其他分段沿用快取" aria-label="重跑第 ${index + 1} 段" onclick="rerunMeeting(${Number(meetingId) || 0}, ${index}, false, false, '${rerunButtonId}')">↻ 重跑本段</button>`
+        ? `<button id="${rerunButtonId}" type="button" class="quality-review-segment-rerun" aria-describedby="detail-status" aria-busy="false" title="優先局部補救第 ${index + 1} 段已偵測的時間缺口；無法安全合併才重跑整段" aria-label="重跑第 ${index + 1} 段" onclick="rerunMeeting(${Number(meetingId) || 0}, ${index}, false, false, '${rerunButtonId}')">↻ 重跑本段</button>`
         : '';
       if (!canFocusSegment) {
         if (canCueSource) {
           const mediaOnlyTitle = canRerunSegment
-            ? `此紀錄可重跑本段，也可定位原始檔時間；${reviewSegmentTitle}`
+            ? `此紀錄可局部補救本段，也可定位原始檔時間；${reviewSegmentTitle}`
             : `此舊紀錄沒有可重跑的分段控制，可定位原始檔時間；${reviewSegmentTitle}`;
           return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment media-only" aria-describedby="detail-status" title="${escapeHtml(mediaOnlyTitle)}" onclick="focusQualitySegment(${focusArgs})">
             <span class="quality-review-segment-label">第 ${index + 1} 段</span>
@@ -4350,7 +4350,7 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
           </button>${rerunControl}</span>`;
         }
         const unavailableTitle = canRerunSegment
-          ? `此紀錄可重跑本段，但缺少可定位的分段控制；${reviewSegmentTitle}`
+          ? `此紀錄可局部補救本段，但缺少可定位的分段控制；${reviewSegmentTitle}`
           : `此舊紀錄沒有可定位的分段控制；${reviewSegmentTitle}`;
         return `<span class="quality-review-segment-wrap"><span class="quality-review-segment unavailable" aria-disabled="true" title="${escapeHtml(unavailableTitle)}">
           <span class="quality-review-segment-label">第 ${index + 1} 段</span>
@@ -4368,7 +4368,7 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
   const rerunButton = (() => {
     if (!rerunnableSegmentIndices.length) return '';
     const rerunSegmentText = segmentIndicesDisplayText(rerunnableSegmentIndices, 5);
-    return `<button id="quality-rerun-review-segments-button" type="button" class="quality-rerun-review-segments" aria-describedby="detail-status" aria-busy="false" title="只重跑已標記且可定位的問題分段（${escapeHtml(rerunSegmentText)}）" onclick="rerunMeeting(${Number(meetingId) || 0}, [${rerunnableSegmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')">↻ 重跑${escapeHtml(rerunSegmentText)}</button>`;
+    return `<button id="quality-rerun-review-segments-button" type="button" class="quality-rerun-review-segments" aria-describedby="detail-status" aria-busy="false" title="優先局部補救已標記且可定位問題分段的時間缺口（${escapeHtml(rerunSegmentText)}）" onclick="rerunMeeting(${Number(meetingId) || 0}, [${rerunnableSegmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-button')">↻ 重跑${escapeHtml(rerunSegmentText)}</button>`;
   })();
   const fallbackNote = !rerunnableSegmentIndices.length
     ? `<span class="quality-review-note">此紀錄缺少可直接重跑的分段資料；可定位原始檔時間複核，必要時使用完整重跑。<button id="quality-rerun-review-full-button" type="button" class="quality-rerun-review-segments" aria-describedby="detail-status" aria-busy="false" title="重新轉錄並重新產生完整會議紀錄" onclick="rerunMeeting(${Number(meetingId) || 0}, null, false, false, 'quality-rerun-review-full-button')">🔁 完整重跑</button></span>`
@@ -4727,7 +4727,7 @@ function renderQualityReport(meeting) {
       <span>第 ${index + 1} 段 · ${clockText(segment.start_seconds)}-${clockText(segment.end_seconds)} · ${escapeHtml(state)}</span>
       ${issueBadges}
       ${recoveryNote}
-      <button id="rerun-segment-${index}" type="button" aria-describedby="detail-status" aria-busy="false" title="只重跑第 ${index + 1} 段" aria-label="重跑第 ${index + 1} 段" onclick="rerunMeeting(${meeting.id}, ${index})">↻ 重跑本段</button>
+      <button id="rerun-segment-${index}" type="button" aria-describedby="detail-status" aria-busy="false" title="優先局部補救第 ${index + 1} 段已偵測的時間缺口；無法安全合併才重跑整段" aria-label="重跑第 ${index + 1} 段" onclick="rerunMeeting(${meeting.id}, ${index})">↻ 重跑本段</button>
     </div>`;
   }).join('');
   const scoreText = report.score === null || report.score === undefined
