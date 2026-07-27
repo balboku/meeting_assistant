@@ -1362,6 +1362,19 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertIn("不得根據前一句的句型、數字或討論脈絡自行續寫後文", prompt)
         self.assertIn("不可跳過仍有說話聲的時間區間", prompt)
 
+    def test_segment_prompt_uses_deduplicated_literal_custom_vocabulary(self):
+        from backend import tasks
+
+        terms = tasks.normalize_custom_vocabulary(" 佳世達，S-ring\nIEC 62304；佳世達 ")
+        prompt = tasks._build_segment_prompt(0, 1, custom_vocabulary=terms)
+
+        self.assertEqual(terms, ["佳世達", "S-ring", "IEC 62304"])
+        self.assertIn("【本次會議專有詞彙】", prompt)
+        self.assertIn("只有實際聽到相同或相近讀音時", prompt)
+        self.assertIn("- 佳世達", prompt)
+        self.assertIn("- S-ring", prompt)
+        self.assertIn("- IEC 62304", prompt)
+
     def test_cli_prompt_preserves_multilingual_transcript_policy(self):
         import meeting_assistant
 
@@ -3071,6 +3084,7 @@ class UploadQueueRegressionTests(unittest.TestCase):
                     files={"file": ("meeting.mp3", BytesIO(b"ID3" + b"\0" * 32), "audio/mpeg")},
                     data={
                         "recording_profile": "audio_compact",
+                        "custom_vocabulary": "佳世達，S-ring\nIEC 62304；佳世達",
                         "recording_warning": "錄影品質警示：錄製期間預覽畫面曾連續幾乎全黑，請確認是否選到正確攝影機；此原始錄影請人工抽查。",
                     },
                 )
@@ -3082,6 +3096,7 @@ class UploadQueueRegressionTests(unittest.TestCase):
             self.assertEqual(captured["audio_path"], saved_audio[0])
             self.assertEqual(captured["output_dir"], output_dir)
             self.assertEqual(captured["recording_profile"], "audio_compact")
+            self.assertEqual(captured["custom_vocabulary"], ["佳世達", "S-ring", "IEC 62304"])
             self.assertIn("預覽畫面", captured["client_recording_warning"])
             self.assertTrue(saved_audio[0].read_bytes().startswith(b"ID3"))
 
@@ -3492,6 +3507,9 @@ class MeetingRerunRegressionTests(unittest.TestCase):
                 source_audio=audio_path.name,
                 output_path=str(output_path),
                 summary="摘要",
+                quality_report={
+                    "recording": {"custom_vocabulary": ["佳世達", "S-ring"]},
+                },
             )
 
             with mock.patch.object(main, "SOURCE_AUDIO_DIR", source_dir), \
@@ -3508,6 +3526,7 @@ class MeetingRerunRegressionTests(unittest.TestCase):
         self.assertEqual(job["payload"]["audio_path"], str(audio_path))
         self.assertEqual(job["payload"]["output_dir"], str(output_dir))
         self.assertEqual(job["payload"]["meeting_title"], "重跑測試會議")
+        self.assertEqual(job["payload"]["custom_vocabulary"], ["佳世達", "S-ring"])
 
     def test_meeting_rerun_rejects_missing_source_audio(self):
         database = self._isolated_database()
@@ -6980,6 +6999,39 @@ class JobQueueWorkerRegressionTests(unittest.TestCase):
 
         self.assertEqual(process_mock.call_args.kwargs["client_recording_warning"], warning)
 
+    def test_audio_worker_passes_custom_vocabulary_to_task(self):
+        database, tmpdir = self._isolated_database()
+        import backend.job_queue as job_queue
+
+        vocabulary = ["佳世達", "S-ring", "IEC 62304"]
+        audio_path = tmpdir / "vocabulary-source.webm"
+        output_path = tmpdir / "meeting.md"
+        audio_path.write_bytes(b"audio")
+        output_path.write_text("done", encoding="utf-8")
+        job_queue.enqueue_audio_job(
+            "worker-custom-vocabulary-job",
+            audio_path=audio_path,
+            output_dir=tmpdir,
+            model="test-model",
+            custom_vocabulary=vocabulary,
+        )
+        worker = job_queue.JobQueueWorker(poll_interval=0.01)
+        claim = database.claim_next_pending_job()
+
+        def mark_done(**kwargs):
+            database.update_job_status(
+                kwargs["job_id"],
+                "done",
+                "完成",
+                output_path=str(output_path),
+            )
+            return output_path
+
+        with mock.patch.object(job_queue, "process_audio_task", side_effect=mark_done) as process_mock:
+            worker.process_job(claim)
+
+        self.assertEqual(process_mock.call_args.kwargs["custom_vocabulary"], vocabulary)
+
 
 class LineRegressionTests(unittest.TestCase):
     def test_enqueue_line_audio_job_is_idempotent_by_message_id(self):
@@ -7308,6 +7360,14 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn("/jobs/${jobId}/cancel", html)
         self.assertIn("activeUploadJobId", html)
         self.assertIn("activeRecordingJobId", html)
+
+    def test_web_ui_collects_custom_vocabulary_for_upload_and_recording(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('id="custom-vocabulary"', html)
+        self.assertIn('id="rec-vocabulary"', html)
+        self.assertGreaterEqual(html.count("formData.append('custom_vocabulary', customVocabulary)"), 2)
+        self.assertIn("customVocabularyCount ? `📚 ${customVocabularyCount} 個專有詞`", html)
 
     def test_summary_editor_omits_transcript_quality_note(self):
         static_path = json.dumps(str(ROOT / "static" / "index.html"))

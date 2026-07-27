@@ -137,6 +137,7 @@ from backend.tasks import (
     _refresh_quality_report_summary_warnings,
     _meeting_content_quality_issues,
     normalize_client_recording_warning,
+    normalize_custom_vocabulary,
     _replace_transcript_section,
     _transcript_integrity_issues,
     _transcript_segment_metadata,
@@ -1452,6 +1453,7 @@ async def upload_media(
     file: UploadFile = File(..., description="要處理的媒體檔（音訊或影片，支援 mp3/wav/m4a/mp4/mov 等）"),
     model: Optional[str] = Form(default=None, description=f"指定 Gemini 模型（預設：{GEMINI_MODEL}）"),
     title: Optional[str] = Form(default=None, description="自訂會議標題（預設使用檔案名稱）"),
+    custom_vocabulary: Optional[str] = Form(default=None, description="本次會議專有詞彙，使用逗號或換行分隔"),
     recording_profile: Optional[str] = Form(default=None, description="瀏覽器錄音品質 profile"),
     recording_warning: Optional[str] = Form(default=None, description="瀏覽器錄製期間偵測到的非阻斷品質警示"),
     content_length: Optional[int] = Header(default=None, alias="Content-Length"),
@@ -1544,6 +1546,7 @@ async def upload_media(
     if selected_recording_profile not in RECORDING_PROFILES:
         selected_recording_profile = None
     client_recording_warning = normalize_client_recording_warning(recording_warning)
+    custom_vocabulary_terms = normalize_custom_vocabulary(custom_vocabulary)
     try:
         enqueue_audio_job(
             job_id=job_id,
@@ -1553,6 +1556,7 @@ async def upload_media(
             meeting_title=title,
             recording_profile=selected_recording_profile,
             client_recording_warning=client_recording_warning,
+            custom_vocabulary=custom_vocabulary_terms,
         )
     except Exception as e:
         if created_new_source_audio and source_audio_path.exists():
@@ -3434,6 +3438,10 @@ async def rerun_meeting_record(
 
     audio_path = _resolve_meeting_source_audio(record)
     quality_report = record.get("quality_report") or {}
+    recording = quality_report.get("recording") if isinstance(quality_report, dict) else {}
+    custom_vocabulary = normalize_custom_vocabulary(
+        recording.get("custom_vocabulary") if isinstance(recording, dict) else None
+    )
     known_segments = quality_report.get("segments") or []
     if not known_segments:
         transcript = _extract_transcript_section_body(record.get("full_content") or "") or ""
@@ -3495,6 +3503,7 @@ async def rerun_meeting_record(
             summary_source_path=summary_source_path,
             transcript_reuse_source_path=transcript_reuse_source_path,
             high_quality_summary=high_quality,
+            custom_vocabulary=custom_vocabulary,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"重跑任務排入佇列失敗：{exc}") from exc

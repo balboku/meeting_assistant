@@ -1878,6 +1878,10 @@
       <label class="form-label" for="custom-title">自訂會議標題 (選填)</label>
       <input type="text" id="custom-title" class="form-input" placeholder="例如：2026 Q3 產品規畫會議" />
     </div>
+    <div class="form-group">
+      <label class="form-label" for="custom-vocabulary">專有詞彙 (選填)</label>
+      <input type="text" id="custom-vocabulary" class="form-input" maxlength="1200" placeholder="例如：佳世達、S-ring、IEC 62304" />
+    </div>
     <div class="progress-box" id="progress-box" role="status" aria-live="polite" aria-atomic="true" aria-busy="false">
       <div class="progress-text">
         <div class="loading-spinner" style="width: 14px; height: 14px; border-width: 2px;"></div>
@@ -2022,6 +2026,10 @@
     <div class="form-group" style="margin-bottom: 16px;">
       <label class="form-label" for="rec-title">會議標題 (選填)</label>
       <input type="text" id="rec-title" class="form-input" placeholder="例如：週例會" />
+    </div>
+    <div class="form-group" style="margin-bottom: 16px;">
+      <label class="form-label" for="rec-vocabulary">專有詞彙 (選填)</label>
+      <input type="text" id="rec-vocabulary" class="form-input" maxlength="1200" placeholder="例如：佳世達、S-ring、IEC 62304" />
     </div>
 
     <!-- 控制按鈕 -->
@@ -5042,11 +5050,15 @@ function renderSourceMediaFacts(meeting) {
   const sizeBytes = Number(meeting?.source_media_size_bytes || recording.source_audio_size_bytes || 0);
   const hash = sourceHashPreview(meeting?.source_media_sha256 || recording.source_audio_sha256);
   const restoredLabel = sourceMediaRestoredLabel(meeting);
+  const customVocabularyCount = Array.isArray(recording.custom_vocabulary)
+    ? recording.custom_vocabulary.length
+    : 0;
   const facts = [
     sourceMediaKindLabel(meeting),
     profile,
     sizeBytes > 0 ? formatBytes(sizeBytes) : '',
     hash ? `SHA256 ${hash}` : '',
+    customVocabularyCount ? `📚 ${customVocabularyCount} 個專有詞` : '',
     restoredLabel
   ].filter(Boolean);
   if (!facts.length) return '';
@@ -6085,6 +6097,7 @@ function resetUploadForm() {
   uploadBusy = false;
   fileInput.value = '';
   document.getElementById('custom-title').value = '';
+  document.getElementById('custom-vocabulary').value = '';
   fileNameDisplay.textContent = '點擊選擇檔案，或將檔案拖曳至此';
   fileNameDisplay.style.color = '';
   progressBox.classList.remove('show');
@@ -6169,6 +6182,8 @@ async function startUpload() {
   formData.append('file', selectedFile);
   const customTitle = document.getElementById('custom-title').value.trim();
   if (customTitle) formData.append('title', customTitle);
+  const customVocabulary = document.getElementById('custom-vocabulary').value.trim();
+  if (customVocabulary) formData.append('custom_vocabulary', customVocabulary);
 
   try {
     const res = await fetch(`${API}/upload-media`, { method: 'POST', body: formData });
@@ -6408,6 +6423,7 @@ function resetRecorder() {
   updateRecordingModeOptions();
   syncRecordingProfileOptions();
   document.getElementById('rec-title').value = '';
+  document.getElementById('rec-vocabulary').value = '';
   // 清空 canvas
   const ctx = recVis.getContext('2d');
   ctx.clearRect(0, 0, recVis.width, recVis.height);
@@ -6463,6 +6479,7 @@ function setRecordingConfigurationLocked(locked) {
 
 function setRecordingSubmissionLocked(locked) {
   document.getElementById('rec-title').disabled = locked;
+  document.getElementById('rec-vocabulary').disabled = locked;
 }
 
 function setRecordingProgressBusy(busy) {
@@ -6909,6 +6926,7 @@ async function onRecordingStopped() {
   const ext = (completedMode === 'video' || completedMode === 'screen') ? 'webm' : 'webm';
   const title = document.getElementById('rec-title').value.trim()
     || `現場錄製_${new Date().toLocaleString('zh-TW').replace(/[/:]/g, '-')}`;
+  const customVocabulary = document.getElementById('rec-vocabulary').value.trim();
 
   const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
   const file = new File([blob], `recording.${ext}`, { type: blob.type });
@@ -6949,6 +6967,7 @@ async function onRecordingStopped() {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('title', title);
+  if (customVocabulary) formData.append('custom_vocabulary', customVocabulary);
   formData.append('recording_profile', completedProfileId);
   if (recordingWarning) formData.append('recording_warning', recordingWarning);
 
