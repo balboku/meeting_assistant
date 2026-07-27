@@ -1347,6 +1347,20 @@ class TaskRegressionTests(unittest.TestCase):
             self.assertIn("台語發言請標記為 `[台語]`", prompt)
             self.assertIn("摘要、決議與待辦事項仍統一使用繁體中文", prompt)
 
+    def test_segment_prompt_requires_dense_timestamps_and_no_pattern_completion(self):
+        from backend import tasks
+
+        prompt = tasks._build_segment_prompt(
+            0,
+            2,
+            expected_duration_seconds=302,
+        )
+
+        self.assertIn("這段音訊長度約 05:02", prompt)
+        self.assertIn("每隔 20-45 秒", prompt)
+        self.assertIn("不得根據前一句的句型、數字或討論脈絡自行續寫後文", prompt)
+        self.assertIn("不可跳過仍有說話聲的時間區間", prompt)
+
     def test_cli_prompt_preserves_multilingual_transcript_policy(self):
         import meeting_assistant
 
@@ -8345,8 +8359,63 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
 
         self.assertEqual(
             [(start, end) for _path, start, end in subsegments],
-            [(0, 201), (201, 402), (402, 603)],
+            [(0, 302), (302, 603)],
         )
+
+    def test_speech_backed_timestamp_gap_requires_active_audio(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -20.0
+
+            def __len__(self):
+                return 120_000
+
+            def __getitem__(self, _slice):
+                return self
+
+        transcript = (
+            "[00:00] **[發言者 A]**：開始討論。\n"
+            "[01:40] **[發言者 A]**：繼續討論。"
+        )
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 90_000)]):
+            issues = tasks._speech_backed_timestamp_gap_quality_issues(
+                Path("segment.mp3"),
+                transcript,
+                expected_start_seconds=0,
+                expected_end_seconds=120,
+            )
+
+        self.assertTrue(any("持續語音" in issue for issue in issues))
+        self.assertTrue(any("00:00 至 01:40" in issue for issue in issues))
+
+    def test_speech_backed_timestamp_gap_ignores_actual_silence(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -20.0
+
+            def __len__(self):
+                return 120_000
+
+            def __getitem__(self, _slice):
+                return self
+
+        transcript = (
+            "[00:00] **[發言者 A]**：開始討論。\n"
+            "[01:40] **[發言者 A]**：繼續討論。"
+        )
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[]):
+            issues = tasks._speech_backed_timestamp_gap_quality_issues(
+                Path("segment.mp3"),
+                transcript,
+                expected_start_seconds=0,
+                expected_end_seconds=120,
+            )
+
+        self.assertEqual(issues, [])
 
     def test_audio_preflight_rejects_effectively_silent_recording(self):
         import backend.tasks as tasks

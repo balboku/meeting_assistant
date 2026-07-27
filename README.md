@@ -99,6 +99,10 @@ AUDIO_MIN_DBFS=-55
 AUDIO_NORMALIZE_BELOW_DBFS=-28
 SEGMENT_SILENCE_WINDOW_SECONDS=45
 SEGMENT_OVERLAP_SECONDS=2
+TRANSCRIPT_SPEECH_GAP_VALIDATION=1
+TRANSCRIPT_SPEECH_GAP_SECONDS=75
+TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_SECONDS=12
+TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO=0.25
 ```
 
 安全預設：`/line-webhook` 可公開給 LINE 呼叫；Web 介面與管理 API 允許本機與信任本機網段存取。若要透過 ngrok 或其他公開網路管理，請使用 `APP_API_KEY`。
@@ -200,6 +204,10 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `AUDIO_NORMALIZE_BELOW_DBFS` | `-28` | 平均音量低於此值才進行本機音量正規化。 |
 | `SEGMENT_SILENCE_WINDOW_SECONDS` | `45` | 在目標切點前後搜尋靜音位置的秒數。 |
 | `SEGMENT_OVERLAP_SECONDS` | `2` | 相鄰分段保留的短暫重疊秒數；切點優先位於靜音處。 |
+| `TRANSCRIPT_SPEECH_GAP_VALIDATION` | `1` | 啟用本機語音活動比對；只有長時間未標時間戳的區間仍有說話聲時，才觸發小段補救。 |
+| `TRANSCRIPT_SPEECH_GAP_SECONDS` | `75` | 兩個時間戳相隔超過此秒數時，才進行本機語音活動確認。 |
+| `TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_SECONDS` | `12` | 缺口內至少需有多少秒非靜音音訊，才視為可能漏字。 |
+| `TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO` | `0.25` | 缺口內非靜音音訊比例門檻；避免把真正的會議靜默誤判成漏字。 |
 | `MEETING_ASSISTANT_TRUST_LOCAL_NETWORK` | `1` | 是否允許同 Wi-Fi / 信任本機網段直接開 Web 介面；設為 `0` 時手機網址會改用 `api_key`。 |
 | `MEETING_AUTH_ENABLED` | `0` | 未來帳號/角色權限開關。預設停用；停用時不會要求登入，也不會改變現有 API key / 同網段行為。 |
 | `MEETING_AUTH_USER_HEADER` | `X-Meeting-User` | 未來啟用帳號權限時讀取使用者身分的 HTTP header；角色必須先寫在 `app_users`。 |

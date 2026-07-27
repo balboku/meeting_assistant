@@ -75,7 +75,7 @@ MAX_UPLOAD_WAIT_SECONDS = 600
 POLLING_INTERVAL        = 3
 SEGMENT_MINUTES         = 10
 TIMESTAMP_PATTERN       = re.compile(r"\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\d)\]")
-SEGMENT_CACHE_VERSION   = 4
+SEGMENT_CACHE_VERSION   = 5
 SEGMENT_CACHE_DIRNAME   = "segment_cache"
 SEGMENT_TARGET_SECONDS  = SEGMENT_MINUTES * 60
 SEGMENT_SILENCE_WINDOW_SECONDS = int(os.getenv("SEGMENT_SILENCE_WINDOW_SECONDS", "45"))
@@ -83,7 +83,7 @@ SEGMENT_OVERLAP_SECONDS = int(os.getenv("SEGMENT_OVERLAP_SECONDS", "2"))
 AUDIO_PREPROCESSING_ENABLED = os.getenv("AUDIO_PREPROCESSING", "1").strip().lower() not in {
     "0", "false", "no", "off",
 }
-AUDIO_PREPROCESSING_VERSION = 1
+AUDIO_PREPROCESSING_VERSION = 2
 AUDIO_MIN_DBFS = float(os.getenv("AUDIO_MIN_DBFS", "-55"))
 AUDIO_NORMALIZE_BELOW_DBFS = float(os.getenv("AUDIO_NORMALIZE_BELOW_DBFS", "-28"))
 SEGMENT_COMPLETENESS_GRACE_SECONDS = 120
@@ -114,6 +114,21 @@ SEGMENT_REPEATED_NGRAM_THRESHOLD = 12
 SEGMENT_STRUCTURED_TURN_REPEAT_THRESHOLD = 12
 SEGMENT_STRUCTURED_TURN_MAX_TIMESTAMP_GAP_SECONDS = 15
 SEGMENT_STRUCTURED_TURN_SHORT_GAP_RATIO = 0.75
+TRANSCRIPT_SPEECH_GAP_VALIDATION_ENABLED = os.getenv(
+    "TRANSCRIPT_SPEECH_GAP_VALIDATION", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
+TRANSCRIPT_SPEECH_GAP_SECONDS = max(
+    45,
+    int(os.getenv("TRANSCRIPT_SPEECH_GAP_SECONDS", "75")),
+)
+TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_SECONDS = max(
+    5,
+    int(os.getenv("TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_SECONDS", "12")),
+)
+TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO = min(
+    1.0,
+    max(0.05, float(os.getenv("TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO", "0.25"))),
+)
 TRANSCRIPT_INTEGRITY_MIN_CHAR_RATIO = 0.95
 TRANSCRIPT_INTEGRITY_MIN_TIMESTAMP_RATIO = 0.95
 TRANSCRIPT_OMISSION_MARKERS = (
@@ -1064,6 +1079,92 @@ def _segment_transcript_quality_issues(
     return issues
 
 
+def _speech_backed_timestamp_gap_quality_issues(
+    audio_path: Path,
+    transcript: str,
+    *,
+    expected_start_seconds: int,
+    expected_end_seconds: int,
+) -> list[str]:
+    """Flag long transcript gaps only when the matching audio contains speech.
+
+    Timestamp spacing alone is not enough evidence: a meeting may genuinely be
+    quiet for a while. This local check therefore looks for sustained non-silent
+    audio inside a large gap before treating it as an omitted-transcript signal.
+    """
+    if not TRANSCRIPT_SPEECH_GAP_VALIDATION_ENABLED:
+        return []
+
+    timestamps = sorted({
+        int(match.group("minutes")) * 60 + int(match.group("seconds"))
+        for match in TIMESTAMP_PATTERN.finditer(transcript or "")
+        if expected_start_seconds <= (
+            int(match.group("minutes")) * 60 + int(match.group("seconds"))
+        ) <= expected_end_seconds
+    })
+    if len(timestamps) < 2:
+        return []
+
+    candidate_gaps = [
+        (previous, current)
+        for previous, current in zip(timestamps, timestamps[1:])
+        if current - previous > TRANSCRIPT_SPEECH_GAP_SECONDS
+    ]
+    if not candidate_gaps:
+        return []
+
+    try:
+        _configure_ffmpeg_tools()
+        from pydub import AudioSegment, silence
+
+        audio = AudioSegment.from_file(str(audio_path))
+        dbfs = float(audio.dBFS)
+        if not math.isfinite(dbfs):
+            return []
+        silence_threshold = max(-55.0, min(-32.0, dbfs - 14.0))
+    except Exception as exc:
+        logger.debug(
+            "無法檢查逐字稿時間缺口的音訊活動（%s）：%s",
+            audio_path.name,
+            str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__,
+        )
+        return []
+
+    issues: list[str] = []
+    for previous, current in candidate_gaps:
+        # A timestamp represents an approximate point in a spoken turn. Trim a
+        # little at both boundaries so its own words do not count as a gap.
+        relative_start_ms = max(0, (previous - expected_start_seconds) * 1000 + 1500)
+        relative_end_ms = min(len(audio), (current - expected_start_seconds) * 1000 - 1500)
+        if relative_end_ms <= relative_start_ms:
+            continue
+
+        gap_audio = audio[relative_start_ms:relative_end_ms]
+        gap_duration_ms = len(gap_audio)
+        if gap_duration_ms <= 0:
+            continue
+        active_ranges = silence.detect_nonsilent(
+            gap_audio,
+            min_silence_len=500,
+            silence_thresh=silence_threshold,
+            seek_step=100,
+        )
+        active_ms = sum(max(0, end - start) for start, end in active_ranges)
+        active_ratio = active_ms / max(1, gap_duration_ms)
+        if (
+            active_ms >= TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_SECONDS * 1000
+            and active_ratio >= TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO
+        ):
+            issues.append(
+                "音訊含持續語音但時間戳在 "
+                f"{_format_mmss(previous)} 至 {_format_mmss(current)} 間隔 "
+                f"{current - previous} 秒"
+            )
+        if len(issues) >= 2:
+            break
+    return issues
+
+
 def _raise_if_segment_transcript_incomplete(
     transcript: str,
     segment_index: int,
@@ -1072,6 +1173,7 @@ def _raise_if_segment_transcript_incomplete(
     expected_start_seconds: Optional[int] = None,
     expected_end_seconds: Optional[int] = None,
     is_last_segment: Optional[bool] = None,
+    audio_path: Optional[Path] = None,
 ) -> None:
     issues = _segment_transcript_quality_issues(
         transcript=transcript,
@@ -1082,6 +1184,17 @@ def _raise_if_segment_transcript_incomplete(
         expected_end_seconds=expected_end_seconds,
         is_last_segment=is_last_segment,
     )
+    if (
+        audio_path is not None
+        and expected_start_seconds is not None
+        and expected_end_seconds is not None
+    ):
+        issues.extend(_speech_backed_timestamp_gap_quality_issues(
+            audio_path,
+            transcript,
+            expected_start_seconds=expected_start_seconds,
+            expected_end_seconds=expected_end_seconds,
+        ))
     if issues:
         raise RuntimeError(
             f"第 {segment_index + 1}/{total_segments} 段轉錄不完整："
@@ -2050,6 +2163,61 @@ def _coerce_audio_slices(items: list[Any]) -> list[AudioSlice]:
     return slices
 
 
+def _recovery_subsegment_boundaries(audio, chunk_ms: int) -> list[int]:
+    """Balance recovery chunks and move only their internal cuts onto silence."""
+    duration_ms = len(audio)
+    if duration_ms <= chunk_ms:
+        return [0, duration_ms]
+
+    # A 603-second segment should become two roughly 302-second chunks, not
+    # three 201-second chunks. It avoids needless nested retries while still
+    # keeping recovery chunks close to the requested target.
+    part_count = max(2, int(math.floor(duration_ms / chunk_ms + 0.5)))
+    evenly_spaced = [
+        round(index * duration_ms / part_count)
+        for index in range(part_count + 1)
+    ]
+    try:
+        from pydub import silence
+
+        dbfs = float(audio.dBFS)
+        if not math.isfinite(dbfs):
+            return evenly_spaced
+        silence_threshold = max(-55.0, min(-32.0, dbfs - 14.0))
+        average_chunk_ms = duration_ms / part_count
+        search_ms = min(30_000, max(5_000, int(average_chunk_ms * 0.2)))
+        min_chunk_ms = max(1_000, int(average_chunk_ms * 0.6))
+        boundaries = [0]
+        for index in range(1, part_count):
+            ideal = evenly_spaced[index]
+            remaining_chunks = part_count - index
+            lower_bound = max(boundaries[-1] + min_chunk_ms, ideal - search_ms)
+            upper_bound = min(
+                duration_ms - remaining_chunks * min_chunk_ms,
+                ideal + search_ms,
+            )
+            if upper_bound <= lower_bound:
+                boundaries.append(ideal)
+                continue
+            quiet_ranges = silence.detect_silence(
+                audio[lower_bound:upper_bound],
+                min_silence_len=350,
+                silence_thresh=silence_threshold,
+                seek_step=25,
+            )
+            candidates = [
+                lower_bound + (start + end) // 2
+                for start, end in quiet_ranges
+            ]
+            cut = min(candidates, key=lambda value: abs(value - ideal)) if candidates else ideal
+            boundaries.append(cut)
+        boundaries.append(duration_ms)
+        return boundaries
+    except Exception:
+        # Keep recovery available even when a codec exposes only basic slicing.
+        return evenly_spaced
+
+
 def _split_audio_to_subsegments(audio_path: Path, chunk_seconds: int) -> list[tuple[Path, int, int]]:
     """
     將已切出的分段再切成更小段，回傳 (路徑, 起始秒, 結束秒)。
@@ -2069,17 +2237,15 @@ def _split_audio_to_subsegments(audio_path: Path, chunk_seconds: int) -> list[tu
         end_seconds = max(1, (duration_ms + 999) // 1000)
         return [(audio_path, 0, end_seconds)]
 
-    # Split evenly instead of leaving a tiny final chunk (for example,
-    # 603 seconds used to become 300 + 300 + 3). Very short tails are highly
-    # prone to semantic continuation when an STT model receives prior context.
-    part_count = max(2, math.ceil(duration_ms / chunk_ms))
-    boundaries = [round(index * duration_ms / part_count) for index in range(part_count + 1)]
+    boundaries = _recovery_subsegment_boundaries(audio, chunk_ms)
     subsegments: list[tuple[Path, int, int]] = []
     for i, (start_ms, end_ms) in enumerate(zip(boundaries, boundaries[1:])):
         chunk = audio[start_ms:end_ms]
         sub_path = audio_path.parent / f"_sub_{audio_path.stem}_{chunk_seconds}s_{i:03d}.mp3"
         chunk.export(str(sub_path), format="mp3", parameters=["-q:a", "3"])
-        subsegments.append((sub_path, start_ms // 1000, max(1, (end_ms + 999) // 1000)))
+        start_seconds = max(0, int(round(start_ms / 1000)))
+        end_seconds = max(start_seconds + 1, int(round(end_ms / 1000)))
+        subsegments.append((sub_path, start_seconds, end_seconds))
 
     logger.info(
         "🔪 補救切段：%s 已切成 %s 個小段（每段約 %s 秒）",
@@ -2123,6 +2289,7 @@ def _transcribe_segment_with_recovery(
             job_id,
             model,
             speaker_context=speaker_context,
+            expected_duration_seconds=duration_seconds,
         )
         transcript = _offset_transcript_timestamps(transcript, offset_seconds)
 
@@ -2135,6 +2302,7 @@ def _transcribe_segment_with_recovery(
                 expected_start_seconds=offset_seconds,
                 expected_end_seconds=offset_seconds + duration_seconds,
                 is_last_segment=is_last_segment,
+                audio_path=seg_path,
             )
             return transcript
         except RuntimeError as exc:
@@ -2160,6 +2328,7 @@ def _transcribe_segment_with_recovery(
                 job_id,
                 model,
                 speaker_context=speaker_context,
+                expected_duration_seconds=duration_seconds,
             )
             return _offset_transcript_timestamps(transcript, offset_seconds)
         raise quality_error
@@ -2289,6 +2458,7 @@ def _transcribe_segment_with_recovery(
             expected_start_seconds=offset_seconds,
             expected_end_seconds=offset_seconds + duration_seconds,
             is_last_segment=is_last_segment,
+            audio_path=seg_path,
         )
     except RuntimeError as exc:
         if quality_events is not None:
@@ -2311,10 +2481,16 @@ def _transcribe_segment(
     job_id: str,
     model: str,
     speaker_context: str = "",
+    expected_duration_seconds: Optional[int] = None,
 ) -> str:
     """上傳單一分段並請 Gemini 輸出逐字稿（純文字，不含摘要）"""
 
-    SEGMENT_PROMPT = _build_segment_prompt(seg_index, total_segs, speaker_context=speaker_context)
+    SEGMENT_PROMPT = _build_segment_prompt(
+        seg_index,
+        total_segs,
+        speaker_context=speaker_context,
+        expected_duration_seconds=expected_duration_seconds,
+    )
 
     mime = SUPPORTED_MEDIA_FORMATS.get(seg_path.suffix.lower(), "audio/mpeg")
     uploaded = client.files.upload(
@@ -2340,8 +2516,8 @@ def _transcribe_segment(
         model=model,
         contents=[uploaded, SEGMENT_PROMPT],
         config=types.GenerateContentConfig(
-            temperature=0.1,
-            top_p=0.9,
+            temperature=0.0,
+            top_p=0.8,
             max_output_tokens=65536,
         )
     )
@@ -2356,10 +2532,22 @@ def _transcribe_segment(
     return _normalize_domain_terms(clean_hallucinated_loops(raw_text))
 
 
-def _build_segment_prompt(seg_index: int, total_segs: int, speaker_context: str = "") -> str:
+def _build_segment_prompt(
+    seg_index: int,
+    total_segs: int,
+    speaker_context: str = "",
+    expected_duration_seconds: Optional[int] = None,
+) -> str:
+    duration_note = ""
+    if expected_duration_seconds:
+        duration_note = (
+            f"這段音訊長度約 {_format_mmss(max(1, expected_duration_seconds))}；"
+            "時間戳一律從 [00:00] 起算。\n"
+        )
     prompt = f"""
 請聽這段音訊分段（第 {seg_index + 1} 段，共 {total_segs} 段）並進行轉錄。
 請直接輸出這段音訊的逐字稿內容，不需加上標題。
+{duration_note}
 
 {MULTILINGUAL_TRANSCRIPT_POLICY}
 
@@ -2371,7 +2559,7 @@ def _build_segment_prompt(seg_index: int, total_segs: int, speaker_context: str 
 1. 每當「發言者更換」或是「同一人發言超過3句話」時，**必須強制換段落**。
 2. 每一個新段落的最前面，**必須強制標註發言者**（如 **[發言者 A]**：、**[發言者 B]**：；只有明確聽到姓名時才可使用姓名）。
 3. 絕對不可將不同人的對話、或過長的單人發言混在同一大段中。
-4. 每隔 30-60 秒，在段落開頭加上時間戳記（相對於本段開始）。
+4. 每隔 20-45 秒，在段落開頭加上時間戳記（相對於本段開始）；說話持續時不可超過 45 秒未標記時間戳。
 
 範例格式：
 [00:00] **[發言者 A]**：這部分的重點在於...
@@ -2381,7 +2569,9 @@ def _build_segment_prompt(seg_index: int, total_segs: int, speaker_context: str 
 
 > ⚠️ 注意事項：
 > 1. 逐字稿應盡量完整，保留語氣詞，不要省略或摘要化。
-> 2. **嚴格禁止重複迴圈**：遇到無聲、背景音樂、雜訊或音檔結束時，請直接結束輸出。絕對不要反覆輸出相同的單字。
+> 2. **嚴格禁止重複迴圈**：遇到無聲、背景音樂、雜訊或音檔結束時，請直接結束輸出。絕對不要反覆輸出相同的單字、句子或數列。
+> 3. 只轉寫實際聽到的內容；不得根據前一句的句型、數字或討論脈絡自行續寫後文。聽不清楚時可保守標記為「[聽不清]」，不可猜測補完。
+> 4. 不可跳過仍有說話聲的時間區間。若發言中斷後重新開始，請以新的時間戳與發言者段落接續。
 """.strip()
     if speaker_context.strip():
         prompt += (
@@ -3455,7 +3645,18 @@ def process_audio_task(
                     transcript = existing_segment_transcripts.get(0)
             if transcript is None:
                 update_job_status(job_id, "processing", "📝 正在轉錄音訊逐字稿...")
-                transcript = _transcribe_segment(client, transcription_path, 0, total_segs, job_id, model)
+                transcript = _transcribe_segment(
+                    client,
+                    transcription_path,
+                    0,
+                    total_segs,
+                    job_id,
+                    model,
+                    expected_duration_seconds=max(
+                        1,
+                        audio_slice.end_seconds - audio_slice.start_seconds,
+                    ),
+                )
                 _raise_if_segment_transcript_incomplete(
                     transcript=transcript,
                     segment_index=0,
@@ -3463,6 +3664,7 @@ def process_audio_task(
                     segment_minutes=SEGMENT_MINUTES,
                     expected_start_seconds=audio_slice.start_seconds,
                     expected_end_seconds=audio_slice.end_seconds,
+                    audio_path=transcription_path,
                 )
                 _save_segment_transcript_cache(
                     output_dir=output_dir,
