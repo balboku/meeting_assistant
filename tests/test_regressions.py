@@ -9360,6 +9360,35 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(ranges[0]["end_seconds"], 2470)
         self.assertTrue(any("數列延伸" in issue for issue in ranges[0]["issues"]))
 
+    def test_repetition_repair_ranges_accepts_numeric_loop_with_only_acknowledgements(self):
+        from backend import tasks
+
+        rows = []
+        for index in range(12):
+            rows.append(
+                f"[40:{index * 5:02d}] **[發言者 A]**：第 {index} 項的分數為 {100 + index}。"
+            )
+            if index < 11:
+                rows.append(
+                    f"[40:{index * 5 + 2:02d}] **[發言者 B]**：對。"
+                )
+        transcript = "\n".join([
+            "[39:50] **[發言者 C]**：先確認計算方式。",
+            *rows,
+            "[41:10] **[發言者 C]**：回到正常討論。",
+        ])
+
+        ranges = tasks._transcript_repetition_repair_ranges(
+            transcript,
+            expected_start_seconds=2340,
+            expected_end_seconds=3000,
+        )
+
+        self.assertEqual(len(ranges), 1)
+        self.assertEqual(ranges[0]["start_seconds"], 2400)
+        self.assertEqual(ranges[0]["end_seconds"], 2470)
+        self.assertTrue(any("夾帶確認詞" in issue for issue in ranges[0]["issues"]))
+
     def test_repetition_repair_does_not_remove_interleaved_numeric_discussion(self):
         from backend import tasks
 

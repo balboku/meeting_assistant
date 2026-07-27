@@ -114,6 +114,9 @@ SEGMENT_REPEATED_NGRAM_THRESHOLD = 12
 SEGMENT_STRUCTURED_TURN_REPEAT_THRESHOLD = 12
 SEGMENT_STRUCTURED_TURN_MAX_TIMESTAMP_GAP_SECONDS = 15
 SEGMENT_STRUCTURED_TURN_SHORT_GAP_RATIO = 0.75
+STRUCTURED_NUMERIC_LOOP_ACKNOWLEDGEMENTS = frozenset({
+    "對", "是", "好", "嗯", "恩", "ok", "收到", "了解",
+})
 TRANSCRIPT_SPEECH_GAP_VALIDATION_ENABLED = os.getenv(
     "TRANSCRIPT_SPEECH_GAP_VALIDATION", "1"
 ).strip().lower() not in {"0", "false", "no", "off"}
@@ -996,6 +999,11 @@ def _timestamped_turn_repair_range(
     }
 
 
+def _is_numeric_loop_acknowledgement(turn: dict[str, Any]) -> bool:
+    normalized = str(turn.get("normalized") or "").casefold()
+    return normalized in STRUCTURED_NUMERIC_LOOP_ACKNOWLEDGEMENTS
+
+
 def _transcript_repetition_repair_ranges(
     transcript: str,
     *,
@@ -1086,8 +1094,9 @@ def _transcript_repetition_repair_ranges(
         index = end_index + 1
 
     # Numeric completion hallucinations are only repairable when the repeated
-    # template itself occupies one contiguous run. Interleaved discussion is
-    # intentionally left for a full rerun so valid text is never removed.
+    # template occupies one run, optionally with nothing but terse
+    # acknowledgements between rows. Interleaved discussion is intentionally
+    # left for a full rerun so valid text is never removed.
     number_pattern = re.compile(r"[+-]?\d+(?:[.,]\d+)?%?")
     templates: dict[str, list[tuple[int, tuple[str, ...], int]]] = {}
     for index, turn in enumerate(turns):
@@ -1105,6 +1114,16 @@ def _transcript_repetition_repair_ranges(
     for rows in templates.values():
         row_indices = [row[0] for row in rows]
         timestamps = [row[2] for row in rows]
+        numeric_row_indices = set(row_indices)
+        span_indices = list(range(row_indices[0], row_indices[-1] + 1))
+        interleaved_indices = [
+            index for index in span_indices if index not in numeric_row_indices
+        ]
+        has_only_acknowledgements_between_rows = (
+            bool(interleaved_indices)
+            and len(rows) >= len(interleaved_indices)
+            and all(_is_numeric_loop_acknowledgement(turns[index]) for index in interleaved_indices)
+        )
         timestamp_gaps = [
             current - previous
             for previous, current in zip(timestamps, timestamps[1:])
@@ -1120,7 +1139,10 @@ def _transcript_repetition_repair_ranges(
             and len({row[1] for row in rows}) >= SEGMENT_STRUCTURED_TURN_REPEAT_THRESHOLD
             and len(timestamps) >= SEGMENT_STRUCTURED_TURN_REPEAT_THRESHOLD
             and short_gap_ratio >= SEGMENT_STRUCTURED_TURN_SHORT_GAP_RATIO
-            and row_indices == list(range(row_indices[0], row_indices[-1] + 1))
+            and (
+                not interleaved_indices
+                or has_only_acknowledgements_between_rows
+            )
         ):
             continue
         repair_range = _timestamped_turn_repair_range(
@@ -1129,7 +1151,11 @@ def _transcript_repetition_repair_ranges(
             end_index=row_indices[-1],
             expected_start_seconds=expected_start_seconds,
             expected_end_seconds=expected_end_seconds,
-            issue="分段疑似數列延伸轉錄幻覺",
+            issue=(
+                "分段疑似數列延伸轉錄幻覺（夾帶確認詞）"
+                if has_only_acknowledgements_between_rows
+                else "分段疑似數列延伸轉錄幻覺"
+            ),
         )
         if repair_range:
             ranges.append(repair_range)
