@@ -2513,7 +2513,11 @@ def apply_quality_preview_fields(
         record["quality_review_segment_details"]
     )
     review_summary = str(record.get("quality_review_segment_summary") or "").strip()
-    if review_summary and not warning_preview:
+    if review_summary and record["quality_review_segment_details"]:
+        # A concrete range that can be rerun is more useful than a generic
+        # recording warning when both are present.
+        warning_preview = f"逐字稿品質警示：問題位置：{review_summary}"
+    elif review_summary and not warning_preview:
         warning_preview = f"逐字稿品質警示：問題位置：{review_summary}"
     elif review_summary and _has_standard_review_location_warning(str(warning_preview or "")):
         warning_preview = f"逐字稿品質警示：問題位置：{review_summary}"

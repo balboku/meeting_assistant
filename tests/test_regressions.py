@@ -5479,9 +5479,9 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertIsNone(listed["quality_label"])
         self.assertEqual(listed["quality_warning_count"], len(listed["quality_warning_text"].splitlines()))
         self.assertGreaterEqual(listed["quality_warning_count"], 4)
-        self.assertEqual(
+        self.assertIn(
+            "逐字稿品質警示：問題位置：第 1 段 00:00-10:00",
             listed["quality_warning_preview"],
-            "摘要品質警示：討論摘要未使用 D 編號，較難與決議及待辦事項串聯",
         )
         self.assertEqual(listed["quality_review_segments"], ["第 1 段"])
         self.assertEqual(listed["quality_review_segment_count"], 1)
@@ -6098,7 +6098,10 @@ class SearchRegressionTests(unittest.TestCase):
         searched = database.search_meetings("Generic Warning Repeat")[0]
 
         self.assertEqual(listed["quality_warning_count"], 2)
-        self.assertEqual(listed["quality_warning_preview"], quality_report["warnings"][0])
+        self.assertIn(
+            "逐字稿品質警示：問題位置：第 3 段 20:00-30:00",
+            listed["quality_warning_preview"],
+        )
         self.assertEqual(listed["quality_review_segments"], ["第 3 段"])
         self.assertEqual(listed["quality_review_segment_count"], 1)
         self.assertIn("逐字稿品質警示：問題位置：第 3 段 20:00-30:00", listed["quality_warning_text"])
@@ -6686,6 +6689,39 @@ title: 會議記錄 - 已有問題位置
         self.assertEqual(content.count("逐字稿品質警示：問題位置"), 1)
         self.assertNotIn("逐字稿品質複核提示", content)
 
+    def test_export_quality_note_refreshes_stale_note_after_local_recheck(self):
+        from backend.exporter import content_with_quality_review_note
+
+        markdown = """---
+title: 會議記錄 - 已完成本機檢核
+---
+
+> 逐字稿品質複核提示：第 5 段：舊的問題位置。請依原始錄音/錄影時間複核，必要時於系統重跑問題分段。
+
+## 一、討論摘要 (Discussion Summary)
+
+摘要內容。
+"""
+        content = content_with_quality_review_note({
+            "full_content": markdown,
+            "quality_report": {
+                "review_segments": [{
+                    "index": 6,
+                    "label": "第 7 段",
+                    "start_seconds": 3589,
+                    "end_seconds": 3841,
+                    "issues": ["音訊含持續語音但時間戳在 59:54 至 64:01 間隔 247 秒"],
+                }],
+                "recheck": {"rechecked_at": "2026-07-27 16:17:10"},
+            },
+        })
+
+        self.assertNotIn("第 5 段：舊的問題位置", content)
+        self.assertIn("逐字稿品質複核提示", content)
+        self.assertIn("第 7 段 59:49-64:01", content)
+        self.assertEqual(content.count("逐字稿品質複核提示"), 1)
+        self.assertLess(content.index("逐字稿品質複核提示"), content.index("一、討論摘要"))
+
     def test_markdown_endpoint_adds_quality_review_note(self):
         import backend.main as main
 
@@ -6818,6 +6854,37 @@ class JobQueueWorkerRegressionTests(unittest.TestCase):
         update_mock.assert_called_once_with(71, refreshed_report)
         self.assertEqual(status_mock.call_args.args[1], "done")
         self.assertIn("未使用 Gemini", status_mock.call_args.args[2])
+
+    def test_summary_linkage_quality_warnings_replace_stale_values(self):
+        from backend.tasks import _refresh_quality_report_summary_warnings
+
+        report = {
+            "label": "良好",
+            "warnings": [
+                "錄音正常。",
+                "摘要品質警示：過期的摘要檢查結果",
+            ],
+        }
+        content = (
+            "## 一、討論摘要 (Discussion Summary)\n\n摘要。\n\n"
+            "## 二、最終決議 (Final Decisions)\n\n決議。\n\n"
+            "## 三、待辦事項 (Action Items)\n\n待辦。\n\n"
+            "## 四、完整逐字稿 (Verbatim Transcript)\n\n[00:00] **[發言者 A]**：內容。"
+        )
+
+        _refresh_quality_report_summary_warnings(report, content)
+
+        self.assertIn("錄音正常。", report["warnings"])
+        self.assertNotIn("摘要品質警示：過期的摘要檢查結果", report["warnings"])
+        self.assertEqual(
+            report["warnings"][-3:],
+            [
+                "摘要品質警示：討論摘要未使用 D 編號，較難與決議及待辦事項串聯",
+                "摘要品質警示：最終決議未使用 R 編號，較難被待辦事項引用",
+                "摘要品質警示：待辦事項未使用 A 編號，後續追蹤較不清楚",
+            ],
+        )
+        self.assertEqual(report["label"], "可用，建議抽查")
 
     def test_audio_worker_keeps_source_file_for_retry_and_terminal_failure(self):
         database, tmpdir = self._isolated_database()
@@ -10080,6 +10147,55 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(len(report["segments"]), 2)
         self.assertEqual(report["segments"][1]["start_seconds"], 600)
         self.assertIn("已重建分段", report["label"])
+
+    def test_meeting_detail_refreshes_stale_quality_note_after_local_recheck(self):
+        import backend.main as main
+
+        record = {
+            "id": 61,
+            "title": "已重檢會議",
+            "date": "2026/07/27",
+            "source_audio": "meeting.webm",
+            "output_path": "meeting.md",
+            "summary": "摘要",
+            "job_id": None,
+            "quality_score": 85,
+            "quality_label": "可用，建議抽查",
+            "created_at": "2026-07-27 16:17:10",
+            "full_content": (
+                "---\ntitle: 已重檢會議\n---\n\n"
+                "> 逐字稿品質複核提示：第 5 段：舊的問題位置。請依原始錄音/錄影時間複核，必要時於系統重跑問題分段。\n\n"
+                "## 一、討論摘要 (Discussion Summary)\n摘要\n"
+                "## 二、最終決議 (Final Decisions)\n決議\n"
+                "## 三、待辦事項 (Action Items)\n| # | 任務描述 | 負責人 | 期限 | 優先級 |\n|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 7 段｜59:49 – 64:01】\n[59:54] **[發言者 A]**：仍有內容。"
+            ),
+            "quality_report": {
+                "score": 85,
+                "label": "可用，建議抽查",
+                "warnings": [],
+                "segments": [{"index": 6, "start_seconds": 3589, "end_seconds": 3841, "issues": []}],
+                "review_segments": [{
+                    "index": 6,
+                    "label": "第 7 段",
+                    "start_seconds": 3589,
+                    "end_seconds": 3841,
+                    "issues": ["音訊含持續語音但時間戳在 59:54 至 64:01 間隔 247 秒"],
+                }],
+                "recheck": {"rechecked_at": "2026-07-27 16:17:10"},
+            },
+        }
+
+        with mock.patch.object(main, "get_meeting", return_value=record):
+            response = asgi_request(main.app, "GET", "/meetings/61")
+
+        self.assertEqual(response.status_code, 200)
+        full_content = response.json()["full_content"]
+        self.assertNotIn("第 5 段：舊的問題位置", full_content)
+        self.assertIn("逐字稿品質複核提示", full_content)
+        self.assertIn("第 7 段 59:49-64:01", full_content)
+        self.assertEqual(full_content.count("逐字稿品質複核提示"), 1)
 
     def test_meeting_detail_flags_unsafe_legacy_transcript_in_quality_report(self):
         import backend.main as main

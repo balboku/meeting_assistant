@@ -133,6 +133,8 @@ from backend.tasks import (
     _extract_post_transcript_sections,
     _full_transcript_quality_issues,
     _extract_summary_preview,
+    _meeting_summary_linkage_quality_issues,
+    _refresh_quality_report_summary_warnings,
     _meeting_content_quality_issues,
     normalize_client_recording_warning,
     _replace_transcript_section,
@@ -2729,46 +2731,7 @@ def _detail_ids(text: str, prefix: str) -> set[str]:
 
 
 def _detail_summary_quality_issues(full_content: str) -> list[str]:
-    summary = _detail_section(
-        full_content,
-        ("討論摘要", "Discussion Summary"),
-        ("最終決議", "Final Decisions"),
-    )
-    decisions = _detail_section(
-        full_content,
-        ("最終決議", "Final Decisions"),
-        ("待辦事項", "Action Items"),
-    )
-    actions = _detail_section(
-        full_content,
-        ("待辦事項", "Action Items"),
-        ("完整逐字稿", "Verbatim Transcript"),
-    )
-
-    issues: list[str] = []
-    summary_ids = _detail_ids(summary, "D")
-    decision_ids = _detail_ids(decisions, "R")
-    action_ids = _detail_ids(actions, "A")
-    decision_discussion_refs = _detail_ids(decisions, "D")
-    action_discussion_refs = _detail_ids(actions, "D")
-    action_decision_refs = _detail_ids(actions, "R")
-
-    if summary.strip() and not summary_ids:
-        issues.append("討論摘要未使用 D 編號，較難與決議及待辦事項串聯")
-    if decisions.strip() and not decision_ids:
-        issues.append("最終決議未使用 R 編號，較難被待辦事項引用")
-    if actions.strip() and not action_ids:
-        issues.append("待辦事項未使用 A 編號，後續追蹤較不清楚")
-
-    missing_d_refs = sorted((decision_discussion_refs | action_discussion_refs) - summary_ids)
-    if missing_d_refs:
-        issues.append(f"決議或待辦引用不存在的討論編號：{', '.join(missing_d_refs)}")
-
-    missing_r_refs = sorted(action_decision_refs - decision_ids)
-    if missing_r_refs:
-        issues.append(f"待辦事項引用不存在的決議編號：{', '.join(missing_r_refs)}")
-
-    return issues
+    return _meeting_summary_linkage_quality_issues(full_content)
 
 
 def _detail_quality_warning_lines(text: object) -> list[str]:
@@ -2919,9 +2882,12 @@ async def get_meeting_detail(meeting_id: int):
     if not record:
         raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
 
-    full_content = record.get("full_content") or ""
-    transcript = _extract_transcript_section_body(full_content) or ""
     quality_report = dict(record.get("quality_report") or {})
+    full_content = content_with_quality_review_note({
+        **record,
+        "quality_report": quality_report or record.get("quality_report"),
+    })
+    transcript = _extract_transcript_section_body(full_content) or ""
     base_quality_fields = apply_quality_preview_fields(
         {
             **record,
@@ -3072,7 +3038,7 @@ async def get_meeting_detail(meeting_id: int):
         quality_review_segment_count=quality_fields.get("quality_review_segment_count") or 0,
         quality_review_rerunnable_segments=quality_fields.get("quality_review_rerunnable_segments") or [],
         created_at=record["created_at"],
-        full_content=record["full_content"],
+        full_content=full_content,
         quality_report=quality_report or None,
         source_media_type=source_media_type,
         source_media_available=bool(source_path),
@@ -3106,6 +3072,10 @@ async def recheck_meeting_transcript_quality(meeting_id: int):
         transcript,
         record.get("quality_report"),
         source_audio_path=source_path,
+    )
+    _refresh_quality_report_summary_warnings(
+        quality_report,
+        record.get("full_content") or "",
     )
     recheck_metadata = quality_report.get("recheck")
     if not isinstance(recheck_metadata, dict):

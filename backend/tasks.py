@@ -2307,6 +2307,71 @@ _extract_summary_preview = _extract_summary_preview_v2
 _meeting_content_quality_issues = _meeting_content_quality_issues_v2
 
 
+def _meeting_summary_linkage_quality_issues(full_content: str) -> list[str]:
+    """Return non-model checks for D/R/A traceability in a meeting note."""
+    def section(heading_terms: tuple[str, ...], next_terms: tuple[str, ...]) -> str:
+        heading_pattern = "|".join(re.escape(term) for term in heading_terms)
+        next_pattern = "|".join(re.escape(term) for term in next_terms)
+        if next_pattern:
+            pattern = (
+                rf"^##\s*[^\n]*(?:{heading_pattern})[^\n]*\n(?P<body>.*?)"
+                rf"(?=^##\s*[^\n]*(?:{next_pattern})|\Z)"
+            )
+        else:
+            pattern = rf"^##\s*[^\n]*(?:{heading_pattern})[^\n]*\n(?P<body>.*)\Z"
+        match = re.search(pattern, full_content or "", flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+        return match.group("body").strip() if match else ""
+
+    def identifiers(text: str, prefix: str) -> set[str]:
+        return set(re.findall(rf"\b{re.escape(prefix)}\d+\b", text or ""))
+
+    summary = section(("討論摘要", "Discussion Summary"), ("最終決議", "Final Decisions"))
+    decisions = section(("最終決議", "Final Decisions"), ("待辦事項", "Action Items"))
+    actions = section(("待辦事項", "Action Items"), ("完整逐字稿", "Verbatim Transcript"))
+    summary_ids = identifiers(summary, "D")
+    decision_ids = identifiers(decisions, "R")
+    action_ids = identifiers(actions, "A")
+    decision_discussion_refs = identifiers(decisions, "D")
+    action_discussion_refs = identifiers(actions, "D")
+    action_decision_refs = identifiers(actions, "R")
+    issues: list[str] = []
+    if summary.strip() and not summary_ids:
+        issues.append("討論摘要未使用 D 編號，較難與決議及待辦事項串聯")
+    if decisions.strip() and not decision_ids:
+        issues.append("最終決議未使用 R 編號，較難被待辦事項引用")
+    if actions.strip() and not action_ids:
+        issues.append("待辦事項未使用 A 編號，後續追蹤較不清楚")
+    missing_d_refs = sorted((decision_discussion_refs | action_discussion_refs) - summary_ids)
+    if missing_d_refs:
+        issues.append(f"決議或待辦引用不存在的討論編號：{', '.join(missing_d_refs)}")
+    missing_r_refs = sorted(action_decision_refs - decision_ids)
+    if missing_r_refs:
+        issues.append(f"待辦事項引用不存在的決議編號：{', '.join(missing_r_refs)}")
+    return issues
+
+
+def _refresh_quality_report_summary_warnings(
+    quality_report: dict[str, Any],
+    full_content: str,
+) -> dict[str, Any]:
+    """Keep persisted summary-quality warnings aligned with the Markdown."""
+    report = quality_report if isinstance(quality_report, dict) else {}
+    existing_warnings = [
+        str(warning).strip()
+        for warning in report.get("warnings") or []
+        if str(warning).strip()
+        and not str(warning).strip().startswith("摘要品質警示：")
+    ]
+    summary_warnings = [
+        f"摘要品質警示：{issue}"
+        for issue in _meeting_summary_linkage_quality_issues(full_content)
+    ]
+    report["warnings"] = list(dict.fromkeys([*existing_warnings, *summary_warnings]))
+    if summary_warnings and str(report.get("label") or "").strip() == "良好":
+        report["label"] = "可用，建議抽查"
+    return report
+
+
 def _finalize_meeting_content(meeting_content: str, full_transcript: str, job_id: str) -> str:
     """Apply final transcript preservation and fail closed on unsafe output."""
     finalized = _replace_transcript_section(meeting_content, full_transcript)
@@ -4283,6 +4348,10 @@ def recheck_all_saved_meeting_quality_reports(
                 record.get("quality_report"),
                 source_audio_path=source_audio_path,
             )
+            _refresh_quality_report_summary_warnings(
+                quality_report,
+                record.get("full_content") or "",
+            )
             recheck_metadata = quality_report.get("recheck")
             if not isinstance(recheck_metadata, dict):
                 recheck_metadata = {}
@@ -4979,6 +5048,7 @@ def process_audio_task(
             audio_report["warnings"] = audio_warnings
 
         quality_report = _build_quality_report(audio_report, segment_report, full_transcript)
+        _refresh_quality_report_summary_warnings(quality_report, meeting_content)
         quality_report["summary_quality_mode"] = "high" if high_quality_summary else "standard"
         try:
             source_audio_size = audio_path.stat().st_size

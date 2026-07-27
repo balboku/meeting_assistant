@@ -19,6 +19,10 @@ ACTION_TABLE_WIDTHS_DXA = [550, 5450, 1550, 1450, 850]
 ACTION_LINKED_TABLE_WIDTHS_DXA = [500, 850, 850, 4000, 1250, 1300, 750]
 DEFAULT_TABLE_WIDTH_DXA = sum(ACTION_TABLE_WIDTHS_DXA)
 BODY_FONT = "Microsoft JhengHei"
+_QUALITY_REVIEW_NOTE_PATTERN = re.compile(
+    r"(?m)^>\s*(?:⚠️\s*)?"
+    r"(?:逐字稿品質複核提示|逐字稿品質警示：問題位置)[^\n]*(?:\n{1,2})?"
+)
 
 
 def _template_path() -> Path:
@@ -87,7 +91,14 @@ def _set_cell_text(cell, text: str):
 def content_with_quality_review_note(meeting_record: dict) -> str:
     content = str(meeting_record.get("full_content") or "")
     summary = _quality_review_export_summary(meeting_record)
-    if not summary or _has_quality_review_note(content):
+    has_existing_note = _has_quality_review_note(content)
+    if _quality_review_note_needs_refresh(meeting_record):
+        # A local audio recheck may have moved the actionable ranges since the
+        # original Markdown was created. Keep the transcript untouched while
+        # replacing only its generated, top-of-document review note.
+        content = _remove_quality_review_note(content)
+        has_existing_note = False
+    if not summary or has_existing_note:
         return content
     note = (
         f"> 逐字稿品質複核提示：{summary}。"
@@ -102,6 +113,22 @@ def _has_quality_review_note(markdown: str) -> bool:
         "逐字稿品質複核提示" in head
         or "逐字稿品質警示：問題位置" in head
     )
+
+
+def _quality_review_note_needs_refresh(meeting_record: dict) -> bool:
+    """Return whether a persisted local recheck supersedes the old note."""
+    quality_report = meeting_record.get("quality_report")
+    if not isinstance(quality_report, dict):
+        return False
+    recheck = quality_report.get("recheck")
+    if not isinstance(recheck, dict):
+        return False
+    return bool(str(recheck.get("rechecked_at") or "").strip())
+
+
+def _remove_quality_review_note(markdown: str) -> str:
+    """Remove only generated quality notes, preserving all meeting content."""
+    return _QUALITY_REVIEW_NOTE_PATTERN.sub("", str(markdown or ""), count=1)
 
 
 def _content_with_quality_review_note(meeting_record: dict) -> str:
