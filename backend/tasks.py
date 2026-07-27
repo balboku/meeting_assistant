@@ -138,6 +138,7 @@ SEGMENT_REPETITION_RUN_THRESHOLD = 8
 SEGMENT_REPETITION_RATIO_THRESHOLD = 0.5
 SEGMENT_SHORT_TURN_MAX_CHARS = 12
 SEGMENT_SHORT_TURN_RUN_THRESHOLD = 20
+SEGMENT_TINY_TURN_RUN_THRESHOLD = 16
 SEGMENT_LONG_TURN_CHARS = 1200
 SEGMENT_MAX_NORMALIZED_TURN_CHARS = 8000
 SEGMENT_REPEATED_NGRAM_CHARS = 18
@@ -914,15 +915,17 @@ def _long_turn_repetition_quality_issue(transcript: str) -> Optional[str]:
 
 
 def _short_turn_repetition_quality_issue(transcript: str) -> Optional[str]:
-    longest = 1
     current = 1
-    longest_turn = ""
+    longest_tiny_turn = ""
+    longest_tiny_run = 0
+    longest_short_turn = ""
+    longest_short_run = 0
     previous = ""
     for raw_line in (transcript or "").splitlines():
         line = _normalized_transcript_line_content(raw_line)
         if not line:
             continue
-        if not (2 <= len(line) <= SEGMENT_SHORT_TURN_MAX_CHARS):
+        if not (1 <= len(line) <= SEGMENT_SHORT_TURN_MAX_CHARS):
             previous = ""
             current = 1
             continue
@@ -933,14 +936,22 @@ def _short_turn_repetition_quality_issue(transcript: str) -> Optional[str]:
             current = 1
             previous = line
 
-        if current > longest:
-            longest = current
-            longest_turn = line
+        if len(line) == 1 and current > longest_tiny_run:
+            longest_tiny_turn = line
+            longest_tiny_run = current
+        elif len(line) > 1 and current > longest_short_run:
+            longest_short_turn = line
+            longest_short_run = current
 
-    if longest >= SEGMENT_SHORT_TURN_RUN_THRESHOLD:
+    if longest_tiny_run >= SEGMENT_TINY_TURN_RUN_THRESHOLD:
+        return (
+            "分段疑似單字重複轉錄幻覺"
+            f"（「{longest_tiny_turn}」連續重複 {longest_tiny_run} 次）"
+        )
+    if longest_short_run >= SEGMENT_SHORT_TURN_RUN_THRESHOLD:
         return (
             "分段疑似短句重複轉錄幻覺"
-            f"（「{longest_turn}」連續重複 {longest} 次）"
+            f"（「{longest_short_turn}」連續重複 {longest_short_run} 次）"
         )
     return None
 
@@ -1193,6 +1204,10 @@ def _transcript_repetition_repair_ranges(
                 break
             end_index += 1
         count = end_index - index + 1
+        is_tiny_turn_loop = (
+            len(normalized) == 1
+            and count >= SEGMENT_TINY_TURN_RUN_THRESHOLD
+        )
         is_short_turn_loop = (
             2 <= len(normalized) <= SEGMENT_SHORT_TURN_MAX_CHARS
             and count >= SEGMENT_SHORT_TURN_RUN_THRESHOLD
@@ -1201,7 +1216,7 @@ def _transcript_repetition_repair_ranges(
             len(normalized) >= 12
             and count >= SEGMENT_REPETITION_RUN_THRESHOLD
         )
-        if is_short_turn_loop or is_normal_turn_loop:
+        if is_tiny_turn_loop or is_short_turn_loop or is_normal_turn_loop:
             repair_range = _timestamped_turn_repair_range(
                 turns,
                 start_index=index,
@@ -1209,7 +1224,9 @@ def _transcript_repetition_repair_ranges(
                 expected_start_seconds=expected_start_seconds,
                 expected_end_seconds=expected_end_seconds,
                 issue=(
-                    "分段疑似短句重複轉錄幻覺"
+                    "分段疑似單字重複轉錄幻覺"
+                    if is_tiny_turn_loop
+                    else "分段疑似短句重複轉錄幻覺"
                     if is_short_turn_loop
                     else "分段疑似重複轉錄幻覺"
                 ) + f"（連續重複 {count} 句）",

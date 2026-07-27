@@ -103,8 +103,10 @@ TRANSCRIPT_SPEECH_GAP_VALIDATION=1
 TRANSCRIPT_SPEECH_GAP_SECONDS=75
 TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_SECONDS=12
 TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO=0.25
+TRANSCRIPT_SPEECH_GAP_MAX_RANGES=6
 TRANSCRIPT_REPAIR_CONTEXT_SECONDS=6
 TRANSCRIPT_REPAIR_DIRECT_SPLIT_SECONDS=180
+TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS=180
 ```
 
 安全預設：`/line-webhook` 可公開給 LINE 呼叫；Web 介面與管理 API 允許本機與信任本機網段存取。若要透過 ngrok 或其他公開網路管理，請使用 `APP_API_KEY`。
@@ -211,8 +213,10 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `TRANSCRIPT_SPEECH_GAP_SECONDS` | `75` | 兩個時間戳相隔超過此秒數時，才進行本機語音活動確認。 |
 | `TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_SECONDS` | `12` | 缺口內至少需有多少秒非靜音音訊，才視為可能漏字。 |
 | `TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO` | `0.25` | 缺口內非靜音音訊比例門檻；避免把真正的會議靜默誤判成漏字。 |
+| `TRANSCRIPT_SPEECH_GAP_MAX_RANGES` | `6` | 每個分段最多保留幾個已由本機音訊活動確認的漏字位置；超過局部補救上限時改用穩定小段重跑。 |
 | `TRANSCRIPT_REPAIR_CONTEXT_SECONDS` | `6` | 局部補救時額外提供缺口前後語境，改善句子與發言者承接；系統只合併缺口附近的時間戳內容。 |
 | `TRANSCRIPT_REPAIR_DIRECT_SPLIT_SECONDS` | `180` | 局部補救音檔達此秒數時，略過整段嘗試並直接切成小段轉錄，降低長缺口再次截斷或重複轉錄的機率。 |
+| `TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS` | `180` | 已確認有語音卻漏字或有多個可定位異常時，穩定重跑使用的目標切段秒數。 |
 | `MEETING_ASSISTANT_TRUST_LOCAL_NETWORK` | `1` | 是否允許同 Wi-Fi / 信任本機網段直接開 Web 介面；設為 `0` 時手機網址會改用 `api_key`。 |
 | `MEETING_AUTH_ENABLED` | `0` | 未來帳號/角色權限開關。預設停用；停用時不會要求登入，也不會改變現有 API key / 同網段行為。 |
 | `MEETING_AUTH_USER_HEADER` | `X-Meeting-User` | 未來啟用帳號權限時讀取使用者身分的 HTTP header；角色必須先寫在 `app_users`。 |

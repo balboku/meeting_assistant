@@ -1891,6 +1891,45 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertTrue(any("短句重複轉錄幻覺" in issue for issue in user_phrase_issues))
         self.assertTrue(any("因為我是結所以我領車" in issue for issue in user_phrase_issues))
 
+    def test_segment_transcript_quality_rejects_extreme_tiny_acknowledgement_loop(self):
+        from backend.tasks import _segment_transcript_quality_issues
+
+        transcript = "\n".join(
+            f"[24:{22 + index:02d}] **[發言者 A]**：對"
+            for index in range(20)
+        ) + "\n[25:00] **[發言者 A]**：回到正常討論。"
+
+        issues = _segment_transcript_quality_issues(
+            transcript,
+            segment_index=2,
+            total_segments=5,
+            expected_start_seconds=1200,
+            expected_end_seconds=1800,
+        )
+
+        self.assertTrue(any("單字重複轉錄幻覺" in issue for issue in issues))
+        self.assertTrue(any("對」連續重複 20 次" in issue for issue in issues))
+
+    def test_transcript_repetition_repair_ranges_locate_tiny_acknowledgement_loop(self):
+        from backend.tasks import (
+            _segment_transcript_quality_issues,
+            _transcript_repetition_repair_ranges,
+        )
+
+        transcript = "\n".join(
+            f"[24:{22 + index:02d}] **[發言者 A]**：對"
+            for index in range(20)
+        ) + "\n[25:00] **[發言者 A]**：回到正常討論。"
+
+        ranges = _transcript_repetition_repair_ranges(
+            transcript,
+            expected_start_seconds=1200,
+            expected_end_seconds=1800,
+        )
+
+        self.assertTrue(any("單字重複轉錄幻覺" in issue for item in ranges for issue in item["issues"]))
+        self.assertTrue(any(item["start_seconds"] <= 1462 <= item["end_seconds"] for item in ranges))
+
     def test_segment_transcript_quality_rejects_structured_numeric_continuation(self):
         from backend.tasks import _segment_transcript_quality_issues
 
