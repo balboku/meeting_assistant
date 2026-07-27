@@ -137,6 +137,11 @@ TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO = min(
     1.0,
     max(0.05, float(os.getenv("TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO", "0.25"))),
 )
+TRANSCRIPT_REPAIR_CONTEXT_SECONDS = max(
+    0,
+    int(os.getenv("TRANSCRIPT_REPAIR_CONTEXT_SECONDS", "6")),
+)
+TRANSCRIPT_REPAIR_MERGE_GUARD_SECONDS = 2
 TRANSCRIPT_INTEGRITY_MIN_CHAR_RATIO = 0.95
 TRANSCRIPT_INTEGRITY_MIN_TIMESTAMP_RATIO = 0.95
 TRANSCRIPT_OMISSION_MARKERS = (
@@ -2911,8 +2916,10 @@ def _export_audio_gap_segment(
     segment_start_seconds: int,
     gap_start_seconds: int,
     gap_end_seconds: int,
+    context_before_seconds: int = 0,
+    context_after_seconds: int = 0,
 ) -> Optional[Path]:
-    """Export a small absolute-time audio interval from an already split segment."""
+    """Export a repair interval with optional surrounding audio context."""
     _configure_ffmpeg_tools()
     from pydub import AudioSegment
 
@@ -2920,8 +2927,14 @@ def _export_audio_gap_segment(
     if ffmpeg_path and Path(ffmpeg_path).is_file():
         AudioSegment.converter = ffmpeg_path
     audio = AudioSegment.from_file(str(segment_path))
-    start_ms = max(0, (gap_start_seconds - segment_start_seconds) * 1000)
-    end_ms = min(len(audio), (gap_end_seconds - segment_start_seconds) * 1000)
+    start_ms = max(
+        0,
+        (gap_start_seconds - max(0, context_before_seconds) - segment_start_seconds) * 1000,
+    )
+    end_ms = min(
+        len(audio),
+        (gap_end_seconds + max(0, context_after_seconds) - segment_start_seconds) * 1000,
+    )
     if end_ms <= start_ms:
         return None
     gap_path = segment_path.parent / (
@@ -2929,6 +2942,23 @@ def _export_audio_gap_segment(
     )
     audio[start_ms:end_ms].export(str(gap_path), format="mp3", parameters=["-q:a", "3"])
     return gap_path
+
+
+def _transcript_repair_window_text(
+    transcript: str,
+    *,
+    start_seconds: int,
+    end_seconds: int,
+) -> str:
+    """Keep only timestamp blocks that can safely replace one repair window."""
+    lower_bound = max(0, start_seconds - TRANSCRIPT_REPAIR_MERGE_GUARD_SECONDS)
+    upper_bound = end_seconds + TRANSCRIPT_REPAIR_MERGE_GUARD_SECONDS
+    _prefix, blocks = _timestamped_transcript_blocks_in_order(transcript)
+    return "\n\n".join(
+        str(block["body"])
+        for block in blocks
+        if lower_bound <= int(block["timestamp_seconds"]) <= upper_bound
+    ).strip()
 
 
 def _timestamped_transcript_blocks(transcript: str) -> tuple[list[str], dict[int, str]]:
@@ -3021,6 +3051,14 @@ def _repair_existing_segment_timestamp_gaps(
             gap_end_seconds = min(segment_end_seconds, int(gap["end_seconds"]))
             if gap_end_seconds <= gap_start_seconds:
                 continue
+            context_start_seconds = max(
+                segment_start_seconds,
+                gap_start_seconds - TRANSCRIPT_REPAIR_CONTEXT_SECONDS,
+            )
+            context_end_seconds = min(
+                segment_end_seconds,
+                gap_end_seconds + TRANSCRIPT_REPAIR_CONTEXT_SECONDS,
+            )
             update_job_status(
                 job_id,
                 "processing",
@@ -3034,6 +3072,8 @@ def _repair_existing_segment_timestamp_gaps(
                 segment_start_seconds=segment_start_seconds,
                 gap_start_seconds=gap_start_seconds,
                 gap_end_seconds=gap_end_seconds,
+                context_before_seconds=gap_start_seconds - context_start_seconds,
+                context_after_seconds=context_end_seconds - gap_end_seconds,
             )
             if gap_path is None:
                 return None, []
@@ -3051,9 +3091,9 @@ def _repair_existing_segment_timestamp_gaps(
                 total_segments,
                 job_id,
                 model,
-                offset_seconds=gap_start_seconds,
-                duration_seconds=gap_end_seconds - gap_start_seconds,
-                is_last_segment=is_last_segment and gap_end_seconds >= segment_end_seconds,
+                offset_seconds=context_start_seconds,
+                duration_seconds=context_end_seconds - context_start_seconds,
+                is_last_segment=is_last_segment and context_end_seconds >= segment_end_seconds,
                 speaker_context=gap_context,
                 temp_segment_paths=temp_segment_paths,
                 quality_events=quality_events,
@@ -3062,7 +3102,11 @@ def _repair_existing_segment_timestamp_gaps(
             repairs.append({
                 "start_seconds": gap_start_seconds,
                 "end_seconds": gap_end_seconds,
-                "transcript": repaired_transcript,
+                "transcript": _transcript_repair_window_text(
+                    repaired_transcript,
+                    start_seconds=gap_start_seconds,
+                    end_seconds=gap_end_seconds,
+                ),
             })
     except Exception as exc:
         logger.warning(

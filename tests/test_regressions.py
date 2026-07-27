@@ -8501,12 +8501,16 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             "[12:00] **[發言者 A]**：應被取代的舊內容。\n\n"
             "[15:00] **[發言者 B]**：保留的後文。"
         )
-        repaired = "[11:00] **[發言者 A]**：補回的討論內容。"
+        repaired = (
+            "[10:54] **[發言者 A]**：僅供語境辨識的前文。\n\n"
+            "[11:00] **[發言者 A]**：補回的討論內容。\n\n"
+            "[13:06] **[發言者 B]**：僅供語境辨識的後文。"
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             gap_path = Path(tmpdir) / "gap.mp3"
             gap_path.write_bytes(b"gap")
-            with mock.patch.object(tasks, "_export_audio_gap_segment", return_value=gap_path), \
-                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", return_value=repaired), \
+            with mock.patch.object(tasks, "_export_audio_gap_segment", return_value=gap_path) as export_mock, \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", return_value=repaired) as transcribe_mock, \
                  mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
                  mock.patch.object(tasks, "update_job_status"):
                 result, notes = tasks._repair_existing_segment_timestamp_gaps(
@@ -8533,8 +8537,13 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("保留的前文", result)
         self.assertIn("補回的討論內容", result)
         self.assertIn("保留的後文", result)
+        self.assertNotIn("僅供語境辨識", result)
         self.assertNotIn("應被取代的舊內容", result)
         self.assertEqual(notes, ["已局部補救時間缺口：11:00-13:00"])
+        self.assertEqual(export_mock.call_args.kwargs["context_before_seconds"], 6)
+        self.assertEqual(export_mock.call_args.kwargs["context_after_seconds"], 6)
+        self.assertEqual(transcribe_mock.call_args.kwargs["offset_seconds"], 654)
+        self.assertEqual(transcribe_mock.call_args.kwargs["duration_seconds"], 132)
 
     def test_quality_recheck_keeps_retry_history_but_only_reviews_current_issues(self):
         from backend import tasks
