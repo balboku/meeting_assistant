@@ -1587,6 +1587,48 @@ def _raise_if_segment_transcript_incomplete(
         )
 
 
+def _delivery_blocking_segment_quality_issues(
+    segment_report: list[dict[str, Any]],
+) -> list[str]:
+    """Return only final issues that make a meeting conclusion unsafe to emit."""
+    blocking_markers = (
+        "轉錄內容為空",
+        "自動過濾/截斷",
+        "轉錄幻覺",
+        "早於段首",
+        "超過段尾",
+        "音訊含持續語音",
+    )
+    findings: list[str] = []
+    for position, segment in enumerate(segment_report or []):
+        if not isinstance(segment, dict):
+            continue
+        try:
+            index = int(segment.get("index", position))
+        except (TypeError, ValueError):
+            index = position
+        for issue in segment.get("issues") or []:
+            text = str(issue or "").strip()
+            if text and any(marker in text for marker in blocking_markers):
+                findings.append(f"第 {index + 1} 段：{text}")
+    return list(dict.fromkeys(findings))
+
+
+def _raise_if_delivery_blocked_by_segment_quality(
+    segment_report: list[dict[str, Any]],
+) -> None:
+    """Keep an unfinished transcript out of the summary and decision pipeline."""
+    findings = _delivery_blocking_segment_quality_issues(segment_report)
+    if not findings:
+        return
+    preview = "；".join(findings[:3])
+    if len(findings) > 3:
+        preview += f"；另有 {len(findings) - 3} 項"
+    raise RuntimeError(
+        "完整逐字稿仍含可證實的轉錄異常，暫不產出會議結論：" + preview
+    )
+
+
 def _record_segment_reuse_blocking_issues(
     transcript: str,
     *,
@@ -4595,6 +4637,7 @@ def process_audio_task(
 
             _raise_if_cancelled(job_id)
             full_transcript = "\n".join(all_transcripts)
+            _raise_if_delivery_blocked_by_segment_quality(segment_report)
             _raise_if_full_transcript_unsafe(full_transcript, job_id)
 
             # ------------------------------------------------------------------
@@ -4620,6 +4663,7 @@ def process_audio_task(
             logger.info(f"[{job_id}] 🎙 轉錄單段音檔（{file_size_mb:.2f} MB；模型：{model}）...")
 
             transcript = None
+            transcript_source = ""
             if 0 not in forced_segments:
                 transcript = _load_segment_transcript_cache(
                     output_dir=output_dir,
@@ -4627,8 +4671,31 @@ def process_audio_task(
                     segment_index=0,
                     context=segment_cache_context,
                 )
+                transcript_source = "cache" if transcript is not None else ""
                 if transcript is None:
                     transcript = existing_segment_transcripts.get(0)
+                    transcript_source = "record" if transcript is not None else ""
+                if transcript is not None:
+                    reuse_issues = _segment_transcript_current_quality_issues(
+                        transcript,
+                        0,
+                        total_segs,
+                        segment_minutes=SEGMENT_MINUTES,
+                        expected_start_seconds=audio_slice.start_seconds,
+                        expected_end_seconds=audio_slice.end_seconds,
+                        is_last_segment=True,
+                        audio_path=transcription_path,
+                    )
+                    if reuse_issues:
+                        source_label = "轉錄快取" if transcript_source == "cache" else "既有逐字稿"
+                        logger.warning(
+                            "[%s] ⚠️ 單段%s仍有品質問題，改為重新轉錄：%s",
+                            job_id,
+                            source_label,
+                            "；".join(reuse_issues),
+                        )
+                        transcript = None
+                        transcript_source = ""
             if transcript is None:
                 update_job_status(job_id, "processing", "📝 正在轉錄音訊逐字稿...")
                 transcript = _transcribe_segment(
@@ -4662,8 +4729,9 @@ def process_audio_task(
                 update_job_status(job_id, "processing", "✅ 已完成音訊逐字稿轉錄")
                 segment_status = "rerun" if 0 in forced_segments else "transcribed"
             else:
-                logger.info(f"[{job_id}] ♻️  使用單段轉錄快取")
-                update_job_status(job_id, "processing", "♻️ 已載入既有逐字稿轉錄")
+                source_label = "轉錄快取" if transcript_source == "cache" else "既有逐字稿"
+                logger.info(f"[{job_id}] ♻️  使用單段{source_label}")
+                update_job_status(job_id, "processing", f"♻️ 已載入單段{source_label}")
                 segment_status = "reused"
 
             segment_report.append({
