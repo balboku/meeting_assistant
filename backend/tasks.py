@@ -1597,6 +1597,7 @@ def _delivery_blocking_segment_quality_issues(
         "轉錄幻覺",
         "早於段首",
         "超過段尾",
+        "非最後分段缺少時間戳",
         "音訊含持續語音",
     )
     findings: list[str] = []
@@ -1639,9 +1640,10 @@ def _record_segment_reuse_blocking_issues(
 ) -> list[str]:
     """Return high-risk issues that make an old record unsafe to reuse.
 
-    Legacy records may have sparse timestamps, so incompleteness alone remains
-    reviewable. Hallucination markers and impossible time bounds must instead
-    force a fresh transcription, even when that segment was not selected.
+    Legacy records may have sparse timestamps, so an early final timestamp
+    alone remains reviewable. A non-final segment with no timestamp at all,
+    however, cannot be safely placed in the meeting timeline and must be
+    transcribed again alongside hallucination markers and impossible bounds.
     """
     issues = _segment_transcript_quality_issues(
         transcript=transcript,
@@ -1657,6 +1659,7 @@ def _record_segment_reuse_blocking_issues(
         "自動過濾/截斷",
         "早於段首",
         "超過段尾",
+        "非最後分段缺少時間戳",
     )
     return [issue for issue in issues if any(marker in issue for marker in blocking_markers)]
 

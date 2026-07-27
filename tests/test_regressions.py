@@ -1933,7 +1933,7 @@ class TaskRegressionTests(unittest.TestCase):
 
         self.assertTrue(any("超過段尾 40:00：40:40" in issue for issue in issues))
 
-    def test_old_record_reuse_blocks_hallucination_but_allows_sparse_legacy_timestamps(self):
+    def test_old_record_reuse_blocks_hallucination_and_missing_timestamps_but_allows_sparse_legacy_timestamps(self):
         from backend.tasks import _record_segment_reuse_blocking_issues
 
         structured = "\n".join(
@@ -1944,6 +1944,7 @@ class TaskRegressionTests(unittest.TestCase):
             for index in range(12)
         )
         sparse_legacy = "[20:00] **[發言者 A]**：舊紀錄只有少量時間戳。"
+        missing_timestamps = "**[發言者 A]**：這一段完全沒有可對應音訊的時間戳。"
 
         blocked = _record_segment_reuse_blocking_issues(
             structured,
@@ -1959,9 +1960,17 @@ class TaskRegressionTests(unittest.TestCase):
             expected_start_seconds=1198,
             expected_end_seconds=1800,
         )
+        missing_timestamp_blocked = _record_segment_reuse_blocking_issues(
+            missing_timestamps,
+            segment_index=2,
+            total_segments=6,
+            expected_start_seconds=1198,
+            expected_end_seconds=1800,
+        )
 
         self.assertTrue(any("數列延伸轉錄幻覺" in issue for issue in blocked))
         self.assertEqual(allowed, [])
+        self.assertIn("非最後分段缺少時間戳", missing_timestamp_blocked)
 
     def test_recovery_revalidates_combined_children_for_structured_hallucination(self):
         from backend import tasks
@@ -9493,6 +9502,15 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             "issues": ["非最後分段時間戳只到 07:30，未接近段尾 10:00"],
         }]
         self.assertEqual(tasks._delivery_blocking_segment_quality_issues(safe_tail_warning), [])
+
+        missing_timestamp = [{
+            "index": 0,
+            "issues": ["非最後分段缺少時間戳"],
+        }]
+        self.assertEqual(
+            tasks._delivery_blocking_segment_quality_issues(missing_timestamp),
+            ["第 1 段：非最後分段缺少時間戳"],
+        )
 
         unsafe = [{
             "index": 1,
