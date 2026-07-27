@@ -148,6 +148,10 @@ TRANSCRIPT_REPAIR_DIRECT_SPLIT_SECONDS = max(
     60,
     int(os.getenv("TRANSCRIPT_REPAIR_DIRECT_SPLIT_SECONDS", "180")),
 )
+TRANSCRIPT_AUTO_REPAIR_MAX_RANGES = max(
+    1,
+    int(os.getenv("TRANSCRIPT_AUTO_REPAIR_MAX_RANGES", "2")),
+)
 TRANSCRIPT_REPAIR_MERGE_GUARD_SECONDS = 2
 TRANSCRIPT_INTEGRITY_MIN_CHAR_RATIO = 0.95
 TRANSCRIPT_INTEGRITY_MIN_TIMESTAMP_RATIO = 0.95
@@ -2780,6 +2784,7 @@ def _transcribe_segment_with_recovery(
     temp_segment_paths: Optional[list[Path]] = None,
     quality_events: Optional[list[dict[str, Any]]] = None,
     direct_recovery: bool = False,
+    allow_targeted_repair: bool = True,
 ) -> str:
     quality_error: Optional[RuntimeError] = None
     if not direct_recovery:
@@ -2816,6 +2821,61 @@ def _transcribe_segment_with_recovery(
                     "end_seconds": offset_seconds + duration_seconds,
                     "issue": str(quality_error),
                 })
+            if allow_targeted_repair:
+                repair_ranges = _coalesce_transcript_repair_ranges([
+                    *_speech_backed_timestamp_gap_quality_ranges(
+                        seg_path,
+                        transcript,
+                        expected_start_seconds=offset_seconds,
+                        expected_end_seconds=offset_seconds + duration_seconds,
+                    ),
+                    *_transcript_repetition_repair_ranges(
+                        transcript,
+                        expected_start_seconds=offset_seconds,
+                        expected_end_seconds=offset_seconds + duration_seconds,
+                    ),
+                ])
+                if 0 < len(repair_ranges) <= TRANSCRIPT_AUTO_REPAIR_MAX_RANGES:
+                    repaired_transcript, repair_notes = _repair_existing_segment_timestamp_gaps(
+                        client,
+                        seg_path,
+                        transcript,
+                        gap_ranges=repair_ranges,
+                        segment_index=seg_index,
+                        total_segments=total_segs,
+                        job_id=job_id,
+                        model=model,
+                        segment_start_seconds=offset_seconds,
+                        segment_end_seconds=offset_seconds + duration_seconds,
+                        is_last_segment=is_last_segment,
+                        speaker_context=speaker_context,
+                        temp_segment_paths=temp_segment_paths,
+                        quality_events=quality_events,
+                    )
+                    if repaired_transcript is not None:
+                        if quality_events is not None:
+                            quality_events.append({
+                                "segment_index": seg_index,
+                                "start_seconds": offset_seconds,
+                                "end_seconds": offset_seconds + duration_seconds,
+                                "issue": "局部補救：" + "；".join(repair_notes),
+                            })
+                        logger.info(
+                            "[%s] 🩹 第 %s/%s 段已局部補救首次轉錄異常：%s",
+                            job_id,
+                            seg_index + 1,
+                            total_segs,
+                            "；".join(repair_notes),
+                        )
+                        return repaired_transcript
+                elif len(repair_ranges) > TRANSCRIPT_AUTO_REPAIR_MAX_RANGES:
+                    logger.warning(
+                        "[%s] ⚠️ 第 %s/%s 段首次轉錄有 %s 個可定位異常，略過局部補救並改用小段穩定重跑",
+                        job_id,
+                        seg_index + 1,
+                        total_segs,
+                        len(repair_ranges),
+                    )
     else:
         quality_error = RuntimeError("指定重跑分段使用小段穩定轉錄模式")
 
@@ -2892,6 +2952,7 @@ def _transcribe_segment_with_recovery(
                 temp_segment_paths=temp_segment_paths,
                 quality_events=quality_events,
                 direct_recovery=False,
+                allow_targeted_repair=allow_targeted_repair,
             )
         raise quality_error
 
@@ -2911,6 +2972,7 @@ def _transcribe_segment_with_recovery(
                 temp_segment_paths=temp_segment_paths,
                 quality_events=quality_events,
                 direct_recovery=False,
+                allow_targeted_repair=allow_targeted_repair,
             )
         raise quality_error
 
@@ -2945,6 +3007,7 @@ def _transcribe_segment_with_recovery(
             speaker_context=child_context,
             temp_segment_paths=temp_segment_paths,
             quality_events=quality_events,
+            allow_targeted_repair=allow_targeted_repair,
         )
         recovered.append(child_transcript)
 
@@ -3227,6 +3290,7 @@ def _repair_existing_segment_timestamp_gaps(
                 temp_segment_paths=temp_segment_paths,
                 quality_events=quality_events,
                 direct_recovery=direct_recovery,
+                allow_targeted_repair=False,
             )
             repairs.append({
                 "start_seconds": gap_start_seconds,
@@ -4780,6 +4844,7 @@ def process_audio_task(
                         quality_events=segment_quality_events,
                         direct_recovery=use_stable_rerun,
                     )
+
                 kept_existing_after_rerun = False
                 kept_existing_reason = ""
                 kept_existing_issues: list[str] = []

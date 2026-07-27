@@ -9633,6 +9633,218 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                 quality_report["segments"][1]["recovery_notes"],
             )
 
+    def test_fresh_segment_with_speech_gap_automatically_uses_targeted_repair(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{"topic": "首次轉錄補救", "summary": "完成", "evidence_timecodes": ["10:00"]}],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                return type("Response", (), {"text": json.dumps(summary_payload, ensure_ascii=False)})()
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            slices = []
+            for index in range(2):
+                segment_path = root / f"_seg_meeting_{index:03d}.mp3"
+                segment_path.write_bytes(b"segment")
+                slices.append(tasks.AudioSlice(segment_path, index * 600, (index + 1) * 600))
+            initial_second = (
+                "[10:00] **[發言者 B]**：第二段開頭。\n"
+                "[19:40] **[發言者 B]**：第二段收尾。"
+            )
+            initial_second_raw = (
+                "[00:00] **[發言者 B]**：第二段開頭。\n"
+                "[09:40] **[發言者 B]**：第二段收尾。"
+            )
+            repaired_second = (
+                "[10:00] **[發言者 B]**：第二段開頭。\n"
+                "[11:00] **[發言者 B]**：自動補回遺漏內容。\n"
+                "[19:40] **[發言者 B]**：第二段收尾。"
+            )
+
+            def automatic_ranges(_segment_path, transcript, **_kwargs):
+                if transcript == initial_second:
+                    return [{
+                        "start_seconds": 660,
+                        "end_seconds": 780,
+                        "issue": "音訊含持續語音但時間戳在 11:00 至 13:00 間隔 120 秒",
+                    }]
+                return []
+
+            def reject_initial_gap(transcript, **_kwargs):
+                if transcript == initial_second:
+                    raise RuntimeError("第 2/2 段轉錄不完整：音訊含持續語音但時間戳有缺口")
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=slices), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", side_effect=automatic_ranges), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_repair_existing_segment_timestamp_gaps", return_value=(repaired_second, ["已局部補救時間缺口：11:00-13:00"])) as repair_mock, \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_transcribe_segment", side_effect=["[00:00] **[發言者 A]**：第一段正常。", initial_second_raw]) as transcribe_mock, \
+                 mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete", side_effect=reject_initial_gap), \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting") as save_meeting_mock:
+                output_path = tasks.process_audio_task(
+                    job_id="fresh-gap-auto-repair-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertEqual(transcribe_mock.call_count, 2)
+            repair_mock.assert_called_once()
+            self.assertEqual(repair_mock.call_args.args[2], initial_second)
+            output_text = output_path.read_text(encoding="utf-8")
+            self.assertIn("自動補回遺漏內容", output_text)
+            self.assertIn(
+                "已局部補救時間缺口：11:00-13:00",
+                "\n".join(
+                    save_meeting_mock.call_args.kwargs["quality_report"]["segments"][1]["recovery_notes"]
+                ),
+            )
+
+    def test_fresh_segment_falls_back_to_stable_rerun_after_failed_targeted_repair(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{"topic": "首次補救失敗", "summary": "完成", "evidence_timecodes": ["10:00"]}],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                return type("Response", (), {"text": json.dumps(summary_payload, ensure_ascii=False)})()
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            slices = []
+            for index in range(2):
+                segment_path = root / f"_seg_meeting_{index:03d}.mp3"
+                segment_path.write_bytes(b"segment")
+                slices.append(tasks.AudioSlice(segment_path, index * 600, (index + 1) * 600))
+            initial_second = "[10:00] **[發言者 B]**：有時間缺口的初稿。"
+            initial_second_raw = "[00:00] **[發言者 B]**：有時間缺口的初稿。"
+
+            def automatic_ranges(_segment_path, transcript, **_kwargs):
+                if transcript == initial_second:
+                    return [{
+                        "start_seconds": 660,
+                        "end_seconds": 780,
+                        "issue": "音訊含持續語音但時間戳在 11:00 至 13:00 間隔 120 秒",
+                    }]
+                return []
+
+            def reject_initial_gap(transcript, **_kwargs):
+                if transcript == initial_second:
+                    raise RuntimeError("第 2/2 段轉錄不完整：音訊含持續語音但時間戳有缺口")
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=slices), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", side_effect=automatic_ranges), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_repair_existing_segment_timestamp_gaps", return_value=(None, [])) as repair_mock, \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_transcribe_segment", side_effect=["[00:00] **[發言者 A]**：第一段正常。", initial_second_raw, "[00:00] **[發言者 B]**：穩定重跑後的內容。", "[04:40] **[發言者 B]**：第二段收尾。"] ) as transcribe_mock, \
+                 mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete", side_effect=reject_initial_gap), \
+                 mock.patch.object(tasks, "_split_audio_to_subsegments", return_value=[(slices[1].path, 0, 300), (slices[1].path, 300, 600)]) as split_mock, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting") as save_meeting_mock:
+                output_path = tasks.process_audio_task(
+                    job_id="fresh-gap-auto-fallback-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                )
+
+            self.assertIsNotNone(output_path)
+            repair_mock.assert_called_once()
+            split_mock.assert_called_once()
+            self.assertEqual(transcribe_mock.call_count, 4)
+            output_text = output_path.read_text(encoding="utf-8")
+            self.assertIn("穩定重跑後的內容", output_text)
+            self.assertNotIn("有時間缺口的初稿", output_text)
+            recovery_notes = save_meeting_mock.call_args.kwargs["quality_report"]["segments"][1]["recovery_notes"]
+            self.assertTrue(any(note.startswith("曾觸發轉錄補救") for note in recovery_notes))
+
+    def test_fresh_segment_with_many_targeted_faults_uses_bounded_stable_rerun(self):
+        from backend import tasks
+
+        initial = "[00:00] **[發言者 A]**：初稿有多個缺口。"
+        ranges = [
+            {
+                "start_seconds": 60 + index * 120,
+                "end_seconds": 100 + index * 120,
+                "issue": f"音訊含持續語音但時間戳有缺口 {index + 1}",
+            }
+            for index in range(tasks.TRANSCRIPT_AUTO_REPAIR_MAX_RANGES + 1)
+        ]
+
+        def reject_initial_gap(transcript, **_kwargs):
+            if transcript == initial:
+                raise RuntimeError("第 1/1 段轉錄不完整：音訊含持續語音但時間戳有缺口")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            segment = Path(tmpdir) / "segment.mp3"
+            segment.write_bytes(b"segment")
+            with mock.patch.object(
+                tasks,
+                "_transcribe_segment",
+                side_effect=[
+                    initial,
+                    "[00:00] **[發言者 A]**：穩定重跑前半段。",
+                    "[00:00] **[發言者 B]**：穩定重跑後半段。",
+                ],
+            ) as transcribe_mock, \
+                 mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete", side_effect=reject_initial_gap), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", return_value=ranges), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_repair_existing_segment_timestamp_gaps") as repair_mock, \
+                 mock.patch.object(tasks, "_split_audio_to_subsegments", return_value=[(segment, 0, 300), (segment, 300, 600)]) as split_mock, \
+                 mock.patch.object(tasks, "update_job_status"):
+                transcript = tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    0,
+                    1,
+                    "bounded-auto-repair-job",
+                    "gemini-test",
+                    offset_seconds=0,
+                    duration_seconds=600,
+                    is_last_segment=True,
+                )
+
+        repair_mock.assert_not_called()
+        split_mock.assert_called_once()
+        self.assertEqual(transcribe_mock.call_count, 3)
+        self.assertIn("穩定重跑前半段", transcript)
+        self.assertIn("穩定重跑後半段", transcript)
+
     def test_failed_localized_repair_does_not_restore_known_bad_transcript(self):
         from backend import tasks
 
