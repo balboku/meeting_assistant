@@ -8659,6 +8659,24 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             [(0, 302), (302, 603)],
         )
 
+    def test_confirmed_speech_gap_prefers_shorter_stable_recovery_chunks(self):
+        from backend import tasks
+
+        repair_ranges = [{
+            "start_seconds": 3013,
+            "end_seconds": 3190,
+            "issue": "音訊含持續語音但時間戳在 50:13 至 53:10 間隔 177 秒",
+        }]
+
+        preferred = tasks._preferred_recovery_chunk_seconds(repair_ranges)
+
+        self.assertEqual(preferred, tasks.TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS)
+        self.assertEqual(
+            tasks._next_recovery_chunk_seconds(600, preferred_chunk_seconds=preferred),
+            180,
+        )
+        self.assertEqual(tasks._next_recovery_chunk_seconds(600), 300)
+
     def test_speech_backed_timestamp_gap_requires_active_audio(self):
         from backend import tasks
 
@@ -8769,6 +8787,43 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("00:00 至 01:40", ranges[0]["issue"])
         self.assertEqual(ranges[1]["start_seconds"], 100)
         self.assertEqual(ranges[1]["end_seconds"], 180)
+
+    def test_speech_backed_gap_ranges_keep_more_than_two_review_locations(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -20.0
+
+            def __init__(self, length_ms=420_000):
+                self.length_ms = length_ms
+
+            def __len__(self):
+                return self.length_ms
+
+            def __getitem__(self, audio_slice):
+                start = int(audio_slice.start or 0)
+                end = int(audio_slice.stop if audio_slice.stop is not None else self.length_ms)
+                return FakeAudio(max(0, end - start))
+
+        transcript = (
+            "[00:00] **[發言者 A]**：開始。\n"
+            "[01:30] **[發言者 A]**：第一段之後。\n"
+            "[03:00] **[發言者 A]**：第二段之後。\n"
+            "[04:30] **[發言者 A]**：第三段之後。\n"
+            "[06:00] **[發言者 A]**：結束。"
+        )
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 80_000)]):
+            ranges = tasks._speech_backed_timestamp_gap_quality_ranges(
+                Path("segment.mp3"),
+                transcript,
+                expected_start_seconds=0,
+                expected_end_seconds=420,
+            )
+
+        self.assertEqual(len(ranges), 4)
+        self.assertEqual(ranges[-1]["start_seconds"], 270)
+        self.assertEqual(ranges[-1]["end_seconds"], 360)
 
     def test_targeted_gap_repair_replaces_only_timestamp_blocks_inside_gap(self):
         from backend import tasks
@@ -9958,6 +10013,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
 
         repair_mock.assert_not_called()
         split_mock.assert_called_once()
+        self.assertEqual(
+            split_mock.call_args.args[1],
+            tasks.TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS,
+        )
         self.assertEqual(transcribe_mock.call_count, 3)
         self.assertIn("穩定重跑前半段", transcript)
         self.assertIn("穩定重跑後半段", transcript)

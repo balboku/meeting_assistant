@@ -163,6 +163,10 @@ TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO = min(
     1.0,
     max(0.05, float(os.getenv("TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO", "0.25"))),
 )
+TRANSCRIPT_SPEECH_GAP_MAX_RANGES = min(
+    8,
+    max(2, int(os.getenv("TRANSCRIPT_SPEECH_GAP_MAX_RANGES", "6"))),
+)
 TRANSCRIPT_REPAIR_CONTEXT_SECONDS = max(
     0,
     int(os.getenv("TRANSCRIPT_REPAIR_CONTEXT_SECONDS", "6")),
@@ -170,6 +174,10 @@ TRANSCRIPT_REPAIR_CONTEXT_SECONDS = max(
 TRANSCRIPT_REPAIR_DIRECT_SPLIT_SECONDS = max(
     60,
     int(os.getenv("TRANSCRIPT_REPAIR_DIRECT_SPLIT_SECONDS", "180")),
+)
+TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS = max(
+    60,
+    int(os.getenv("TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS", "180")),
 )
 TRANSCRIPT_AUTO_REPAIR_MAX_RANGES = max(
     1,
@@ -1526,7 +1534,7 @@ def _speech_backed_timestamp_gap_quality_ranges(
                 "end_seconds": current,
                 "issue": issue,
             })
-        if len(ranges) >= 2:
+        if len(ranges) >= TRANSCRIPT_SPEECH_GAP_MAX_RANGES:
             break
     return ranges
 
@@ -1553,6 +1561,32 @@ def _speech_backed_timestamp_gap_quality_issues(
         )
         if str(item.get("issue") or "").strip()
     ]
+
+
+def _preferred_recovery_chunk_seconds(
+    repair_ranges: list[dict[str, Any]],
+) -> Optional[int]:
+    """Use shorter retries when local evidence proves a transcript skipped speech."""
+    normalized_ranges = _coalesce_transcript_repair_ranges(repair_ranges)
+    if not normalized_ranges:
+        return None
+
+    issue_text = " ".join(
+        str(issue or "")
+        for item in normalized_ranges
+        for issue in item.get("issues") or []
+    )
+    longest_range = max(
+        int(item["end_seconds"]) - int(item["start_seconds"])
+        for item in normalized_ranges
+    )
+    if (
+        "音訊含持續語音" in issue_text
+        or len(normalized_ranges) >= 2
+        or longest_range >= TRANSCRIPT_REPAIR_DIRECT_SPLIT_SECONDS
+    ):
+        return TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS
+    return None
 
 
 def _segment_transcript_current_quality_issues(
@@ -2798,8 +2832,15 @@ def _split_audio_to_subsegments(audio_path: Path, chunk_seconds: int) -> list[tu
     return subsegments
 
 
-def _next_recovery_chunk_seconds(duration_seconds: int) -> Optional[int]:
+def _next_recovery_chunk_seconds(
+    duration_seconds: int,
+    preferred_chunk_seconds: Optional[int] = None,
+) -> Optional[int]:
+    if preferred_chunk_seconds is not None:
+        preferred_chunk_seconds = max(1, int(preferred_chunk_seconds))
     for chunk_seconds in SEGMENT_RECOVERY_SPLIT_SECONDS:
+        if preferred_chunk_seconds is not None and chunk_seconds > preferred_chunk_seconds:
+            continue
         if chunk_seconds < duration_seconds:
             return chunk_seconds
     return None
@@ -2822,6 +2863,7 @@ def _transcribe_segment_with_recovery(
     quality_events: Optional[list[dict[str, Any]]] = None,
     direct_recovery: bool = False,
     allow_targeted_repair: bool = True,
+    preferred_recovery_chunk_seconds: Optional[int] = None,
 ) -> str:
     quality_error: Optional[RuntimeError] = None
     if not direct_recovery:
@@ -2873,6 +2915,11 @@ def _transcribe_segment_with_recovery(
                         expected_end_seconds=offset_seconds + duration_seconds,
                     ),
                 ])
+                if repair_ranges:
+                    preferred_recovery_chunk_seconds = (
+                        preferred_recovery_chunk_seconds
+                        or _preferred_recovery_chunk_seconds(repair_ranges)
+                    )
                 if 0 < len(repair_ranges) <= TRANSCRIPT_AUTO_REPAIR_MAX_RANGES:
                     repaired_transcript, repair_notes = _repair_existing_segment_timestamp_gaps(
                         client,
@@ -2890,6 +2937,7 @@ def _transcribe_segment_with_recovery(
                         custom_vocabulary=custom_vocabulary,
                         temp_segment_paths=temp_segment_paths,
                         quality_events=quality_events,
+                        preferred_recovery_chunk_seconds=preferred_recovery_chunk_seconds,
                     )
                     if repaired_transcript is not None:
                         if quality_events is not None:
@@ -2918,7 +2966,10 @@ def _transcribe_segment_with_recovery(
     else:
         quality_error = RuntimeError("指定重跑分段使用小段穩定轉錄模式")
 
-    chunk_seconds = _next_recovery_chunk_seconds(duration_seconds)
+    chunk_seconds = _next_recovery_chunk_seconds(
+        duration_seconds,
+        preferred_chunk_seconds=preferred_recovery_chunk_seconds,
+    )
     if chunk_seconds is None:
         if direct_recovery:
             transcript = _transcribe_segment(
@@ -2994,6 +3045,7 @@ def _transcribe_segment_with_recovery(
                 quality_events=quality_events,
                 direct_recovery=False,
                 allow_targeted_repair=allow_targeted_repair,
+                preferred_recovery_chunk_seconds=preferred_recovery_chunk_seconds,
             )
         raise quality_error
 
@@ -3015,6 +3067,7 @@ def _transcribe_segment_with_recovery(
                 quality_events=quality_events,
                 direct_recovery=False,
                 allow_targeted_repair=allow_targeted_repair,
+                preferred_recovery_chunk_seconds=preferred_recovery_chunk_seconds,
             )
         raise quality_error
 
@@ -3051,6 +3104,7 @@ def _transcribe_segment_with_recovery(
             temp_segment_paths=temp_segment_paths,
             quality_events=quality_events,
             allow_targeted_repair=allow_targeted_repair,
+            preferred_recovery_chunk_seconds=preferred_recovery_chunk_seconds,
         )
         recovered.append(child_transcript)
 
@@ -3258,6 +3312,7 @@ def _repair_existing_segment_timestamp_gaps(
     temp_segment_paths: Optional[list[Path]],
     quality_events: Optional[list[dict[str, Any]]],
     custom_vocabulary: Optional[list[str]] = None,
+    preferred_recovery_chunk_seconds: Optional[int] = None,
 ) -> tuple[Optional[str], list[str]]:
     """Repair time-bounded transcript faults; return None to use a full rerun.
 
@@ -3267,6 +3322,10 @@ def _repair_existing_segment_timestamp_gaps(
     coalesced_ranges = _coalesce_transcript_repair_ranges(gap_ranges)
     if not coalesced_ranges:
         return None, []
+    preferred_recovery_chunk_seconds = (
+        preferred_recovery_chunk_seconds
+        or _preferred_recovery_chunk_seconds(coalesced_ranges)
+    )
 
     repairs: list[dict[str, Any]] = []
     try:
@@ -3336,6 +3395,7 @@ def _repair_existing_segment_timestamp_gaps(
                 quality_events=quality_events,
                 direct_recovery=direct_recovery,
                 allow_targeted_repair=False,
+                preferred_recovery_chunk_seconds=preferred_recovery_chunk_seconds,
             )
             repairs.append({
                 "start_seconds": gap_start_seconds,
@@ -4851,6 +4911,7 @@ def process_audio_task(
                 )
                 targeted_gap_repair_notes: list[str] = []
                 detected_repair_ranges: list[dict[str, Any]] = []
+                preferred_recovery_chunk_seconds: Optional[int] = None
                 transcript = None
                 if use_stable_rerun:
                     detected_repair_ranges = [
@@ -4870,6 +4931,9 @@ def process_audio_task(
                             expected_end_seconds=audio_slice.end_seconds,
                         ),
                     ]
+                    preferred_recovery_chunk_seconds = _preferred_recovery_chunk_seconds(
+                        detected_repair_ranges
+                    )
                     transcript, targeted_gap_repair_notes = _repair_existing_segment_timestamp_gaps(
                         client,
                         seg_path,
@@ -4886,6 +4950,7 @@ def process_audio_task(
                         custom_vocabulary=custom_vocabulary,
                         temp_segment_paths=temporary_segment_paths,
                         quality_events=segment_quality_events,
+                        preferred_recovery_chunk_seconds=preferred_recovery_chunk_seconds,
                     )
                     if transcript is not None:
                         logger.info(
@@ -4911,6 +4976,7 @@ def process_audio_task(
                         temp_segment_paths=temporary_segment_paths,
                         quality_events=segment_quality_events,
                         direct_recovery=use_stable_rerun,
+                        preferred_recovery_chunk_seconds=preferred_recovery_chunk_seconds,
                     )
 
                 kept_existing_after_rerun = False
