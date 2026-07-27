@@ -9243,19 +9243,33 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                     "issue": "音訊含持續語音但時間戳在 11:00 至 13:00 間隔 120 秒",
                 }] if segment_path.name.endswith("_001.mp3") else []
 
+            def targeted_repetition_ranges(existing_transcript, *_args, **_kwargs):
+                if "舊的缺口內容" not in existing_transcript:
+                    return []
+                return [{
+                    "start_seconds": 840,
+                    "end_seconds": 900,
+                    "issue": "分段疑似重複轉錄幻覺（連續重複 8 句）",
+                }]
+
             with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
                  mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
                  mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
                  mock.patch.object(tasks, "_split_audio_to_segments", return_value=slices), \
                  mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
-                 mock.patch.object(
-                     tasks,
-                     "_speech_backed_timestamp_gap_quality_ranges",
-                     side_effect=targeted_gap_ranges,
-                 ), \
-                 mock.patch.object(
-                     tasks,
-                     "_repair_existing_segment_timestamp_gaps",
+                  mock.patch.object(
+                      tasks,
+                      "_speech_backed_timestamp_gap_quality_ranges",
+                      side_effect=targeted_gap_ranges,
+                  ), \
+                  mock.patch.object(
+                      tasks,
+                      "_transcript_repetition_repair_ranges",
+                      side_effect=targeted_repetition_ranges,
+                  ) as repetition_ranges_mock, \
+                  mock.patch.object(
+                      tasks,
+                      "_repair_existing_segment_timestamp_gaps",
                      return_value=(repaired_second, ["已局部補救時間缺口：11:00-13:00"]),
                  ) as repair_mock, \
                  mock.patch.object(tasks, "_transcribe_segment_with_recovery") as full_rerun_mock, \
@@ -9272,6 +9286,22 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
 
             self.assertIsNotNone(output_path)
             repair_mock.assert_called_once()
+            repetition_ranges_mock.assert_called_once()
+            self.assertEqual(
+                repair_mock.call_args.kwargs["gap_ranges"],
+                [
+                    {
+                        "start_seconds": 660,
+                        "end_seconds": 780,
+                        "issue": "音訊含持續語音但時間戳在 11:00 至 13:00 間隔 120 秒",
+                    },
+                    {
+                        "start_seconds": 840,
+                        "end_seconds": 900,
+                        "issue": "分段疑似重複轉錄幻覺（連續重複 8 句）",
+                    },
+                ],
+            )
             full_rerun_mock.assert_not_called()
             output_text = output_path.read_text(encoding="utf-8")
             self.assertIn("補回的缺口內容", output_text)
@@ -9281,6 +9311,77 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                 "已局部補救時間缺口：11:00-13:00",
                 quality_report["segments"][1]["recovery_notes"],
             )
+
+    def test_repetition_repair_ranges_pinpoint_contiguous_loop(self):
+        from backend import tasks
+
+        repeated_turns = "\n".join(
+            f"[31:{index:02d}] **[發言者 A]**：因為我是結所以我領車。"
+            for index in range(20)
+        )
+        transcript = (
+            "[30:59] **[發言者 B]**：前一句正常。\n"
+            f"{repeated_turns}\n"
+            "[31:30] **[發言者 B]**：下一句正常。"
+        )
+
+        ranges = tasks._transcript_repetition_repair_ranges(
+            transcript,
+            expected_start_seconds=1800,
+            expected_end_seconds=2400,
+        )
+
+        self.assertEqual(len(ranges), 1)
+        self.assertEqual(ranges[0]["start_seconds"], 1860)
+        self.assertEqual(ranges[0]["end_seconds"], 1890)
+        self.assertTrue(any("重複轉錄" in issue for issue in ranges[0]["issues"]))
+
+    def test_repetition_repair_ranges_pinpoint_contiguous_numeric_loop(self):
+        from backend import tasks
+
+        numeric_turns = "\n".join(
+            f"[40:{index * 5:02d}] **[發言者 A]**：第 {index} 項的分數為 {100 + index}。"
+            for index in range(12)
+        )
+        transcript = (
+            "[39:50] **[發言者 B]**：先確認計算方式。\n"
+            f"{numeric_turns}\n"
+            "[41:10] **[發言者 B]**：回到正常討論。"
+        )
+
+        ranges = tasks._transcript_repetition_repair_ranges(
+            transcript,
+            expected_start_seconds=2340,
+            expected_end_seconds=3000,
+        )
+
+        self.assertEqual(len(ranges), 1)
+        self.assertEqual(ranges[0]["start_seconds"], 2400)
+        self.assertEqual(ranges[0]["end_seconds"], 2470)
+        self.assertTrue(any("數列延伸" in issue for issue in ranges[0]["issues"]))
+
+    def test_repetition_repair_does_not_remove_interleaved_numeric_discussion(self):
+        from backend import tasks
+
+        rows = []
+        for index in range(12):
+            rows.append(
+                f"[40:{index * 5:02d}] **[發言者 A]**：第 {index} 項的分數為 {100 + index}。"
+            )
+            rows.append(
+                f"[40:{index * 5 + 2:02d}] **[發言者 B]**：第 {index} 項需要人工確認。"
+            )
+        transcript = "\n".join(rows)
+
+        self.assertIsNotNone(tasks._structured_numeric_turn_quality_issue(transcript))
+        self.assertEqual(
+            tasks._transcript_repetition_repair_ranges(
+                transcript,
+                expected_start_seconds=2400,
+                expected_end_seconds=3000,
+            ),
+            [],
+        )
 
     def test_partial_rerun_keeps_existing_segment_when_rerun_is_less_complete(self):
         from backend import tasks
@@ -10383,7 +10484,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('data-start-seconds="${startSeconds}"', html)
         self.assertIn('data-end-seconds="${endSeconds}"', html)
         self.assertIn('id="rerun-segment-${index}" type="button" aria-describedby="detail-status" aria-busy="false"', html)
-        self.assertIn('title="優先局部補救第 ${index + 1} 段已偵測的時間缺口；無法安全合併才重跑整段"', html)
+        self.assertIn('title="優先局部補救第 ${index + 1} 段已偵測的時間缺口或重複轉錄異常；無法安全合併才重跑整段"', html)
         self.assertIn("const segmentIndices = normalizeSegmentIndices(segmentIndex);", html)
         self.assertIn("JSON.stringify({ segments: segmentIndices })", html)
         self.assertIn('id="rerun-summary-button"', html)

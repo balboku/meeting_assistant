@@ -936,6 +936,207 @@ def _segment_repetition_quality_issue(transcript: str) -> Optional[str]:
     return None
 
 
+def _timestamped_transcript_turns(transcript: str) -> list[dict[str, Any]]:
+    """Return complete, timecoded transcript turns without discarding duplicates."""
+    turns: list[dict[str, Any]] = []
+    current_timestamp: Optional[int] = None
+    current_lines: list[str] = []
+
+    def flush() -> None:
+        nonlocal current_timestamp, current_lines
+        body = "\n".join(current_lines).strip()
+        if current_timestamp is not None and body:
+            turns.append({
+                "timestamp_seconds": current_timestamp,
+                "body": body,
+                "normalized": _normalized_transcript_line_content(body),
+            })
+        current_timestamp = None
+        current_lines = []
+
+    for raw_line in (transcript or "").splitlines():
+        match = TIMESTAMP_PATTERN.search(raw_line)
+        if match:
+            flush()
+            current_timestamp = (
+                int(match.group("minutes")) * 60
+                + int(match.group("seconds"))
+            )
+        if current_timestamp is not None:
+            current_lines.append(raw_line.rstrip())
+    flush()
+    return turns
+
+
+def _timestamped_turn_repair_range(
+    turns: list[dict[str, Any]],
+    *,
+    start_index: int,
+    end_index: int,
+    expected_start_seconds: int,
+    expected_end_seconds: int,
+    issue: str,
+) -> Optional[dict[str, Any]]:
+    """Make a conservative replacement window around contiguous timed turns."""
+    if not turns or start_index < 0 or end_index < start_index or end_index >= len(turns):
+        return None
+    start_seconds = int(turns[start_index]["timestamp_seconds"])
+    if end_index + 1 < len(turns):
+        end_seconds = int(turns[end_index + 1]["timestamp_seconds"])
+    else:
+        end_seconds = expected_end_seconds
+    start_seconds = max(expected_start_seconds, start_seconds)
+    end_seconds = min(expected_end_seconds, end_seconds)
+    if end_seconds <= start_seconds:
+        return None
+    return {
+        "start_seconds": start_seconds,
+        "end_seconds": end_seconds,
+        "issue": issue,
+    }
+
+
+def _transcript_repetition_repair_ranges(
+    transcript: str,
+    *,
+    expected_start_seconds: int,
+    expected_end_seconds: int,
+) -> list[dict[str, Any]]:
+    """Locate only time-bounded repetition artifacts that are safe to replace.
+
+    The broad quality detector deliberately catches several kinds of repetition.
+    A local repair is more strict: the affected turns must form one contiguous,
+    timestamped run, otherwise the caller falls back to a full stable rerun.
+    """
+    turns = _timestamped_transcript_turns(transcript)
+    if not turns:
+        return []
+
+    ranges: list[dict[str, Any]] = []
+
+    # A single enormous turn can be a repeated loop emitted without line breaks.
+    for index, turn in enumerate(turns):
+        normalized = str(turn["normalized"])
+        if len(normalized) < SEGMENT_LONG_TURN_CHARS:
+            continue
+        repeated_ngram_count = _max_repeated_ngram_count(
+            normalized,
+            SEGMENT_REPEATED_NGRAM_CHARS,
+        )
+        if (
+            len(normalized) >= SEGMENT_MAX_NORMALIZED_TURN_CHARS
+            or repeated_ngram_count >= SEGMENT_REPEATED_NGRAM_THRESHOLD
+        ):
+            repair_range = _timestamped_turn_repair_range(
+                turns,
+                start_index=index,
+                end_index=index,
+                expected_start_seconds=expected_start_seconds,
+                expected_end_seconds=expected_end_seconds,
+                issue=(
+                    "分段疑似單句重複轉錄幻覺"
+                    f"（重複片段 {repeated_ngram_count} 次）"
+                ),
+            )
+            if repair_range:
+                ranges.append(repair_range)
+
+    # Repeated short utterances and ordinary turns are safe to localize only
+    # when they are directly adjacent in the original timestamp order.
+    index = 0
+    while index < len(turns):
+        normalized = str(turns[index]["normalized"])
+        if not normalized:
+            index += 1
+            continue
+        end_index = index
+        while end_index + 1 < len(turns):
+            following = str(turns[end_index + 1]["normalized"])
+            if not following or not (
+                following == normalized
+                or following in normalized
+                or normalized in following
+            ):
+                break
+            end_index += 1
+        count = end_index - index + 1
+        is_short_turn_loop = (
+            2 <= len(normalized) <= SEGMENT_SHORT_TURN_MAX_CHARS
+            and count >= SEGMENT_SHORT_TURN_RUN_THRESHOLD
+        )
+        is_normal_turn_loop = (
+            len(normalized) >= 12
+            and count >= SEGMENT_REPETITION_RUN_THRESHOLD
+        )
+        if is_short_turn_loop or is_normal_turn_loop:
+            repair_range = _timestamped_turn_repair_range(
+                turns,
+                start_index=index,
+                end_index=end_index,
+                expected_start_seconds=expected_start_seconds,
+                expected_end_seconds=expected_end_seconds,
+                issue=(
+                    "分段疑似短句重複轉錄幻覺"
+                    if is_short_turn_loop
+                    else "分段疑似重複轉錄幻覺"
+                ) + f"（連續重複 {count} 句）",
+            )
+            if repair_range:
+                ranges.append(repair_range)
+        index = end_index + 1
+
+    # Numeric completion hallucinations are only repairable when the repeated
+    # template itself occupies one contiguous run. Interleaved discussion is
+    # intentionally left for a full rerun so valid text is never removed.
+    number_pattern = re.compile(r"[+-]?\d+(?:[.,]\d+)?%?")
+    templates: dict[str, list[tuple[int, tuple[str, ...], int]]] = {}
+    for index, turn in enumerate(turns):
+        body = TIMESTAMP_PATTERN.sub("", str(turn["body"]))
+        body = re.sub(r"\*\*\[[^\]]+\]\*\*", "", body).strip()
+        numbers = tuple(number_pattern.findall(body))
+        if len(numbers) < 2:
+            continue
+        template = number_pattern.sub("#", body)
+        template = re.sub(r"[^\w\u4e00-\u9fff#]+", "", template)
+        if len(template) < 6:
+            continue
+        templates.setdefault(template, []).append((index, numbers, int(turn["timestamp_seconds"])))
+
+    for rows in templates.values():
+        row_indices = [row[0] for row in rows]
+        timestamps = [row[2] for row in rows]
+        timestamp_gaps = [
+            current - previous
+            for previous, current in zip(timestamps, timestamps[1:])
+            if current >= previous
+        ]
+        short_gap_ratio = (
+            sum(gap <= SEGMENT_STRUCTURED_TURN_MAX_TIMESTAMP_GAP_SECONDS for gap in timestamp_gaps)
+            / len(timestamp_gaps)
+            if timestamp_gaps else 0.0
+        )
+        if not (
+            len(rows) >= SEGMENT_STRUCTURED_TURN_REPEAT_THRESHOLD
+            and len({row[1] for row in rows}) >= SEGMENT_STRUCTURED_TURN_REPEAT_THRESHOLD
+            and len(timestamps) >= SEGMENT_STRUCTURED_TURN_REPEAT_THRESHOLD
+            and short_gap_ratio >= SEGMENT_STRUCTURED_TURN_SHORT_GAP_RATIO
+            and row_indices == list(range(row_indices[0], row_indices[-1] + 1))
+        ):
+            continue
+        repair_range = _timestamped_turn_repair_range(
+            turns,
+            start_index=row_indices[0],
+            end_index=row_indices[-1],
+            expected_start_seconds=expected_start_seconds,
+            expected_end_seconds=expected_end_seconds,
+            issue="分段疑似數列延伸轉錄幻覺",
+        )
+        if repair_range:
+            ranges.append(repair_range)
+
+    return _coalesce_transcript_repair_ranges(ranges)
+
+
 def _structured_numeric_turn_quality_issue(transcript: str) -> Optional[str]:
     """Detect pattern-completion loops that change only the numeric values."""
     templates: dict[str, list[tuple[tuple[str, ...], Optional[int]]]] = {}
@@ -2548,10 +2749,10 @@ def _transcribe_segment_with_recovery(
     return recovered_transcript
 
 
-def _coalesce_audio_gap_ranges(gap_ranges: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge adjacent detected gaps so a single discussion turn is repaired once."""
+def _coalesce_transcript_repair_ranges(repair_ranges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge adjacent repair windows so one discussion turn is transcribed once."""
     normalized: list[dict[str, Any]] = []
-    for item in gap_ranges:
+    for item in repair_ranges:
         try:
             start_seconds = int(item.get("start_seconds"))
             end_seconds = int(item.get("end_seconds"))
@@ -2559,10 +2760,19 @@ def _coalesce_audio_gap_ranges(gap_ranges: list[dict[str, Any]]) -> list[dict[st
             continue
         if end_seconds <= start_seconds:
             continue
+        raw_issues = item.get("issues") or []
+        if isinstance(raw_issues, str):
+            raw_issues = [raw_issues]
+        issue = str(item.get("issue") or "").strip()
+        normalized_issues = [
+            str(value or "").strip()
+            for value in [*raw_issues, issue]
+            if str(value or "").strip()
+        ]
         normalized.append({
             "start_seconds": start_seconds,
             "end_seconds": end_seconds,
-            "issues": [str(item.get("issue") or "").strip()],
+            "issues": list(dict.fromkeys(normalized_issues)),
         })
     merged: list[dict[str, Any]] = []
     for item in sorted(normalized, key=lambda value: (value["start_seconds"], value["end_seconds"])):
@@ -2575,6 +2785,20 @@ def _coalesce_audio_gap_ranges(gap_ranges: list[dict[str, Any]]) -> list[dict[st
             continue
         merged.append(item)
     return merged
+
+
+def _coalesce_audio_gap_ranges(gap_ranges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Compatibility wrapper for callers that only supply audio-backed gaps."""
+    return _coalesce_transcript_repair_ranges(gap_ranges)
+
+
+def _repair_window_note_label(issues: list[str]) -> str:
+    issue_text = " ".join(str(issue or "") for issue in issues)
+    if "數列延伸" in issue_text:
+        return "數列延伸轉錄異常"
+    if "重複轉錄" in issue_text:
+        return "重複轉錄異常"
+    return "時間缺口"
 
 
 def _export_audio_gap_segment(
@@ -2677,8 +2901,12 @@ def _repair_existing_segment_timestamp_gaps(
     temp_segment_paths: Optional[list[Path]],
     quality_events: Optional[list[dict[str, Any]]],
 ) -> tuple[Optional[str], list[str]]:
-    """Repair only audio-backed timestamp gaps; return None to use full rerun."""
-    coalesced_ranges = _coalesce_audio_gap_ranges(gap_ranges)
+    """Repair time-bounded transcript faults; return None to use a full rerun.
+
+    ``gap_ranges`` retains its legacy name because callers and tests already use
+    it. Each range may now also describe a timestamp-bounded repetition fault.
+    """
+    coalesced_ranges = _coalesce_transcript_repair_ranges(gap_ranges)
     if not coalesced_ranges:
         return None, []
 
@@ -2692,7 +2920,7 @@ def _repair_existing_segment_timestamp_gaps(
             update_job_status(
                 job_id,
                 "processing",
-                f"🩹 正在局部補救第 {segment_index + 1}/{total_segments} 段缺口 "
+                f"🩹 正在局部補救第 {segment_index + 1}/{total_segments} 段異常區間 "
                 f"{repair_index + 1}/{len(coalesced_ranges)}...",
                 progress_current=segment_index,
                 progress_total=total_segments,
@@ -2734,7 +2962,7 @@ def _repair_existing_segment_timestamp_gaps(
             })
     except Exception as exc:
         logger.warning(
-            "[%s] ⚠️ 第 %s/%s 段局部缺口補救失敗，改用整段穩定重跑：%s",
+            "[%s] ⚠️ 第 %s/%s 段局部補救失敗，改用整段穩定重跑：%s",
             job_id,
             segment_index + 1,
             total_segments,
@@ -2757,7 +2985,7 @@ def _repair_existing_segment_timestamp_gaps(
     )
     if final_issues:
         logger.warning(
-            "[%s] ⚠️ 第 %s/%s 段局部缺口補救後仍有問題，改用整段穩定重跑：%s",
+            "[%s] ⚠️ 第 %s/%s 段局部補救後仍有問題，改用整段穩定重跑：%s",
             job_id,
             segment_index + 1,
             total_segments,
@@ -2765,7 +2993,8 @@ def _repair_existing_segment_timestamp_gaps(
         )
         return None, []
     notes = [
-        "已局部補救時間缺口："
+        "已局部補救"
+        f"{_repair_window_note_label(list(gap.get('issues') or []))}："
         f"{_format_mmss(int(gap['start_seconds']))}-{_format_mmss(int(gap['end_seconds']))}"
         for gap in coalesced_ranges
     ]
@@ -4010,12 +4239,19 @@ def process_audio_task(
                 targeted_gap_repair_notes: list[str] = []
                 transcript = None
                 if use_stable_rerun:
-                    gap_ranges = _speech_backed_timestamp_gap_quality_ranges(
-                        seg_path,
-                        existing_forced_transcript,
-                        expected_start_seconds=audio_slice.start_seconds,
-                        expected_end_seconds=audio_slice.end_seconds,
-                    )
+                    gap_ranges = [
+                        *_speech_backed_timestamp_gap_quality_ranges(
+                            seg_path,
+                            existing_forced_transcript,
+                            expected_start_seconds=audio_slice.start_seconds,
+                            expected_end_seconds=audio_slice.end_seconds,
+                        ),
+                        *_transcript_repetition_repair_ranges(
+                            existing_forced_transcript,
+                            expected_start_seconds=audio_slice.start_seconds,
+                            expected_end_seconds=audio_slice.end_seconds,
+                        ),
+                    ]
                     transcript, targeted_gap_repair_notes = _repair_existing_segment_timestamp_gaps(
                         client,
                         seg_path,
