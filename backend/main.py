@@ -3439,8 +3439,13 @@ async def rerun_meeting_record(
     audio_path = _resolve_meeting_source_audio(record)
     quality_report = record.get("quality_report") or {}
     recording = quality_report.get("recording") if isinstance(quality_report, dict) else {}
-    custom_vocabulary = normalize_custom_vocabulary(
+    stored_custom_vocabulary = normalize_custom_vocabulary(
         recording.get("custom_vocabulary") if isinstance(recording, dict) else None
+    )
+    custom_vocabulary = normalize_custom_vocabulary(
+        request_body.custom_vocabulary
+        if request_body is not None and request_body.custom_vocabulary is not None
+        else stored_custom_vocabulary
     )
     known_segments = quality_report.get("segments") or []
     if not known_segments:

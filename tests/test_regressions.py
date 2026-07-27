@@ -7368,6 +7368,8 @@ class UiRegressionTests(unittest.TestCase):
         self.assertIn('id="rec-vocabulary"', html)
         self.assertGreaterEqual(html.count("formData.append('custom_vocabulary', customVocabulary)"), 2)
         self.assertIn("customVocabularyCount ? `📚 ${customVocabularyCount} 個專有詞`", html)
+        self.assertIn("window.prompt(\n      '重跑專有詞彙（選填，以逗號或換行分隔）'", html)
+        self.assertIn("custom_vocabulary: customVocabulary", html)
 
     def test_summary_editor_omits_transcript_quality_note(self):
         static_path = json.dumps(str(ROOT / "static" / "index.html"))
@@ -9264,7 +9266,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         record = {
             "id": 8,
             "title": "局部重跑測試",
-            "quality_report": {"segments": [{"index": 0}, {"index": 1}]},
+            "quality_report": {
+                "segments": [{"index": 0}, {"index": 1}],
+                "recording": {"custom_vocabulary": ["舊詞"]},
+            },
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = Path(tmpdir) / "meeting.webm"
@@ -9284,12 +9289,13 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                     main.app,
                     "POST",
                     "/meetings/8/rerun",
-                    json={"segments": [1, 0, 1]},
+                    json={"segments": [1, 0, 1], "custom_vocabulary": "佳世達；Qisda"},
                 )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(enqueue.call_args.kwargs["force_segment_indices"], [0, 1])
         self.assertEqual(enqueue.call_args.kwargs["transcript_reuse_source_path"], meeting_path)
+        self.assertEqual(enqueue.call_args.kwargs["custom_vocabulary"], ["佳世達", "Qisda"])
         self.assertIn("第 1、2 段", response.json()["message"])
 
     def test_meeting_rerun_api_accepts_sparse_legacy_segment_indices(self):
@@ -11460,7 +11466,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('id="rerun-segment-${index}" type="button" aria-describedby="detail-status" aria-busy="false"', html)
         self.assertIn('title="優先局部補救第 ${index + 1} 段已偵測的時間缺口或重複轉錄異常；無法安全合併才重跑整段"', html)
         self.assertIn("const segmentIndices = normalizeSegmentIndices(segmentIndex);", html)
-        self.assertIn("JSON.stringify({ segments: segmentIndices })", html)
+        self.assertIn("JSON.stringify({ segments: segmentIndices, custom_vocabulary: customVocabulary })", html)
         self.assertIn('id="rerun-summary-button"', html)
         self.assertIn("summary_only: true, high_quality: highQuality", html)
         self.assertIn('id="rerun-summary-high-quality-button"', html)

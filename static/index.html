@@ -3848,6 +3848,20 @@ async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQu
   if (!confirm(`確定要${segmentText}嗎？\n完成後會產生一筆新的會議紀錄，原本這筆會保留。`)) {
     return;
   }
+  let customVocabulary = null;
+  if (!summaryOnly) {
+    const meetingForVocabulary = Number(currentMeetingData?.id) === Number(id)
+      ? currentMeetingData
+      : null;
+    const storedVocabulary = meetingForVocabulary?.quality_report?.recording?.custom_vocabulary;
+    const vocabularyDefault = Array.isArray(storedVocabulary) ? storedVocabulary.join('、') : '';
+    const vocabularyInput = window.prompt(
+      '重跑專有詞彙（選填，以逗號或換行分隔）',
+      vocabularyDefault,
+    );
+    if (vocabularyInput === null) return;
+    customVocabulary = vocabularyInput.trim();
+  }
 
   const button = triggerButtonId
     ? document.getElementById(triggerButtonId)
@@ -3875,7 +3889,10 @@ async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQu
       options.body = JSON.stringify({ summary_only: true, high_quality: highQuality });
     } else if (segmentIndices.length) {
       options.headers = { 'Content-Type': 'application/json' };
-      options.body = JSON.stringify({ segments: segmentIndices });
+      options.body = JSON.stringify({ segments: segmentIndices, custom_vocabulary: customVocabulary });
+    } else if (customVocabulary !== null) {
+      options.headers = { 'Content-Type': 'application/json' };
+      options.body = JSON.stringify({ custom_vocabulary: customVocabulary });
     }
     const res = await fetch(`${API}/meetings/${id}/rerun`, options);
     if (!res.ok) throw new Error(await apiErrorMessage(res));
