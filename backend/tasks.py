@@ -32,7 +32,10 @@ from dotenv import load_dotenv
 
 from backend.database import (
     _repeated_transcript_turn_review_segments,
+    get_meeting,
     is_job_cancel_requested,
+    list_meetings,
+    update_meeting_quality_report,
     update_job_status,
     save_meeting
 )
@@ -4190,6 +4193,149 @@ def recheck_transcript_quality_report(
         "source_audio_checked": audio_available,
     }
     return report
+
+
+def recheck_all_saved_meeting_quality_reports(
+    job_id: str,
+    *,
+    source_audio_dir: Path,
+) -> dict[str, int | bool]:
+    """Refresh saved quality reports with local media checks only.
+
+    This is intentionally a maintenance task rather than a transcription job:
+    it never initializes a Gemini client or writes a new meeting.  Persisting
+    the refreshed review targets lets the list surface older recordings whose
+    retained source media still proves a transcript omission.
+    """
+    records: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        page = list_meetings(limit=500, offset=offset)
+        records.extend(page)
+        if len(page) < 500:
+            break
+        offset += len(page)
+    total = len(records)
+    checked = 0
+    audio_checked = 0
+    review_records = 0
+    skipped = 0
+    failed = 0
+
+    for position, item in enumerate(records, start=1):
+        if is_job_cancel_requested(job_id):
+            update_job_status(
+                job_id,
+                "cancelled",
+                f"已取消完整逐字稿品質檢核：已檢核 {checked}/{total} 筆。",
+                progress_current=checked,
+                progress_total=total,
+            )
+            return {
+                "total": total,
+                "checked": checked,
+                "audio_checked": audio_checked,
+                "review_records": review_records,
+                "skipped": skipped,
+                "failed": failed,
+                "cancelled": True,
+            }
+
+        try:
+            meeting_id = int(item.get("id"))
+        except (AttributeError, TypeError, ValueError):
+            skipped += 1
+            continue
+
+        update_job_status(
+            job_id,
+            "processing",
+            f"🔎 正在重新檢核逐字稿品質：第 {position}/{total} 筆...",
+            progress_current=position - 1,
+            progress_total=total,
+        )
+        try:
+            record = get_meeting(meeting_id)
+            if not record:
+                skipped += 1
+                continue
+            transcript = _extract_transcript_section_body(
+                record.get("full_content") or ""
+            ) or ""
+            if not transcript.strip():
+                skipped += 1
+                logger.warning(
+                    "[%s] ⚠️ 會議 %s 缺少完整逐字稿，略過品質檢核",
+                    job_id,
+                    meeting_id,
+                )
+                continue
+
+            source_name = Path(str(record.get("source_audio") or "")).name
+            candidate_source_path = source_audio_dir / source_name if source_name else None
+            source_audio_path = (
+                candidate_source_path
+                if candidate_source_path is not None and candidate_source_path.is_file()
+                else None
+            )
+            quality_report = recheck_transcript_quality_report(
+                transcript,
+                record.get("quality_report"),
+                source_audio_path=source_audio_path,
+            )
+            recheck_metadata = quality_report.get("recheck")
+            if not isinstance(recheck_metadata, dict):
+                recheck_metadata = {}
+                quality_report["recheck"] = recheck_metadata
+            recheck_metadata["rechecked_at"] = datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            if not update_meeting_quality_report(meeting_id, quality_report):
+                failed += 1
+                logger.warning(
+                    "[%s] ⚠️ 會議 %s 在品質檢核後已不存在，未寫入結果",
+                    job_id,
+                    meeting_id,
+                )
+                continue
+
+            checked += 1
+            if recheck_metadata.get("source_audio_checked"):
+                audio_checked += 1
+            if quality_report.get("review_segments"):
+                review_records += 1
+        except Exception as exc:
+            failed += 1
+            logger.warning(
+                "[%s] ⚠️ 會議 %s 重新檢核失敗，略過後繼續：%s",
+                job_id,
+                meeting_id,
+                str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__,
+            )
+
+    message = (
+        "✅ 完整逐字稿品質檢核完成："
+        f"已檢核 {checked}/{total} 筆，音訊比對 {audio_checked} 筆，"
+        f"需複核 {review_records} 筆，略過 {skipped} 筆，失敗 {failed} 筆。"
+        "未使用 Gemini。"
+    )
+    update_job_status(
+        job_id,
+        "done",
+        message,
+        progress_current=total,
+        progress_total=total,
+    )
+    logger.info("[%s] %s", job_id, message)
+    return {
+        "total": total,
+        "checked": checked,
+        "audio_checked": audio_checked,
+        "review_records": review_records,
+        "skipped": skipped,
+        "failed": failed,
+        "cancelled": False,
+    }
 
 
 def process_audio_task(

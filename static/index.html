@@ -1738,6 +1738,10 @@
         <option value="rerunnable">可重跑分段</option>
         <option value="other">其他品質警示</option>
       </select>
+      <button id="quality-recheck-all-button" type="button" class="btn-secondary"
+              aria-busy="false"
+              title="以既有逐字稿與全部保留原始媒體檢核品質，不呼叫 AI"
+              onclick="recheckAllMeetingTranscriptQuality()">⌁ 全部檢核</button>
     </div>
   </div>
 
@@ -3912,6 +3916,40 @@ async function recheckMeetingTranscriptQuality(id, triggerButtonId = 'quality-re
   } catch (err) {
     setDetailStatus(`重新檢核失敗：${err.message}`);
     alert(`重新檢核失敗：${err.message}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.setAttribute('aria-busy', 'false');
+      button.innerHTML = originalButtonText;
+    }
+  }
+}
+
+async function recheckAllMeetingTranscriptQuality() {
+  if (!confirm('確定要重新檢核全部會議逐字稿品質嗎？\n這會逐份檢查既有逐字稿與保留原始媒體檔的時間缺口、重複轉錄與數列延伸，不會呼叫 AI，也不會建立新會議。')) {
+    return;
+  }
+
+  const button = document.getElementById('quality-recheck-all-button');
+  const originalButtonText = button?.innerHTML;
+  const statusEl = document.getElementById('search-status');
+  if (button) {
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.innerHTML = '<span class="loading-spinner"></span> 檢核中';
+  }
+  if (statusEl) statusEl.textContent = '正在建立全部逐字稿品質檢核任務（不使用 AI）...';
+
+  try {
+    const res = await fetch(`${API}/meetings/quality/recheck-all`, { method: 'POST' });
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    const data = await res.json();
+    await Promise.all([loadJobs(), loadMetrics()]);
+    if (statusEl) statusEl.textContent = `已建立完整品質檢核任務：${data.job_id}`;
+    alert(`已建立完整品質檢核任務：${data.job_id}\n可在「任務狀態」查看進度；完成後會更新需複核會議與可重跑分段。`);
+  } catch (err) {
+    if (statusEl) statusEl.textContent = `建立品質檢核任務失敗：${err.message}`;
+    alert(`建立品質檢核任務失敗：${err.message}`);
   } finally {
     if (button) {
       button.disabled = false;

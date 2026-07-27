@@ -3,6 +3,7 @@ import hashlib
 import inspect
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -6739,6 +6740,85 @@ class JobQueueWorkerRegressionTests(unittest.TestCase):
 
         self.assertEqual(database.get_job("worker-default-attempts-job")["max_attempts"], 5)
 
+    def test_quality_recheck_worker_uses_local_quality_task(self):
+        database, tmpdir = self._isolated_database()
+        import backend.job_queue as job_queue
+
+        expected_source_audio_dir = tmpdir / "source_audio"
+        expected_source_audio_dir.mkdir()
+        job_queue.enqueue_meeting_quality_recheck_job(
+            "quality-recheck-worker-job",
+            source_audio_dir=expected_source_audio_dir,
+        )
+        worker = job_queue.JobQueueWorker(poll_interval=0.01)
+        claim = database.claim_next_pending_job()
+
+        def mark_done(job_id, *, source_audio_dir):
+            self.assertEqual(source_audio_dir, expected_source_audio_dir)
+            database.update_job_status(job_id, "done", "品質檢核完成")
+            return {"checked": 1}
+
+        with mock.patch.object(
+            job_queue,
+            "recheck_all_saved_meeting_quality_reports",
+            side_effect=mark_done,
+        ) as recheck_mock:
+            worker.process_job(claim)
+
+        self.assertEqual(claim["task_type"], "meeting_quality_recheck")
+        recheck_mock.assert_called_once_with(
+            "quality-recheck-worker-job",
+            source_audio_dir=expected_source_audio_dir,
+        )
+        self.assertEqual(database.get_job("quality-recheck-worker-job")["status"], "done")
+
+    def test_batch_quality_recheck_updates_available_transcripts_without_ai(self):
+        from backend import tasks
+
+        source_audio_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(source_audio_dir, ignore_errors=True))
+        source_path = source_audio_dir / "source.webm"
+        source_path.write_bytes(b"webm")
+        transcript = (
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：測試逐字稿。"
+        )
+        record = {
+            "id": 71,
+            "source_audio": "source.webm",
+            "quality_report": {"segments": []},
+            "full_content": "## 📝 四、完整逐字稿 (Verbatim Transcript)\n" + transcript,
+        }
+        refreshed_report = {
+            "score": 100,
+            "label": "良好",
+            "warnings": [],
+            "segments": [{"index": 0, "issues": []}],
+            "review_segments": [],
+            "recheck": {"source_audio_checked": True},
+        }
+        with mock.patch.object(tasks, "list_meetings", return_value=[{"id": 71}, {"id": 72}]), \
+             mock.patch.object(tasks, "get_meeting", side_effect=[record, {"id": 72, "full_content": ""}]), \
+             mock.patch.object(tasks, "recheck_transcript_quality_report", return_value=refreshed_report) as recheck_mock, \
+             mock.patch.object(tasks, "update_meeting_quality_report", return_value=True) as update_mock, \
+             mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+             mock.patch.object(tasks, "update_job_status") as status_mock:
+            summary = tasks.recheck_all_saved_meeting_quality_reports(
+                "batch-quality-recheck-job",
+                source_audio_dir=source_audio_dir,
+            )
+
+        self.assertEqual(summary["total"], 2)
+        self.assertEqual(summary["checked"], 1)
+        self.assertEqual(summary["audio_checked"], 1)
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(summary["failed"], 0)
+        self.assertFalse(summary["cancelled"])
+        self.assertEqual(recheck_mock.call_args.kwargs["source_audio_path"], source_path)
+        update_mock.assert_called_once_with(71, refreshed_report)
+        self.assertEqual(status_mock.call_args.args[1], "done")
+        self.assertIn("未使用 Gemini", status_mock.call_args.args[2])
+
     def test_audio_worker_keeps_source_file_for_retry_and_terminal_failure(self):
         database, tmpdir = self._isolated_database()
         import backend.job_queue as job_queue
@@ -7675,6 +7755,14 @@ console.log('summary_editor_quality_note_ok');
         self.assertIn("⌁ 重新檢核", html)
         self.assertIn("await Promise.all([", html)
         self.assertIn("const recheck = report.recheck", html)
+
+    def test_web_ui_can_queue_all_meeting_quality_rechecks_without_ai(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("async function recheckAllMeetingTranscriptQuality", html)
+        self.assertIn("/meetings/quality/recheck-all", html)
+        self.assertIn("id=\"quality-recheck-all-button\"", html)
+        self.assertIn("不會呼叫 AI，也不會建立新會議", html)
         self.assertIn("已重檢 ${recheckTimestamp}", html)
 
     def test_web_ui_shows_recovery_history_without_marking_segment_as_current_issue(self):
@@ -8886,6 +8974,29 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(recheck_mock.call_args.kwargs["source_audio_path"], audio_path)
         update_mock.assert_called_once_with(61, refreshed_report)
         enqueue_mock.assert_not_called()
+
+    def test_all_meeting_quality_recheck_enqueues_local_job(self):
+        import backend.main as main
+
+        captured = {}
+
+        def enqueue(job_id, **kwargs):
+            captured["job_id"] = job_id
+            captured.update(kwargs)
+
+        with mock.patch.object(
+            main,
+            "enqueue_meeting_quality_recheck_job",
+            side_effect=enqueue,
+        ):
+            response = asgi_request(main.app, "POST", "/meetings/quality/recheck-all")
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "pending")
+        self.assertIn("未使用 Gemini", payload["message"])
+        self.assertEqual(captured["job_id"], payload["job_id"])
+        self.assertEqual(captured["source_audio_dir"], main.SOURCE_AUDIO_DIR)
 
     def test_webm_source_audio_endpoint_uses_recording_profile_media_type(self):
         import backend.main as main

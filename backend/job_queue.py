@@ -30,6 +30,7 @@ from backend.tasks import (
     SUMMARY_MODEL,
     SUMMARY_VERIFIER_MODEL,
     process_audio_task,
+    recheck_all_saved_meeting_quality_reports,
 )
 
 logger = logging.getLogger("MeetingAssistant.JobQueue")
@@ -120,6 +121,22 @@ def enqueue_line_audio_job(
     )
 
 
+def enqueue_meeting_quality_recheck_job(
+    job_id: str,
+    *,
+    source_audio_dir: Path,
+) -> None:
+    """Queue a no-model quality refresh for all saved meeting transcripts."""
+    create_job(
+        job_id,
+        task_type="meeting_quality_recheck",
+        source="quality_recheck",
+        payload={"source_audio_dir": str(source_audio_dir)},
+        max_attempts=1,
+        message="已排入完整逐字稿品質檢核；僅使用本機音訊分析。",
+    )
+
+
 class JobQueueWorker:
     """Small single-process polling worker for the SQLite job table."""
 
@@ -187,6 +204,10 @@ class JobQueueWorker:
 
             if task_type == "line_audio_processing":
                 self._process_line_audio_job(job)
+                return
+
+            if task_type == "meeting_quality_recheck":
+                self._process_meeting_quality_recheck_job(job)
                 return
 
             raise RuntimeError(f"未知任務類型：{task_type}")
@@ -268,6 +289,17 @@ class JobQueueWorker:
                 job["job_id"],
                 current.get("error_detail") or current.get("message") or "LINE 任務失敗",
             )
+
+    def _process_meeting_quality_recheck_job(self, job: dict[str, Any]) -> None:
+        payload = job.get("payload") or {}
+        source_audio_dir_value = str(payload.get("source_audio_dir") or "").strip()
+        if not source_audio_dir_value:
+            raise RuntimeError("品質檢核任務缺少原始媒體保留路徑")
+        source_audio_dir = Path(source_audio_dir_value)
+        recheck_all_saved_meeting_quality_reports(
+            job["job_id"],
+            source_audio_dir=source_audio_dir,
+        )
 
     def _log_source_audio_retention(self, job: dict[str, Any], status: str) -> None:
         if status in {"failed", "cancelled", "done"}:

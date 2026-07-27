@@ -103,7 +103,12 @@ from backend.models import (
     AppConfigResponse,
     ErrorResponse,
 )
-from backend.job_queue import enqueue_audio_job, enqueue_line_audio_job, job_worker
+from backend.job_queue import (
+    enqueue_audio_job,
+    enqueue_line_audio_job,
+    enqueue_meeting_quality_recheck_job,
+    job_worker,
+)
 from backend import auth as auth_module
 from backend.auth import actor_from_request, auth_config_payload, require_permission
 from backend.cleanup import (
@@ -3128,6 +3133,31 @@ async def recheck_meeting_transcript_quality(meeting_id: int):
         ),
         source_audio_checked=source_audio_checked,
         quality_report=quality_report,
+    )
+
+
+@app.post(
+    "/meetings/quality/recheck-all",
+    response_model=JobResponse,
+    summary="排入全部會議逐字稿品質檢核",
+    tags=["會議記錄"],
+    status_code=202,
+)
+async def enqueue_all_meeting_transcript_quality_rechecks():
+    """Queue a local-only quality refresh without spending model tokens."""
+    job_id = str(uuid.uuid4())
+    try:
+        enqueue_meeting_quality_recheck_job(
+            job_id,
+            source_audio_dir=SOURCE_AUDIO_DIR,
+        )
+    except Exception as exc:
+        logger.exception("無法建立完整逐字稿品質檢核任務")
+        raise HTTPException(status_code=500, detail=f"無法建立品質檢核任務：{exc}") from exc
+    return JobResponse(
+        job_id=job_id,
+        status=JobStatus.PENDING,
+        message="已排入完整逐字稿品質檢核；未使用 Gemini。",
     )
 
 
