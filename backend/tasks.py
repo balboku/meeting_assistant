@@ -4427,9 +4427,10 @@ def process_audio_task(
                     and (i in forced_segments or cached_transcript_for_repair is not None)
                 )
                 targeted_gap_repair_notes: list[str] = []
+                detected_repair_ranges: list[dict[str, Any]] = []
                 transcript = None
                 if use_stable_rerun:
-                    gap_ranges = [
+                    detected_repair_ranges = [
                         *(
                             cached_gap_ranges
                             if cached_transcript_for_repair is not None
@@ -4450,7 +4451,7 @@ def process_audio_task(
                         client,
                         seg_path,
                         existing_forced_transcript,
-                        gap_ranges=gap_ranges,
+                        gap_ranges=detected_repair_ranges,
                         segment_index=i,
                         total_segments=total_segs,
                         job_id=job_id,
@@ -4490,7 +4491,11 @@ def process_audio_task(
                 kept_existing_reason = ""
                 kept_existing_issues: list[str] = []
                 rerun_candidate_issues: list[str] = []
-                if use_stable_rerun and not targeted_gap_repair_notes:
+                if (
+                    use_stable_rerun
+                    and not targeted_gap_repair_notes
+                    and not detected_repair_ranges
+                ):
                     (
                         kept_existing_after_rerun,
                         kept_existing_issues,
