@@ -4298,14 +4298,31 @@ def process_audio_task(
             full_transcript = _extract_transcript_section_body(source_content)
             if not full_transcript:
                 raise RuntimeError("原會議紀錄缺少完整逐字稿，無法只重整摘要。")
+            # Summary-only jobs must not turn a known-incomplete legacy
+            # transcript into a fresh-looking conclusion. Reuse the same
+            # no-model audio-backed quality check available from the detail UI
+            # before allowing the summary model to see the transcript.
+            summary_reuse_quality_report = recheck_transcript_quality_report(
+                full_transcript,
+                source_audio_path=prepared_audio_path,
+            )
+            summary_reuse_segments = [
+                dict(segment)
+                for segment in summary_reuse_quality_report.get("segments") or []
+                if isinstance(segment, dict)
+            ]
+            if summary_reuse_segments:
+                segment_report.extend(summary_reuse_segments)
+                _raise_if_delivery_blocked_by_segment_quality(segment_report)
             _raise_if_full_transcript_unsafe(full_transcript, job_id)
-            segment_report.extend({
-                "index": index,
-                "start_seconds": audio_slice.start_seconds,
-                "end_seconds": audio_slice.end_seconds,
-                "status": "reused",
-                "issues": [],
-            } for index, audio_slice in enumerate(audio_slices))
+            if not summary_reuse_segments:
+                segment_report.extend({
+                    "index": index,
+                    "start_seconds": audio_slice.start_seconds,
+                    "end_seconds": audio_slice.end_seconds,
+                    "status": "reused",
+                    "issues": [],
+                } for index, audio_slice in enumerate(audio_slices))
             meeting_content, summary_model_used = _generate_meeting_content_from_transcript(
                 client=client,
                 full_transcript=full_transcript,

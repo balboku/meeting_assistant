@@ -10496,6 +10496,62 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             self.assertIn("已沿用逐字稿", output_text)
             self.assertIn("保留這份完整逐字稿", output_text)
 
+    def test_summary_only_processing_blocks_audio_confirmed_transcript_gap(self):
+        from backend import tasks
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = object()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            source_path = root / "existing.md"
+            source_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n"
+                "[00:00] **[發言者 A]**：舊逐字稿遺漏中段內容。\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=[tasks.AudioSlice(audio_path, 0, 600)]), \
+                 mock.patch.object(
+                     tasks,
+                     "recheck_transcript_quality_report",
+                     return_value={
+                         "segments": [{
+                             "index": 0,
+                             "start_seconds": 0,
+                             "end_seconds": 600,
+                             "status": "rechecked",
+                             "issues": ["音訊含持續語音但時間戳在 02:00 至 04:00 間隔 120 秒"],
+                         }],
+                     },
+                 ), \
+                 mock.patch.object(tasks, "_generate_meeting_content_from_transcript") as summary_mock, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status") as status_mock, \
+                 mock.patch.object(tasks, "save_meeting") as save_meeting_mock:
+                output_path = tasks.process_audio_task(
+                    job_id="summary-only-gate-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                    summary_source_path=source_path,
+                )
+
+            self.assertIsNone(output_path)
+            summary_mock.assert_not_called()
+            save_meeting_mock.assert_not_called()
+            failure_details = [
+                str(call.kwargs.get("error_detail") or "")
+                for call in status_mock.call_args_list
+                if call.kwargs.get("status") == "failed"
+            ]
+            self.assertTrue(any("暫不產出會議結論" in detail for detail in failure_details))
+
     def test_web_ui_shows_quality_report_and_segment_rerun_controls(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
