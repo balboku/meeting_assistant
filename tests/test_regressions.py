@@ -10251,6 +10251,102 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             for event in quality_events
         ))
 
+    def test_direct_recovery_retries_with_smaller_chunks_for_many_merged_gaps(self):
+        from backend import tasks
+
+        first_pass_one = "[00:00] **[發言者 A]**：第一輪前半段。"
+        first_pass_two = "[00:00] **[發言者 B]**：第一輪後半段。"
+        first_pass_two_merged = "[03:00] **[發言者 B]**：第一輪後半段。"
+        second_pass = [
+            "[00:00] **[發言者 A]**：第二輪第一小段。",
+            "[00:00] **[發言者 B]**：第二輪第二小段。",
+            "[00:00] **[發言者 A]**：第二輪第三小段。",
+        ]
+        expected_second_pass = "\n\n".join([
+            second_pass[0],
+            "[02:00] **[發言者 B]**：第二輪第二小段。",
+            "[04:00] **[發言者 A]**：第二輪第三小段。",
+        ])
+
+        def reject_first_merged_pass(transcript, **_kwargs):
+            if first_pass_one in transcript and first_pass_two_merged in transcript:
+                raise RuntimeError("第 1/1 段轉錄不完整：合併後有多個時間缺口")
+
+        def first_pass_gap_ranges(_path, transcript, **_kwargs):
+            if first_pass_one in transcript and first_pass_two_merged in transcript:
+                return [
+                    {
+                        "start_seconds": index * 60,
+                        "end_seconds": index * 60 + 30,
+                        "issue": f"音訊含持續語音但時間戳有缺口 {index + 1}",
+                    }
+                    for index in range(tasks.TRANSCRIPT_AUTO_REPAIR_MAX_RANGES + 1)
+                ]
+            return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segment = root / "segment.mp3"
+            segment.write_bytes(b"segment")
+            first_chunks = [
+                (root / "first_0.mp3", 0, 180),
+                (root / "first_1.mp3", 180, 360),
+            ]
+            second_chunks = [
+                (root / "second_0.mp3", 0, 120),
+                (root / "second_1.mp3", 120, 240),
+                (root / "second_2.mp3", 240, 360),
+            ]
+            for path, *_bounds in [*first_chunks, *second_chunks]:
+                path.write_bytes(b"segment")
+
+            with mock.patch.object(
+                tasks,
+                "_split_audio_to_subsegments",
+                side_effect=[first_chunks, second_chunks],
+            ) as split_mock, \
+                 mock.patch.object(
+                     tasks,
+                     "_transcribe_segment",
+                     side_effect=[first_pass_one, first_pass_two, *second_pass],
+                 ), \
+                 mock.patch.object(
+                     tasks,
+                     "_raise_if_segment_transcript_incomplete",
+                     side_effect=reject_first_merged_pass,
+                 ), \
+                 mock.patch.object(
+                     tasks,
+                     "_speech_backed_timestamp_gap_quality_ranges",
+                     side_effect=first_pass_gap_ranges,
+                 ), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_repair_existing_segment_timestamp_gaps") as repair_mock, \
+                 mock.patch.object(tasks, "update_job_status"):
+                quality_events = []
+                transcript = tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    0,
+                    1,
+                    "many-merged-gaps-job",
+                    "gemini-test",
+                    offset_seconds=0,
+                    duration_seconds=360,
+                    is_last_segment=True,
+                    direct_recovery=True,
+                    preferred_recovery_chunk_seconds=180,
+                    quality_events=quality_events,
+                )
+
+        self.assertEqual(transcript, expected_second_pass)
+        self.assertEqual([call.args[1] for call in split_mock.call_args_list], [180, 120])
+        repair_mock.assert_not_called()
+        self.assertTrue(any(
+            "第 2 次穩定重跑" in str(event.get("issue") or "")
+            for event in quality_events
+        ))
+
     def test_failed_localized_repair_does_not_restore_known_bad_transcript(self):
         from backend import tasks
 

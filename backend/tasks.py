@@ -185,6 +185,14 @@ TRANSCRIPT_AUTO_REPAIR_MAX_RANGES = max(
     1,
     int(os.getenv("TRANSCRIPT_AUTO_REPAIR_MAX_RANGES", "2")),
 )
+# A forced rerun already starts with stable subsegments.  Permit one additional
+# smaller pass only when the merged result still has several proven faults.
+# This catches a bad chunk boundary without turning a single user action into
+# an unbounded series of model calls.
+TRANSCRIPT_DIRECT_RECOVERY_MAX_PASSES = min(
+    3,
+    max(1, int(os.getenv("TRANSCRIPT_DIRECT_RECOVERY_MAX_PASSES", "2"))),
+)
 TRANSCRIPT_REPAIR_MERGE_GUARD_SECONDS = 2
 TRANSCRIPT_INTEGRITY_MIN_CHAR_RATIO = 0.95
 TRANSCRIPT_INTEGRITY_MIN_TIMESTAMP_RATIO = 0.95
@@ -2864,6 +2872,14 @@ def _next_recovery_chunk_seconds(
     return None
 
 
+def _next_smaller_recovery_chunk_seconds(chunk_seconds: int) -> Optional[int]:
+    """Return the next stable retry size below the pass that just failed."""
+    for candidate in SEGMENT_RECOVERY_SPLIT_SECONDS:
+        if candidate < chunk_seconds:
+            return candidate
+    return None
+
+
 def _transcribe_segment_with_recovery(
     client,
     seg_path: Path,
@@ -2882,6 +2898,7 @@ def _transcribe_segment_with_recovery(
     direct_recovery: bool = False,
     allow_targeted_repair: bool = True,
     preferred_recovery_chunk_seconds: Optional[int] = None,
+    direct_recovery_pass: int = 1,
 ) -> str:
     quality_error: Optional[RuntimeError] = None
     if not direct_recovery:
@@ -3201,6 +3218,59 @@ def _transcribe_segment_with_recovery(
                         "；".join(repair_notes),
                     )
                     return repaired_transcript
+            elif (
+                len(merged_repair_ranges) > TRANSCRIPT_AUTO_REPAIR_MAX_RANGES
+                and direct_recovery_pass < TRANSCRIPT_DIRECT_RECOVERY_MAX_PASSES
+            ):
+                smaller_chunk_seconds = _next_smaller_recovery_chunk_seconds(chunk_seconds)
+                if smaller_chunk_seconds is not None:
+                    logger.warning(
+                        "[%s] ⚠️ 第 %s/%s 段小段合併後仍有 %s 個可定位異常，"
+                        "改用約 %s 秒小段進行第 %s 次穩定重跑",
+                        job_id,
+                        seg_index + 1,
+                        total_segs,
+                        len(merged_repair_ranges),
+                        smaller_chunk_seconds,
+                        direct_recovery_pass + 1,
+                    )
+                    if quality_events is not None:
+                        quality_events.append({
+                            "segment_index": seg_index,
+                            "start_seconds": offset_seconds,
+                            "end_seconds": offset_seconds + duration_seconds,
+                            "issue": (
+                                f"合併後偵測到 {len(merged_repair_ranges)} 個異常，"
+                                f"改用約 {smaller_chunk_seconds} 秒小段進行第 "
+                                f"{direct_recovery_pass + 1} 次穩定重跑"
+                            ),
+                        })
+                    update_job_status(
+                        job_id,
+                        "processing",
+                        f"🔁 第 {seg_index + 1}/{total_segs} 段有多個缺口，改用更短小段穩定重跑...",
+                        progress_current=seg_index,
+                        progress_total=total_segs,
+                    )
+                    return _transcribe_segment_with_recovery(
+                        client,
+                        seg_path,
+                        seg_index,
+                        total_segs,
+                        job_id,
+                        model,
+                        offset_seconds=offset_seconds,
+                        duration_seconds=duration_seconds,
+                        is_last_segment=is_last_segment,
+                        speaker_context=speaker_context,
+                        custom_vocabulary=custom_vocabulary,
+                        temp_segment_paths=temp_segment_paths,
+                        quality_events=quality_events,
+                        direct_recovery=True,
+                        allow_targeted_repair=allow_targeted_repair,
+                        preferred_recovery_chunk_seconds=smaller_chunk_seconds,
+                        direct_recovery_pass=direct_recovery_pass + 1,
+                    )
         if not direct_recovery:
             raise
     return recovered_transcript
