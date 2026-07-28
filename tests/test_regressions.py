@@ -4917,7 +4917,7 @@ class SearchRegressionTests(unittest.TestCase):
             "warnings": ["錄音音量偏低"],
             "segments": [{"index": 0, "start_seconds": 0, "end_seconds": 600, "issues": [issue]}],
             "review_segments": [{"index": 0, "label": "第 1 段", "start_seconds": 0, "end_seconds": 600, "issues": [issue]}],
-            "recheck": {"method": "local_transcript_and_audio", "source_audio_checked": True},
+            "recheck": {"version": 2, "method": "local_transcript_and_audio", "source_audio_checked": True},
         }
         meeting_id = database.save_meeting(
             title="Locally Rechecked Quality",
@@ -4952,6 +4952,41 @@ class SearchRegressionTests(unittest.TestCase):
         ]
         for field in shared_fields:
             self.assertEqual(detail[field], listed[field], field)
+
+    def test_stale_local_recheck_rederives_repeated_segment_location(self):
+        database, _tmp_path = self._isolated_database()
+        repeated_turns = "\n".join(
+            f"[10:0{index}] **[發言者 A]**：因為我是結所以我領車。"
+            for index in range(4)
+        )
+        record = {
+            "quality_score": 80,
+            "quality_label": "需複核",
+            "quality_report": {
+                "warnings": [
+                    "逐字稿品質警示：疑似連續重複轉錄（同一句連續重複 4 次：因為我是結所以我領車），建議重跑或複核相關分段。"
+                ],
+                "segments": [],
+                "review_segments": [],
+                # A method-only result is from before the current location
+                # rules and must not suppress fresh transcript-derived detail.
+                "recheck": {"method": "local_transcript_and_audio", "source_audio_checked": True},
+            },
+            "full_content": (
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n"
+                "[00:00] **[發言者 A]**：第一段正常。\n\n"
+                "### 【第 2 段｜10:00 – 20:00】\n"
+                f"{repeated_turns}\n"
+            ),
+            "output_path": "",
+        }
+
+        preview = database.apply_quality_preview_fields(record)
+
+        self.assertEqual(preview["quality_review_segments"], ["第 2 段"])
+        self.assertEqual(preview["quality_review_rerunnable_segments"], [1])
+        self.assertIn("因為我是結所以我領車", preview["quality_review_segment_summary"])
 
     def test_detail_api_does_not_smear_derived_location_issue_across_segments(self):
         database, tmp_path = self._isolated_database()
@@ -9098,6 +9133,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("原始音檔有爆音", "\n".join(report["warnings"]))
         self.assertEqual(report["recording"]["profile"], "audio_standard")
         self.assertEqual(report["recheck"]["method"], "local_transcript_only")
+        self.assertEqual(report["recheck"]["version"], tasks.TRANSCRIPT_QUALITY_RECHECK_VERSION)
 
     def test_quality_report_keeps_recovery_history_out_of_review_targets(self):
         from backend import tasks

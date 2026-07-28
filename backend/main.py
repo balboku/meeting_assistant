@@ -43,6 +43,7 @@ from backend.evidence import SUPPORTED_EVIDENCE_EXTENSIONS, analyze_and_append_e
 
 from backend.database import (
     DB_PATH,
+    TRANSCRIPT_QUALITY_RECHECK_VERSION,
     init_db,
     get_job,
     list_jobs,
@@ -2888,10 +2889,15 @@ async def get_meeting_detail(meeting_id: int):
 
     quality_report = dict(record.get("quality_report") or {})
     recheck_metadata = quality_report.get("recheck")
+    try:
+        recheck_version = int(recheck_metadata.get("version") or 0)
+    except (AttributeError, TypeError, ValueError):
+        recheck_version = 0
     has_current_local_recheck = (
         isinstance(recheck_metadata, dict)
         and str(recheck_metadata.get("method") or "").strip()
         in {"local_transcript_only", "local_transcript_and_audio"}
+        and recheck_version >= TRANSCRIPT_QUALITY_RECHECK_VERSION
     )
     full_content = content_with_quality_review_note({
         **record,

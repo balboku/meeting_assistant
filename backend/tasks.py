@@ -31,6 +31,7 @@ from google.genai import types
 from dotenv import load_dotenv
 
 from backend.database import (
+    TRANSCRIPT_QUALITY_RECHECK_VERSION,
     _repeated_transcript_turn_review_segments,
     get_meeting,
     is_job_cancel_requested,
@@ -4511,6 +4512,7 @@ def recheck_transcript_quality_report(
         if key not in report and key not in {"review_segments", "recheck"}:
             report[key] = value
     report["recheck"] = {
+        "version": TRANSCRIPT_QUALITY_RECHECK_VERSION,
         "method": "local_transcript_and_audio" if audio_available else "local_transcript_only",
         "source_audio_checked": audio_available,
     }

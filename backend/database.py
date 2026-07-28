@@ -28,6 +28,10 @@ from backend.auth import normalize_role
 logger = logging.getLogger("MeetingAssistant.DB")
 
 DEFAULT_JOB_MAX_ATTEMPTS = int(os.getenv("JOB_QUEUE_MAX_ATTEMPTS", "5"))
+# Increment this whenever local transcript-quality rules change in a way that
+# can alter review locations. Older rechecks remain visible, but must not mask
+# current diagnostics until they have been refreshed locally.
+TRANSCRIPT_QUALITY_RECHECK_VERSION = 2
 TRANSIENT_RETRY_MARKERS = (
     "503",
     "429",
@@ -2351,10 +2355,15 @@ def apply_quality_preview_fields(
     record.update(_source_media_recording_metadata(quality_report))
     if isinstance(quality_report, dict):
         recheck_metadata = quality_report.get("recheck")
+        try:
+            recheck_version = int(recheck_metadata.get("version") or 0)
+        except (AttributeError, TypeError, ValueError):
+            recheck_version = 0
         has_current_local_recheck = (
             isinstance(recheck_metadata, dict)
             and str(recheck_metadata.get("method") or "").strip()
             in {"local_transcript_only", "local_transcript_and_audio"}
+            and recheck_version >= TRANSCRIPT_QUALITY_RECHECK_VERSION
         )
         skip_derived_location_warning_segments = has_structured_review_issues(quality_report)
         warnings = quality_report.get("warnings") or []
