@@ -4711,6 +4711,40 @@ class SearchRegressionTests(unittest.TestCase):
             )
         )
 
+    def test_review_segment_details_drop_generic_single_word_repeat_when_precise_issue_exists(self):
+        from backend.database import apply_quality_preview_fields
+
+        precise_issue = "分段疑似單字重複轉錄幻覺（「那」連續重複 120 次）"
+        quality_report = {
+            "review_segments": [
+                {
+                    "index": 2,
+                    "label": "第 3 段",
+                    "start_seconds": 1200,
+                    "end_seconds": 1800,
+                    "issues": ["分段疑似單字重複轉錄幻覺", precise_issue],
+                },
+            ],
+            "segments": [{"index": 2, "issues": [precise_issue]}],
+        }
+
+        record = apply_quality_preview_fields(
+            {
+                "title": "Single Word Repeat",
+                "date": "2026/07/27",
+                "source_audio": "single-word-repeat.webm",
+                "output_path": "single-word-repeat.md",
+                "summary_preview": "summary",
+                "quality_report": quality_report,
+            },
+            quality_report=quality_report,
+        )
+
+        self.assertEqual(
+            record["quality_review_segment_details"][0]["issues"],
+            [precise_issue],
+        )
+
     def test_review_segment_summary_marks_additional_segment_issues(self):
         database, tmp_path = self._isolated_database()
         output_path = tmp_path / "multi-review-issue.md"
@@ -4863,6 +4897,61 @@ class SearchRegressionTests(unittest.TestCase):
         self.assertEqual(detail["quality_review_segments"], ["第 8 段"])
         self.assertEqual(detail["quality_review_rerunnable_segments"], [7])
         self.assertIn("因為我是結所以我領車", detail["quality_review_segment_summary"])
+
+    def test_locally_rechecked_detail_uses_persisted_quality_report(self):
+        database, tmp_path = self._isolated_database()
+        output_path = tmp_path / "locally-rechecked.md"
+        output_path.write_text(
+            "## 📋 一、討論摘要 (Discussion Summary)\n摘要\n"
+            "## ✅ 二、最終決議 (Final Decisions)\n決議\n"
+            "## 📌 三、待辦事項 (Action Items)\n"
+            "| # | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|\n| A1 | 無 | 無 | 無 | 中 |\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：已由本機重檢確認的內容。\n",
+            encoding="utf-8",
+        )
+        issue = "分段疑似單字重複轉錄幻覺（「那」連續重複 20 次）"
+        quality_report = {
+            "warnings": ["錄音音量偏低"],
+            "segments": [{"index": 0, "start_seconds": 0, "end_seconds": 600, "issues": [issue]}],
+            "review_segments": [{"index": 0, "label": "第 1 段", "start_seconds": 0, "end_seconds": 600, "issues": [issue]}],
+            "recheck": {"method": "local_transcript_and_audio", "source_audio_checked": True},
+        }
+        meeting_id = database.save_meeting(
+            title="Locally Rechecked Quality",
+            date="2026/07/27",
+            source_audio="locally-rechecked.webm",
+            output_path=str(output_path),
+            summary="locally-rechecked-summary",
+            quality_report=quality_report,
+        )
+        listed = next(row for row in database.list_meetings() if row["id"] == meeting_id)
+
+        import backend.main as main
+
+        with mock.patch.object(
+            main,
+            "_full_transcript_quality_issues",
+            side_effect=AssertionError("已重檢紀錄不應在詳細頁重新推測品質"),
+        ):
+            detail_response = asgi_request(main.app, "GET", f"/meetings/{meeting_id}")
+        self.assertEqual(detail_response.status_code, 200)
+        detail = detail_response.json()
+
+        shared_fields = [
+            "quality_warning_preview",
+            "quality_warning_text",
+            "quality_warning_count",
+            "quality_review_segments",
+            "quality_review_segment_details",
+            "quality_review_segment_summary",
+            "quality_review_segment_count",
+            "quality_review_rerunnable_segments",
+        ]
+        for field in shared_fields:
+            self.assertEqual(detail[field], listed[field], field)
 
     def test_detail_api_does_not_smear_derived_location_issue_across_segments(self):
         database, tmp_path = self._isolated_database()

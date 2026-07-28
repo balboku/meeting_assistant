@@ -2247,6 +2247,7 @@ def apply_quality_preview_fields(
     review_segment_issue_previews: list[str] = []
     quality_warning_lines_for_lookup: list[str] = []
     generic_review_issue = "品質警示提及此分段"
+    has_current_local_recheck = False
 
     def has_structured_review_issues(report: Any) -> bool:
         if not isinstance(report, dict):
@@ -2263,17 +2264,20 @@ def apply_quality_preview_fields(
         unique_issues = list(dict.fromkeys(issue for issue in issues if issue))
         if any(issue != generic_review_issue for issue in unique_issues):
             unique_issues = [issue for issue in unique_issues if issue != generic_review_issue]
-        repeated_hallucination_preview = "分段疑似重複轉錄幻覺"
-        if repeated_hallucination_preview in unique_issues and any(
-            issue != repeated_hallucination_preview
-            and repeated_hallucination_preview in issue
-            for issue in unique_issues
+        for generic_issue in (
+            "分段疑似重複轉錄幻覺",
+            "分段疑似短句重複轉錄幻覺",
+            "分段疑似單字重複轉錄幻覺",
         ):
-            unique_issues = [
-                issue
+            if generic_issue in unique_issues and any(
+                issue != generic_issue and issue.startswith(generic_issue)
                 for issue in unique_issues
-                if issue != repeated_hallucination_preview
-            ]
+            ):
+                unique_issues = [
+                    issue
+                    for issue in unique_issues
+                    if issue != generic_issue
+                ]
         return _ordered_quality_review_issues(unique_issues)
 
     def add_review_segment_label(
@@ -2346,6 +2350,12 @@ def apply_quality_preview_fields(
     record["source_media_type"] = _source_media_type_from_metadata(record, quality_report)
     record.update(_source_media_recording_metadata(quality_report))
     if isinstance(quality_report, dict):
+        recheck_metadata = quality_report.get("recheck")
+        has_current_local_recheck = (
+            isinstance(recheck_metadata, dict)
+            and str(recheck_metadata.get("method") or "").strip()
+            in {"local_transcript_only", "local_transcript_and_audio"}
+        )
         skip_derived_location_warning_segments = has_structured_review_issues(quality_report)
         warnings = quality_report.get("warnings") or []
         if isinstance(warnings, list):
@@ -2438,27 +2448,29 @@ def apply_quality_preview_fields(
                 quality_warning_lines_for_lookup.append(warning)
                 add_review_segment_labels_from_text(warning)
     output_path_text = str(record.get("output_path") or "")
-    legacy_repeated_details = _legacy_markdown_repeated_turn_review_segments(output_path_text)
     full_content_text = str(record.get("full_content") or "")
-    if not legacy_repeated_details and full_content_text.strip():
-        legacy_repeated_details = _markdown_repeated_turn_review_segments_from_text(full_content_text)
+    legacy_repeated_details: list[dict[str, Any]] = []
     phrase_review_details: list[dict[str, Any]] = []
-    phrase_lookup_warnings = [
-        warning
-        for warning in quality_warning_lines_for_lookup
-        if _repeated_phrase_from_warning(warning)
-        and not review_segment_details_from_text(warning)
-    ]
-    if phrase_lookup_warnings and not legacy_repeated_details:
-        phrase_review_details = _legacy_markdown_warning_phrase_review_segments(
-            output_path_text,
-            phrase_lookup_warnings,
-        )
-        if not phrase_review_details and full_content_text.strip():
-            phrase_review_details = _markdown_warning_phrase_review_segments_from_text(
-                full_content_text,
+    if not has_current_local_recheck:
+        legacy_repeated_details = _legacy_markdown_repeated_turn_review_segments(output_path_text)
+        if not legacy_repeated_details and full_content_text.strip():
+            legacy_repeated_details = _markdown_repeated_turn_review_segments_from_text(full_content_text)
+        phrase_lookup_warnings = [
+            warning
+            for warning in quality_warning_lines_for_lookup
+            if _repeated_phrase_from_warning(warning)
+            and not review_segment_details_from_text(warning)
+        ]
+        if phrase_lookup_warnings and not legacy_repeated_details:
+            phrase_review_details = _legacy_markdown_warning_phrase_review_segments(
+                output_path_text,
                 phrase_lookup_warnings,
             )
+            if not phrase_review_details and full_content_text.strip():
+                phrase_review_details = _markdown_warning_phrase_review_segments_from_text(
+                    full_content_text,
+                    phrase_lookup_warnings,
+                )
     if phrase_review_details:
         known_segment_indices.update(_markdown_transcript_segment_indices(output_path_text))
         if full_content_text.strip():

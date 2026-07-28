@@ -2887,6 +2887,12 @@ async def get_meeting_detail(meeting_id: int):
         raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
 
     quality_report = dict(record.get("quality_report") or {})
+    recheck_metadata = quality_report.get("recheck")
+    has_current_local_recheck = (
+        isinstance(recheck_metadata, dict)
+        and str(recheck_metadata.get("method") or "").strip()
+        in {"local_transcript_only", "local_transcript_and_audio"}
+    )
     full_content = content_with_quality_review_note({
         **record,
         "quality_report": quality_report or record.get("quality_report"),
@@ -2915,7 +2921,7 @@ async def get_meeting_detail(meeting_id: int):
                 "speaker_labels": quality_report.get("speaker_labels") or [],
             })
 
-    if transcript:
+    if transcript and not has_current_local_recheck:
         transcript_warnings = [
             f"逐字稿品質警示：{issue}"
             for issue in _full_transcript_quality_issues(transcript)
@@ -2961,38 +2967,39 @@ async def get_meeting_detail(meeting_id: int):
                 "speaker_labels": quality_report.get("speaker_labels") or [],
             })
 
-    summary_warnings = [
-        f"摘要品質警示：{issue}"
-        for issue in _detail_summary_quality_issues(full_content)
-    ]
-    if summary_warnings:
-        warnings = [
-            *list(quality_report.get("warnings") or []),
-            *summary_warnings,
+    if not has_current_local_recheck:
+        summary_warnings = [
+            f"摘要品質警示：{issue}"
+            for issue in _detail_summary_quality_issues(full_content)
         ]
-        quality_report.update({
-            "score": quality_report.get("score"),
-            "label": quality_report.get("label") or "需複核",
-            "warnings": list(dict.fromkeys(warnings)),
-            "timestamp_count": quality_report.get("timestamp_count") or len(re.findall(r"\[\d{1,3}:[0-5]\d\]", transcript)),
-            "speaker_labels": quality_report.get("speaker_labels") or [],
-        })
-
-    if base_warning_lines:
-        merged_warnings = _merge_detail_quality_warnings(
-            list(quality_report.get("warnings") or []),
-            base_warning_lines,
-        )
-        if merged_warnings:
+        if summary_warnings:
+            warnings = [
+                *list(quality_report.get("warnings") or []),
+                *summary_warnings,
+            ]
             quality_report.update({
                 "score": quality_report.get("score"),
                 "label": quality_report.get("label") or "需複核",
-                "warnings": merged_warnings,
+                "warnings": list(dict.fromkeys(warnings)),
                 "timestamp_count": quality_report.get("timestamp_count") or len(re.findall(r"\[\d{1,3}:[0-5]\d\]", transcript)),
                 "speaker_labels": quality_report.get("speaker_labels") or [],
             })
 
-    if quality_report:
+        if base_warning_lines:
+            merged_warnings = _merge_detail_quality_warnings(
+                list(quality_report.get("warnings") or []),
+                base_warning_lines,
+            )
+            if merged_warnings:
+                quality_report.update({
+                    "score": quality_report.get("score"),
+                    "label": quality_report.get("label") or "需複核",
+                    "warnings": merged_warnings,
+                    "timestamp_count": quality_report.get("timestamp_count") or len(re.findall(r"\[\d{1,3}:[0-5]\d\]", transcript)),
+                    "speaker_labels": quality_report.get("speaker_labels") or [],
+                })
+
+    if quality_report and not has_current_local_recheck:
         _refresh_quality_report_review_segments(quality_report)
 
     detail_quality_report = quality_report or record.get("quality_report")
