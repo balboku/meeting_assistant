@@ -10149,6 +10149,72 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("穩定重跑前半段", transcript)
         self.assertIn("穩定重跑後半段", transcript)
 
+    def test_direct_recovery_repairs_gap_detected_only_after_child_transcripts_merge(self):
+        from backend import tasks
+
+        child_one = "[00:00] **[發言者 A]**：第一個小段的內容。"
+        child_two = "[01:50] **[發言者 B]**：第二個小段的內容。"
+        child_two_merged = "[04:50] **[發言者 B]**：第二個小段的內容。"
+        repaired = (
+            "[00:00] **[發言者 A]**：第一個小段的內容。\n"
+            "[02:30] **[發言者 A]**：跨小段缺口補回的內容。\n"
+            "[04:50] **[發言者 B]**：第二個小段的內容。"
+        )
+
+        def reject_only_merged_gap(transcript, **_kwargs):
+            if child_one in transcript and child_two_merged in transcript:
+                raise RuntimeError("第 1/1 段轉錄不完整：音訊含持續語音但時間戳有缺口")
+
+        def merged_gap_ranges(_path, transcript, **_kwargs):
+            if child_one in transcript and child_two_merged in transcript:
+                return [{
+                    "start_seconds": 120,
+                    "end_seconds": 290,
+                    "issue": "音訊含持續語音但時間戳在 02:00 至 04:50 間隔 170 秒",
+                }]
+            return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            segment = Path(tmpdir) / "segment.mp3"
+            segment.write_bytes(b"segment")
+            with mock.patch.object(
+                tasks,
+                "_split_audio_to_subsegments",
+                return_value=[(segment, 0, 180), (segment, 180, 360)],
+            ), \
+                 mock.patch.object(tasks, "_transcribe_segment", side_effect=[child_one, child_two]), \
+                 mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete", side_effect=reject_only_merged_gap), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", side_effect=merged_gap_ranges), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(
+                     tasks,
+                     "_repair_existing_segment_timestamp_gaps",
+                     return_value=(repaired, ["已局部補救時間缺口：02:00-04:50"]),
+                 ) as repair_mock, \
+                 mock.patch.object(tasks, "update_job_status"):
+                quality_events = []
+                transcript = tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    0,
+                    1,
+                    "merged-gap-repair-job",
+                    "gemini-test",
+                    offset_seconds=0,
+                    duration_seconds=360,
+                    is_last_segment=True,
+                    direct_recovery=True,
+                    quality_events=quality_events,
+                )
+
+        self.assertEqual(transcript, repaired)
+        repair_mock.assert_called_once()
+        self.assertEqual(repair_mock.call_args.kwargs["gap_ranges"][0]["start_seconds"], 120)
+        self.assertTrue(any(
+            str(event.get("issue") or "").startswith("合併後局部補救：")
+            for event in quality_events
+        ))
+
     def test_failed_localized_repair_does_not_restore_known_bad_transcript(self):
         from backend import tasks
 

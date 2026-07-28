@@ -3147,6 +3147,59 @@ def _transcribe_segment_with_recovery(
                 "end_seconds": offset_seconds + duration_seconds,
                 "issue": str(exc),
             })
+        # A gap can straddle the boundary between two otherwise valid recovery
+        # chunks.  It is only visible after their transcripts are merged, so
+        # repair that precise root-level range once before giving it back to the
+        # caller as an unresolved quality issue.
+        if direct_recovery and allow_targeted_repair:
+            merged_repair_ranges = _coalesce_transcript_repair_ranges([
+                *_speech_backed_timestamp_gap_quality_ranges(
+                    seg_path,
+                    recovered_transcript,
+                    expected_start_seconds=offset_seconds,
+                    expected_end_seconds=offset_seconds + duration_seconds,
+                ),
+                *_transcript_repetition_repair_ranges(
+                    recovered_transcript,
+                    expected_start_seconds=offset_seconds,
+                    expected_end_seconds=offset_seconds + duration_seconds,
+                ),
+            ])
+            if 0 < len(merged_repair_ranges) <= TRANSCRIPT_AUTO_REPAIR_MAX_RANGES:
+                repaired_transcript, repair_notes = _repair_existing_segment_timestamp_gaps(
+                    client,
+                    seg_path,
+                    recovered_transcript,
+                    gap_ranges=merged_repair_ranges,
+                    segment_index=seg_index,
+                    total_segments=total_segs,
+                    job_id=job_id,
+                    model=model,
+                    segment_start_seconds=offset_seconds,
+                    segment_end_seconds=offset_seconds + duration_seconds,
+                    is_last_segment=is_last_segment,
+                    speaker_context=speaker_context,
+                    custom_vocabulary=custom_vocabulary,
+                    temp_segment_paths=temp_segment_paths,
+                    quality_events=quality_events,
+                    preferred_recovery_chunk_seconds=preferred_recovery_chunk_seconds,
+                )
+                if repaired_transcript is not None:
+                    if quality_events is not None:
+                        quality_events.append({
+                            "segment_index": seg_index,
+                            "start_seconds": offset_seconds,
+                            "end_seconds": offset_seconds + duration_seconds,
+                            "issue": "合併後局部補救：" + "；".join(repair_notes),
+                        })
+                    logger.info(
+                        "[%s] 🩹 第 %s/%s 段已補救跨小段交界的轉錄異常：%s",
+                        job_id,
+                        seg_index + 1,
+                        total_segs,
+                        "；".join(repair_notes),
+                    )
+                    return repaired_transcript
         if not direct_recovery:
             raise
     return recovered_transcript
