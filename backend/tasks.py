@@ -5056,7 +5056,7 @@ def process_audio_task(
                 preferred_recovery_chunk_seconds: Optional[int] = None
                 transcript = None
                 if use_stable_rerun:
-                    detected_repair_ranges = [
+                    detected_repair_ranges = _coalesce_transcript_repair_ranges([
                         *(
                             cached_gap_ranges
                             if cached_transcript_for_repair is not None
@@ -5072,36 +5072,55 @@ def process_audio_task(
                             expected_start_seconds=audio_slice.start_seconds,
                             expected_end_seconds=audio_slice.end_seconds,
                         ),
-                    ]
+                    ])
                     preferred_recovery_chunk_seconds = _preferred_recovery_chunk_seconds(
                         detected_repair_ranges
                     )
-                    transcript, targeted_gap_repair_notes = _repair_existing_segment_timestamp_gaps(
-                        client,
-                        seg_path,
-                        existing_forced_transcript,
-                        gap_ranges=detected_repair_ranges,
-                        segment_index=i,
-                        total_segments=total_segs,
-                        job_id=job_id,
-                        model=model,
-                        segment_start_seconds=audio_slice.start_seconds,
-                        segment_end_seconds=audio_slice.end_seconds,
-                        is_last_segment=i >= total_segs - 1,
-                        speaker_context=speaker_context,
-                        custom_vocabulary=custom_vocabulary,
-                        temp_segment_paths=temporary_segment_paths,
-                        quality_events=segment_quality_events,
-                        preferred_recovery_chunk_seconds=preferred_recovery_chunk_seconds,
-                    )
-                    if transcript is not None:
+                    if len(detected_repair_ranges) > TRANSCRIPT_AUTO_REPAIR_MAX_RANGES:
+                        issue = (
+                            f"偵測到 {len(detected_repair_ranges)} 個可定位異常，"
+                            "略過逐點局部補救並進行穩定小段重跑"
+                        )
                         logger.info(
-                            "[%s] 🩹 第 %s/%s 段已完成局部時間缺口補救：%s",
+                            "[%s] ℹ️ 第 %s/%s 段%s",
                             job_id,
                             i + 1,
                             total_segs,
-                            "；".join(targeted_gap_repair_notes),
+                            issue,
                         )
+                        segment_quality_events.append({
+                            "segment_index": i,
+                            "start_seconds": audio_slice.start_seconds,
+                            "end_seconds": audio_slice.end_seconds,
+                            "issue": issue,
+                        })
+                    else:
+                        transcript, targeted_gap_repair_notes = _repair_existing_segment_timestamp_gaps(
+                            client,
+                            seg_path,
+                            existing_forced_transcript,
+                            gap_ranges=detected_repair_ranges,
+                            segment_index=i,
+                            total_segments=total_segs,
+                            job_id=job_id,
+                            model=model,
+                            segment_start_seconds=audio_slice.start_seconds,
+                            segment_end_seconds=audio_slice.end_seconds,
+                            is_last_segment=i >= total_segs - 1,
+                            speaker_context=speaker_context,
+                            custom_vocabulary=custom_vocabulary,
+                            temp_segment_paths=temporary_segment_paths,
+                            quality_events=segment_quality_events,
+                            preferred_recovery_chunk_seconds=preferred_recovery_chunk_seconds,
+                        )
+                        if transcript is not None:
+                            logger.info(
+                                "[%s] 🩹 第 %s/%s 段已完成局部時間缺口補救：%s",
+                                job_id,
+                                i + 1,
+                                total_segs,
+                                "；".join(targeted_gap_repair_notes),
+                            )
                 if transcript is None:
                     transcript = _transcribe_segment_with_recovery(
                         client,
