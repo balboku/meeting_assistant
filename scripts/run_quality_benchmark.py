@@ -100,6 +100,41 @@ def _max_consecutive_repeated_turns(transcript: str) -> tuple[int, str]:
     return max_run, max_text
 
 
+def _timestamp_seconds(value: str) -> int:
+    minutes, seconds = value.split(":", 1)
+    return int(minutes) * 60 + int(seconds)
+
+
+def _segment_text_density(transcript: str) -> list[dict[str, Any]]:
+    """Measure written speech per second for explicit transcript segments."""
+    heading_pattern = re.compile(
+        r"^#{1,6}\s*[^\n]*?(?P<start>\d{1,3}:[0-5]\d)\s*(?:–|-)\s*"
+        r"(?P<end>\d{1,3}:[0-5]\d)[^\n]*$",
+        flags=re.MULTILINE,
+    )
+    headings = list(heading_pattern.finditer(transcript or ""))
+    segments: list[dict[str, Any]] = []
+    for index, heading in enumerate(headings):
+        body_end = headings[index + 1].start() if index + 1 < len(headings) else len(transcript)
+        body = transcript[heading.end() : body_end]
+        start_seconds = _timestamp_seconds(heading.group("start"))
+        end_seconds = _timestamp_seconds(heading.group("end"))
+        duration_seconds = max(1, end_seconds - start_seconds)
+        spoken_text = re.sub(r"\[\d{1,3}:[0-5]\d\]", "", body)
+        spoken_text = re.sub(r"\*{0,2}\[[^\]]+\]\*{0,2}\s*[：:]", "", spoken_text)
+        spoken_text = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]+", "", spoken_text)
+        characters = len(spoken_text)
+        segments.append({
+            "index": index + 1,
+            "start_seconds": start_seconds,
+            "end_seconds": end_seconds,
+            "duration_seconds": duration_seconds,
+            "characters": characters,
+            "characters_per_second": characters / duration_seconds,
+        })
+    return segments
+
+
 def score_markdown(markdown: str, expected: dict[str, Any]) -> dict[str, Any]:
     summary = _section(markdown, ("討論摘要", "Discussion Summary"), ("最終決議", "Final Decisions"))
     decisions = _section(markdown, ("最終決議", "Final Decisions"), ("待辦事項", "Action Items"))
@@ -116,6 +151,23 @@ def score_markdown(markdown: str, expected: dict[str, Any]) -> dict[str, Any]:
     omission_notice = _omission_notice(transcript)
     max_repeated_turns, repeated_turn_text = _max_consecutive_repeated_turns(transcript)
     repeated_turn_limit = int(expected.get("max_consecutive_repeated_turns", 3))
+    segment_densities = _segment_text_density(transcript)
+    sparse_segments: list[dict[str, Any]] = []
+    min_segment_char_rate = expected.get("min_segment_chars_per_second")
+    if min_segment_char_rate is not None:
+        min_segment_char_rate = max(0.0, float(min_segment_char_rate))
+        density_min_duration = max(
+            1,
+            int(expected.get("segment_density_min_duration_seconds", 120)),
+        )
+        sparse_segments = [
+            segment
+            for segment in segment_densities
+            if (
+                int(segment["duration_seconds"]) >= density_min_duration
+                and float(segment["characters_per_second"]) < min_segment_char_rate
+            )
+        ]
 
     checks: list[dict[str, Any]] = [
         _check(bool(summary.strip()), "has_discussion_summary", 3),
@@ -136,6 +188,21 @@ def score_markdown(markdown: str, expected: dict[str, Any]) -> dict[str, Any]:
             f"max_run={max_repeated_turns}; limit={repeated_turn_limit}; text={repeated_turn_text[:40]}",
         ),
     ]
+    if min_segment_char_rate is not None:
+        sparse_detail = ", ".join(
+            (
+                f"segment={segment['index']} "
+                f"rate={float(segment['characters_per_second']):.2f} "
+                f"chars={segment['characters']} duration={segment['duration_seconds']}"
+            )
+            for segment in sparse_segments
+        )
+        checks.append(_check(
+            not sparse_segments,
+            "transcript_segments_have_sufficient_text_density",
+            3,
+            sparse_detail,
+        ))
 
     for term in expected.get("required_terms", []):
         checks.append(_check(term in markdown, f"required_term:{term}", 2))
@@ -159,6 +226,8 @@ def score_markdown(markdown: str, expected: dict[str, Any]) -> dict[str, Any]:
             "segment_heading_count": segment_heading_count,
             "omission_notice": omission_notice,
             "max_consecutive_repeated_turns": max_repeated_turns,
+            "segment_text_density": segment_densities,
+            "sparse_segment_count": len(sparse_segments),
         },
     }
 
@@ -243,15 +312,36 @@ def main() -> int:
     parser.add_argument("--recursive", action="store_true", help="Recursively scan --scan-dir for Markdown files.")
     parser.add_argument("--limit", type=int, default=0, help="Limit scan mode to the newest N Markdown files.")
     parser.add_argument("--min-score", type=float, default=80.0, help="Minimum passing score per case.")
+    parser.add_argument(
+        "--min-segment-chars-per-second",
+        type=float,
+        help="Optional lower bound for written text density in long transcript segments.",
+    )
+    parser.add_argument(
+        "--segment-density-min-duration-seconds",
+        type=int,
+        default=120,
+        help="Only apply --min-segment-chars-per-second to segments at least this long.",
+    )
     parser.add_argument("--format", choices=("json", "summary"), default="json", help="Output format.")
     args = parser.parse_args()
 
     if args.scan_dir:
+        scan_expected: dict[str, Any] = {}
+        if args.min_segment_chars_per_second is not None:
+            scan_expected = {
+                "min_segment_chars_per_second": args.min_segment_chars_per_second,
+                "segment_density_min_duration_seconds": max(
+                    1,
+                    args.segment_density_min_duration_seconds,
+                ),
+            }
         report = run_scan_dir(
             args.scan_dir,
             args.min_score,
             recursive=args.recursive,
             limit=max(0, args.limit),
+            expected=scan_expected,
         )
     else:
         if not args.manifest:

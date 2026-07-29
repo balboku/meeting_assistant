@@ -31,7 +31,7 @@ DEFAULT_JOB_MAX_ATTEMPTS = int(os.getenv("JOB_QUEUE_MAX_ATTEMPTS", "5"))
 # Increment this whenever local transcript-quality rules change in a way that
 # can alter review locations. Older rechecks remain visible, but must not mask
 # current diagnostics until they have been refreshed locally.
-TRANSCRIPT_QUALITY_RECHECK_VERSION = 2
+TRANSCRIPT_QUALITY_RECHECK_VERSION = 4
 TRANSIENT_RETRY_MARKERS = (
     "503",
     "429",
@@ -1147,11 +1147,33 @@ def _legacy_markdown_quality_warning_count(output_path: str) -> int:
     return len(_legacy_markdown_quality_warnings(output_path))
 
 
-def _transient_retry_delay_seconds() -> int:
+def _transient_retry_delay_seconds(attempts: int = 1) -> int:
+    """Return a bounded exponential delay for transient upstream failures."""
     try:
-        return max(0, int(os.getenv("JOB_QUEUE_TRANSIENT_RETRY_DELAY_SECONDS", "30")))
+        base_delay = max(0, int(os.getenv("JOB_QUEUE_TRANSIENT_RETRY_DELAY_SECONDS", "30")))
     except ValueError:
-        return 30
+        base_delay = 30
+    if base_delay <= 0:
+        return 0
+
+    try:
+        multiplier = float(os.getenv("JOB_QUEUE_TRANSIENT_RETRY_BACKOFF_MULTIPLIER", "2"))
+    except ValueError:
+        multiplier = 2.0
+    multiplier = min(10.0, max(1.0, multiplier))
+
+    try:
+        max_delay = max(0, int(os.getenv("JOB_QUEUE_TRANSIENT_RETRY_MAX_DELAY_SECONDS", "300")))
+    except ValueError:
+        max_delay = 300
+    if max_delay <= 0:
+        return base_delay
+
+    try:
+        retry_number = max(1, int(attempts))
+    except (TypeError, ValueError):
+        retry_number = 1
+    return min(max_delay, round(base_delay * (multiplier ** (retry_number - 1))))
 
 
 def _is_transient_error(error_detail: str) -> bool:
@@ -1159,11 +1181,11 @@ def _is_transient_error(error_detail: str) -> bool:
     return any(marker in normalized for marker in TRANSIENT_RETRY_MARKERS)
 
 
-def _retry_queued_at(error_detail: str) -> str:
+def _retry_queued_at(error_detail: str, attempts: int = 1) -> str:
     if not _is_transient_error(error_detail):
         return _now()
 
-    delay_seconds = _transient_retry_delay_seconds()
+    delay_seconds = _transient_retry_delay_seconds(attempts)
     if delay_seconds <= 0:
         return _now()
     return (datetime.now() + timedelta(seconds=delay_seconds)).strftime("%Y-%m-%d %H:%M:%S")
@@ -1204,6 +1226,11 @@ def _has_recoverable_payload(row: sqlite3.Row) -> bool:
         return bool(payload.get("audio_path") and payload.get("output_dir"))
     if task_type == "line_audio_processing":
         return bool(payload.get("message_id") and payload.get("user_id"))
+    if task_type == "meeting_semantic_review":
+        try:
+            return int(payload.get("meeting_id")) > 0
+        except (TypeError, ValueError):
+            return False
     return False
 
 
@@ -1908,7 +1935,7 @@ def retry_or_fail_job(job_id: str, error_detail: str) -> str:
         attempts = int(row["attempts"] or 0)
         max_attempts = int(row["max_attempts"] or 1)
         if attempts < max_attempts:
-            retry_at = _retry_queued_at(error_detail)
+            retry_at = _retry_queued_at(error_detail, attempts)
             retry_message = f"處理失敗，已重新排入佇列（第 {attempts}/{max_attempts} 次嘗試）。"
             if retry_at > now:
                 retry_message = (
@@ -2375,6 +2402,12 @@ def apply_quality_preview_fields(
             for warning in warnings:
                 warning_text = str(warning)
                 quality_warning_lines_for_lookup.append(warning_text)
+                # A current local recheck already stores canonical issue-to-
+                # segment mappings.  Its human-readable warning may mention
+                # several segments, so parsing it again can smear one issue
+                # across all of them.
+                if has_current_local_recheck and skip_derived_location_warning_segments:
+                    continue
                 if (
                     skip_derived_location_warning_segments
                     and _is_derived_review_location_warning(warning_text)

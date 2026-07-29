@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -902,6 +903,68 @@ database.save_meeting(
             self.assertIn("同一句連續重複 5 次", report["review_segments"][0]["issues"][0])
             self.assertIn("問題位置：第 8 段", report["warnings"][0])
 
+    def test_quality_review_backfill_restores_current_recheck_canonical_segments(self):
+        from backend import database
+        from scripts import backfill_quality_review_segments as backfill
+
+        repeated_issue = (
+            "疑似連續重複轉錄；同一句連續重複 4 次：那時候你把那個做；"
+            "重複時間：64:47-65:44"
+        )
+        timestamp_issue = "分段時間戳超過段尾 40:05：40:27"
+        quality_report = {
+            "warnings": [
+                "逐字稿品質警示：以下分段曾觸發轉錄品質補救或需複核："
+                "第 4 段｜30:02-40:05（分段時間戳超過段尾 40:05：40:27）、"
+                "第 7 段｜59:59-70:04（疑似連續重複轉錄；同一句連續重複 4 次：那時候你把那個做；"
+                "重複時間：64:47-65:44）。"
+            ],
+            "segments": [
+                {"index": 3, "start_seconds": 1802, "end_seconds": 2405, "issues": [timestamp_issue]},
+                {"index": 6, "start_seconds": 3599, "end_seconds": 4204, "issues": [repeated_issue]},
+            ],
+            "review_segments": [
+                {
+                    "index": 3,
+                    "label": "第 4 段",
+                    "start_seconds": 1802,
+                    "end_seconds": 2405,
+                    "issues": [timestamp_issue, repeated_issue],
+                },
+                {
+                    "index": 6,
+                    "label": "第 7 段",
+                    "start_seconds": 3599,
+                    "end_seconds": 4204,
+                    "issues": [repeated_issue],
+                },
+            ],
+            "recheck": {
+                "version": database.TRANSCRIPT_QUALITY_RECHECK_VERSION,
+                "method": "local_transcript_and_audio",
+                "source_audio_checked": True,
+            },
+        }
+        row = {
+            "id": 1,
+            "title": "Current Recheck Canonical Segments",
+            "output_path": "",
+            "quality_report_json": json.dumps(quality_report, ensure_ascii=False),
+        }
+
+        updated_report, derived = backfill._build_updated_report(row)
+
+        self.assertIsNotNone(updated_report)
+        self.assertEqual(
+            [(segment["index"], segment["issues"]) for segment in updated_report["review_segments"]],
+            [(3, [timestamp_issue]), (6, [repeated_issue])],
+        )
+        self.assertEqual(
+            derived["quality_review_segment_summary"],
+            f"第 4 段 30:02-40:05：{timestamp_issue}；"
+            f"第 7 段 59:59-70:04：{repeated_issue}",
+        )
+
     def test_markdown_quality_note_backfill_dry_run_then_apply(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1130,6 +1193,48 @@ database.save_meeting(
         self.assertIn("transcript_has_no_omission_notice", failed_names)
         self.assertIn("transcript_has_no_repeated_turn_loop", failed_names)
 
+    def test_quality_benchmark_flags_sparse_long_transcript_segments(self):
+        sparse_sample = (
+            "## 一、討論摘要 (Discussion Summary)\n\n"
+            "### D1. 測試議題\n- 摘要：測試。\n\n"
+            "## 二、最終決議 (Final Decisions)\n\n"
+            "| # | 關聯討論 | 決議 | 依據 | 狀態 |\n"
+            "|---|---|---|---|---|\n"
+            "| R1 | D1 | 確認測試。 | [00:00] | confirmed |\n\n"
+            "## 三、待辦事項 (Action Items)\n\n"
+            "| # | 關聯討論 | 關聯決議 | 任務描述 | 負責人 | 期限 | 優先級 |\n"
+            "|---|---|---|---|---|---|---|\n"
+            "| A1 | D1 | R1 | 完成測試。 | 發言者 A | 未提及 | 中 |\n\n"
+            "## 四、完整逐字稿 (Verbatim Transcript)\n\n"
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：只有很少的內容。\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scan_dir = Path(tmpdir)
+            (scan_dir / "sparse-meeting.md").write_text(sparse_sample, encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/run_quality_benchmark.py",
+                    "--scan-dir",
+                    str(scan_dir),
+                    "--min-score",
+                    "95",
+                    "--min-segment-chars-per-second",
+                    "1.5",
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        payload = json.loads(result.stdout)
+        failed_names = {item["name"] for item in payload["results"][0]["failed"]}
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("transcript_segments_have_sufficient_text_density", failed_names)
+
     def test_ci_runs_unit_tests_and_security_scan(self):
         ci = ROOT / ".github" / "workflows" / "ci.yml"
         security_scan = ROOT / "scripts" / "security_scan.py"
@@ -1331,10 +1436,158 @@ class MediaValidationRegressionTests(unittest.TestCase):
 
 
 class TaskRegressionTests(unittest.TestCase):
+    def test_audio_task_configures_bounded_gemini_http_timeout(self):
+        from backend import tasks
+
+        captured = {}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(
+                     tasks,
+                     "_prepare_audio_for_transcription",
+                     side_effect=RuntimeError("stop after client setup"),
+                 ), \
+                 mock.patch.object(tasks, "update_job_status"):
+                tasks.process_audio_task(
+                    job_id="http-timeout-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                )
+
+        self.assertEqual(captured["api_key"], "test-key")
+        self.assertEqual(
+            captured["http_options"].timeout,
+            tasks.GENAI_HTTP_TIMEOUT_SECONDS * 1000,
+        )
+
     def test_audio_processing_task_is_sync_so_background_tasks_use_threadpool(self):
         from backend.tasks import process_audio_task
 
         self.assertFalse(inspect.iscoroutinefunction(process_audio_task))
+
+    def test_transcription_503_uses_recovery_model_and_deletes_uploaded_media(self):
+        from backend import tasks
+
+        calls = []
+        uploaded = type("Uploaded", (), {
+            "name": "files/test-segment",
+            "state": type("State", (), {"name": "ACTIVE"})(),
+        })()
+
+        class FakeFiles:
+            def __init__(self):
+                self.deleted = []
+
+            def upload(self, **_kwargs):
+                return uploaded
+
+            def delete(self, *, name):
+                self.deleted.append(name)
+
+        class FakeModels:
+            def generate_content(self, *, model, **_kwargs):
+                calls.append(model)
+                if model == "gemini-primary":
+                    raise RuntimeError("503 Service Unavailable")
+                return type("Response", (), {
+                    "text": "[00:00] **[發言者 A]**：備援模型完成轉錄。",
+                })()
+
+        class FakeClient:
+            def __init__(self):
+                self.files = FakeFiles()
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            segment = Path(tmpdir) / "segment.mp3"
+            segment.write_bytes(b"audio")
+            client = FakeClient()
+            transient_fallback_models = []
+            response_models = []
+            with mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"), \
+                 mock.patch.object(tasks, "TRANSCRIPTION_RECOVERY_MODEL", "gemini-recovery"), \
+                 mock.patch.object(tasks, "update_job_status") as status_mock:
+                transcript = tasks._transcribe_segment(
+                    client,
+                    segment,
+                    0,
+                    1,
+                    "transient-fallback-job",
+                    "gemini-primary",
+                    expected_duration_seconds=60,
+                    transient_fallback_models=transient_fallback_models,
+                    response_models=response_models,
+                )
+
+        self.assertEqual(calls, ["gemini-primary", "gemini-recovery"])
+        self.assertEqual(transient_fallback_models, ["gemini-recovery"])
+        self.assertEqual(response_models, ["gemini-recovery"])
+        self.assertIn("備援模型完成轉錄", transcript)
+        self.assertEqual(client.files.deleted, ["files/test-segment"])
+        self.assertTrue(any(
+            "gemini-recovery" in str(call.args)
+            for call in status_mock.call_args_list
+        ))
+
+    def test_transcription_non_transient_error_does_not_switch_models_and_deletes_media(self):
+        from backend import tasks
+
+        calls = []
+        uploaded = type("Uploaded", (), {
+            "name": "files/invalid-request",
+            "state": type("State", (), {"name": "ACTIVE"})(),
+        })()
+
+        class FakeFiles:
+            def __init__(self):
+                self.deleted = []
+
+            def upload(self, **_kwargs):
+                return uploaded
+
+            def delete(self, *, name):
+                self.deleted.append(name)
+
+        class FakeModels:
+            def generate_content(self, *, model, **_kwargs):
+                calls.append(model)
+                raise RuntimeError("400 INVALID_ARGUMENT")
+
+        class FakeClient:
+            def __init__(self):
+                self.files = FakeFiles()
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            segment = Path(tmpdir) / "segment.mp3"
+            segment.write_bytes(b"audio")
+            client = FakeClient()
+            with mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"), \
+                 mock.patch.object(tasks, "TRANSCRIPTION_RECOVERY_MODEL", "gemini-recovery"), \
+                 mock.patch.object(tasks, "update_job_status") as status_mock:
+                with self.assertRaisesRegex(RuntimeError, "400 INVALID_ARGUMENT"):
+                    tasks._transcribe_segment(
+                        client,
+                        segment,
+                        0,
+                        1,
+                        "non-transient-error-job",
+                        "gemini-primary",
+                        expected_duration_seconds=60,
+                    )
+
+        self.assertEqual(calls, ["gemini-primary"])
+        self.assertEqual(client.files.deleted, ["files/invalid-request"])
+        status_mock.assert_not_called()
 
     def test_backend_prompts_preserve_multilingual_transcript_policy(self):
         from backend import tasks
@@ -1344,6 +1597,8 @@ class TaskRegressionTests(unittest.TestCase):
 
         for prompt in (main_prompt, segment_prompt):
             self.assertIn("英文發言請保留英文原文", prompt)
+            self.assertIn("完整逐字稿不得自行補上中譯、說明或改寫", prompt)
+            self.assertNotIn("補上繁體中文翻譯", prompt)
             self.assertIn("中文國語發言請以繁體中文轉寫", prompt)
             self.assertIn("台語發言請標記為 `[台語]`", prompt)
             self.assertIn("摘要、決議與待辦事項仍統一使用繁體中文", prompt)
@@ -1358,9 +1613,36 @@ class TaskRegressionTests(unittest.TestCase):
         )
 
         self.assertIn("這段音訊長度約 05:02", prompt)
+        self.assertIn("【音訊覆蓋自檢（僅供內部核對，不要輸出本清單）】", prompt)
+        self.assertIn("本段完整範圍是 [00:00-05:02]", prompt)
+        self.assertIn("靜音不必湊字或補時間戳", prompt)
+        self.assertIn("不可為了填滿時間線而猜測內容", prompt)
         self.assertIn("每隔 20-45 秒", prompt)
         self.assertIn("不得根據前一句的句型、數字或討論脈絡自行續寫後文", prompt)
+        self.assertIn("不可把零散音節硬湊成看似完整的中文句子", prompt)
+        self.assertIn("每一筆數字、上下限、百分比、日期、型號或表格列", prompt)
+        self.assertIn("未實際聽到的數字、上下限或列表不得補列", prompt)
+        self.assertIn("每秒遞增的時間戳製造未實際說出的量測或清單", prompt)
         self.assertIn("不可跳過仍有說話聲的時間區間", prompt)
+        self.assertIn("已聽至音檔實際結尾", prompt)
+
+    def test_segment_repair_focus_is_issue_specific_without_reusing_prior_text(self):
+        from backend import tasks
+
+        focus = tasks._transcript_repair_focus_prompt([
+            "分段疑似數列延伸轉錄幻覺（規律數列自動續寫）",
+            "分段疑似連續重複轉錄（同一句連續重複 31 次）",
+            "音訊局部語音密度高但逐字稿文字量偏低",
+            "先前逐字稿的任意內容不可送入提示詞。",
+        ])
+        prompt = tasks._build_segment_prompt(0, 1, repair_focus=focus)
+
+        self.assertIn("【品質補救模式】", focus)
+        self.assertIn("數字、上下限、百分比、日期、型號與表格列", focus)
+        self.assertIn("只有音訊確實重複時才可重複輸出", focus)
+        self.assertIn("持續說話時不得跳過", focus)
+        self.assertNotIn("先前逐字稿的任意內容", focus)
+        self.assertIn(focus, prompt)
 
     def test_segment_prompt_uses_deduplicated_literal_custom_vocabulary(self):
         from backend import tasks
@@ -1381,9 +1663,14 @@ class TaskRegressionTests(unittest.TestCase):
         prompt = meeting_assistant.build_meeting_prompt()
 
         self.assertIn("英文發言請保留英文原文", prompt)
+        self.assertIn("完整逐字稿不得自行補上中譯、說明或改寫", prompt)
+        self.assertNotIn("補上繁體中文翻譯", prompt)
         self.assertIn("中文國語發言請以繁體中文轉寫", prompt)
         self.assertIn("台語發言請標記為 `[台語]`", prompt)
         self.assertIn("摘要、決議與待辦事項仍統一使用繁體中文", prompt)
+        self.assertIn("每一筆數字、上下限、百分比、日期、型號或表格列", prompt)
+        self.assertIn("未實際聽到的數字、上下限或列表不得補列", prompt)
+        self.assertNotIn("在後方加上中文說明", prompt)
 
     def test_backend_prompts_require_anonymous_speaker_differentiation(self):
         from backend import tasks
@@ -1414,6 +1701,59 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertNotIn("Recent speaker turns", context)
         self.assertIn("never infer, continue, paraphrase, or copy prior utterances", prompt)
 
+    def test_segment_speaker_context_uses_label_only_boundary_anchor(self):
+        from backend import tasks
+
+        prior_transcript = (
+            "[09:20] **[發言者 A]**：前段的討論內容不可傳入下一段。\n"
+            "[09:58] **[發言者 B]**：交界處的實際發言也不可傳入。"
+        )
+
+        context = tasks._speaker_context_from_transcripts(
+            [prior_transcript],
+            boundary_start_seconds=598,
+        )
+        prompt = tasks._build_segment_prompt(1, 3, speaker_context=context)
+
+        self.assertIn("[發言者 B]", context)
+        self.assertIn("09:58", context)
+        self.assertNotIn("前段的討論內容", context)
+        self.assertNotIn("交界處的實際發言", context)
+        self.assertIn("Do not restart anonymous labels at A", prompt)
+
+    def test_segment_speaker_context_uses_actual_dense_overlap_for_anchor(self):
+        from backend import tasks
+
+        prior_transcript = (
+            "[10:04] **[發言者 C]**：只提供標籤與時間，不傳入內容。"
+        )
+
+        context = tasks._speaker_context_from_transcripts(
+            [prior_transcript],
+            boundary_start_seconds=600,
+            overlap_seconds=5,
+        )
+
+        self.assertIn("[發言者 C]", context)
+        self.assertIn("opening 5s", context)
+        self.assertNotIn("不傳入內容", context)
+
+    def test_segment_speaker_boundary_anchor_ignores_stale_and_unknown_labels(self):
+        from backend import tasks
+
+        transcript = (
+            "[08:00] **[發言者 A]**：太早的標籤。\n"
+            "[09:55] **[發言者不明]**：不可作為錨點。\n"
+            "[09:57] **[多人重疊]**：不可作為錨點。"
+        )
+
+        anchor = tasks._speaker_boundary_anchor_from_transcripts(
+            [transcript],
+            boundary_start_seconds=600,
+        )
+
+        self.assertIsNone(anchor)
+
     def test_cli_prompt_requires_anonymous_speaker_differentiation(self):
         import meeting_assistant
 
@@ -1434,8 +1774,12 @@ class TaskRegressionTests(unittest.TestCase):
         )
 
         self.assertIn("「佳世達」為正確名稱", prompts[0])
-        self.assertIn("請勿寫成「加斯達」、「嘉士達」或 Jasta", prompts[0])
+        self.assertIn("「加斯達」、「嘉士達」或 Jasta", prompts[0])
+        self.assertIn("政府補助、政府機關、政府支持等政策語境則必須保留「政府」", prompts[1])
         self.assertIn("IEC 62304", prompts[1])
+        self.assertIn("震盪子、震盪值、熱處理、熱損傷、凝血、切割、耐用度", prompts[1])
+        self.assertIn("TFDA、RTD", prompts[1])
+        self.assertIn("不可依討論脈絡補成看似合理的縮寫", prompts[1])
         self.assertIn("討論摘要需依「專案/議題」分組", prompts[2])
         self.assertIn("最終決議只放已確認", prompts[2])
         self.assertIn("待辦事項只放可驗收行動", prompts[2])
@@ -1458,10 +1802,13 @@ class TaskRegressionTests(unittest.TestCase):
 
         normalized = _normalize_domain_terms(
             "加斯達、嘉士達與 Jasta 文件提到 IEC 6304 與 IC6304，"
-            "放電字句、平保、平寶、氣械老化、頻率政府與內型固定塊。"
+            "九方的放電字句、平保、平寶、氣械老化、頻率政府、政府頻率振幅與內型固定塊。"
+            "主機的政府正 20%，政府量測棒要搭配氣械；正不時的切割與直寫小。\n"
+            "政府補助與政府支持的政策討論應保留原詞。\n"
             "Qisda (佳世達) 需要提升效率 $ ightarrow$ 降低功耗。"
         )
 
+        self.assertIn("久方", normalized)
         self.assertIn("佳世達", normalized)
         self.assertNotIn("加斯達", normalized)
         self.assertNotIn("嘉士達", normalized)
@@ -1475,10 +1822,19 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertIn("放電治具", normalized)
         self.assertIn("品保", normalized)
         self.assertIn("機械老化", normalized)
+        self.assertIn("器械", normalized)
         self.assertIn("頻率振幅", normalized)
+        self.assertNotIn("頻率振幅振幅", normalized)
+        self.assertIn("振幅正 20%", normalized)
+        self.assertIn("振幅量測棒", normalized)
+        self.assertIn("正負 10%", normalized)
+        self.assertIn("止血", normalized)
         self.assertIn("內徑固定塊", normalized)
+        self.assertIn("政府補助與政府支持", normalized)
         self.assertNotIn("平保", normalized)
         self.assertNotIn("平寶", normalized)
+        self.assertNotIn("氣械；", normalized)
+        self.assertNotIn("直寫小", normalized)
 
         content = "## 📋 一、討論摘要 (Discussion Summary)\n摘要\n\n## ✅ 二、最終決議 (Final Decisions)\n決議"
         transcript = "[系統提示：此處音檔包含無意義雜訊，已自動過濾後續重複內容]"
@@ -1604,6 +1960,134 @@ class TaskRegressionTests(unittest.TestCase):
 
         self.assertTrue(any("第 2 段｜10:00-20:00" in issue for issue in issues))
         self.assertTrue(any("重複轉錄幻覺" in issue for issue in issues))
+
+    def test_transcript_integrity_rejects_large_cross_segment_timestamp_regression(self):
+        from backend.tasks import _replace_transcript_section, _transcript_integrity_issues
+
+        full_transcript = (
+            "### 【第 1 段｜00:00 – 12:00】\n"
+            "[00:00] **[發言者 A]**：第一段開始。\n"
+            "[11:30] **[發言者 B]**：第一段已到後段。\n\n"
+            "### 【第 2 段｜09:58 – 20:00】\n"
+            "[09:58] **[發言者 A]**：第二段卻回到過早時間。\n"
+            "[19:55] **[發言者 B]**：第二段結尾。"
+        )
+        content = _replace_transcript_section(
+            "## 📋 一、討論摘要 (Discussion Summary)\n摘要",
+            full_transcript,
+        )
+
+        issues = _transcript_integrity_issues(content, full_transcript)
+
+        self.assertTrue(any("時間序倒退" in issue for issue in issues))
+        self.assertTrue(any("第 2 段" in issue for issue in issues))
+
+    def test_quality_recheck_assigns_cross_segment_timestamp_regression_to_later_segment(self):
+        import backend.tasks as tasks
+
+        transcript = (
+            "### 【第 1 段｜00:00 – 12:00】\n"
+            "[00:00] **[發言者 A]**：第一段開始。\n"
+            "[11:30] **[發言者 B]**：第一段已到後段。\n\n"
+            "### 【第 2 段｜09:58 – 20:00】\n"
+            "[09:58] **[發言者 A]**：第二段卻回到過早時間。\n"
+            "[19:55] **[發言者 B]**：第二段結尾。"
+        )
+
+        report = tasks.recheck_transcript_quality_report(transcript)
+
+        self.assertEqual(report["blocking_segment_indices"], [1])
+        self.assertTrue(any(
+            "時間序倒退" in issue
+            for issue in report["segments"][1]["issues"]
+        ))
+
+    def test_semantic_review_replaces_previous_advisory_issues_without_blocking_delivery(self):
+        import backend.tasks as tasks
+
+        transcript = (
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：第一段內容正常。\n\n"
+            "### 【第 2 段｜10:00 – 20:00】\n"
+            "[10:00] **[發言者 B]**：第二段內容需要複核。"
+        )
+        review = {
+            "status": "completed",
+            "transcript_sha256": tasks._transcript_semantic_review_digest(transcript),
+            "findings": [{
+                "segment_index": 1,
+                "start_seconds": 612,
+                "end_seconds": 638,
+                "reason": "句子間的因果關係明顯斷裂",
+            }],
+        }
+
+        report = tasks._build_quality_report(
+            {"warnings": []},
+            [{
+                "index": 1,
+                "start_seconds": 600,
+                "end_seconds": 1200,
+                "status": "success",
+                "issues": [
+                    "語意品質檢核：上一輪已失效的標記",
+                    "既有的時間戳異常",
+                ],
+            }],
+            transcript,
+            semantic_review=review,
+        )
+
+        issues = report["segments"][0]["issues"]
+        self.assertIn("既有的時間戳異常", issues)
+        self.assertNotIn("語意品質檢核：上一輪已失效的標記", issues)
+        self.assertTrue(any("問題時間：10:12-10:38" in issue for issue in issues))
+        self.assertEqual(report["blocking_segment_indices"], [])
+        self.assertEqual(report["segments"][0]["status"], "review")
+
+    def test_semantic_review_normalization_clamps_ranges_and_drops_unsafe_findings(self):
+        from backend.tasks import _normalize_transcript_semantic_review
+
+        transcript = (
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：第一段內容正常。\n\n"
+            "### 【第 2 段｜10:00 – 20:00】\n"
+            "[10:00] **[發言者 B]**：第二段內容需要複核。"
+        )
+        response = json.dumps({"findings": [
+            {
+                "segment_number": 2,
+                "start_time": "09:58",
+                "end_time": "13:30",
+                "reason": "句子間的因果關係明顯斷裂",
+            },
+            {
+                "segment_number": 99,
+                "start_time": "99:00",
+                "end_time": "99:30",
+                "reason": "不應被採用",
+            },
+            {
+                "segment_number": 1,
+                "start_time": "01:00",
+                "end_time": "01:20",
+                "reason": "",
+            },
+        ]}, ensure_ascii=False)
+
+        review = _normalize_transcript_semantic_review(
+            response,
+            transcript,
+            model="test-semantic-model",
+        )
+
+        self.assertEqual(review["model"], "test-semantic-model")
+        self.assertEqual(review["findings"], [{
+            "segment_index": 1,
+            "start_seconds": 600,
+            "end_seconds": 690,
+            "reason": "句子間的因果關係明顯斷裂",
+        }])
 
     def test_transcript_integrity_accepts_plain_segment_heading_for_repeat_location(self):
         from backend.tasks import _replace_transcript_section, _transcript_integrity_issues
@@ -1986,6 +2470,70 @@ class TaskRegressionTests(unittest.TestCase):
 
         self.assertTrue(any("超過段尾 40:00：40:40" in issue for issue in issues))
 
+    def test_segment_timestamp_order_regression_requires_retranscription(self):
+        from backend import tasks
+
+        transcript = (
+            "[20:00] **[發言者 A]**：先討論第一項。\n"
+            "[20:42] **[發言者 A]**：接著確認第二項。\n"
+            "[20:10] **[發言者 B]**：時間碼卻倒退到前面。"
+        )
+        tolerated = (
+            "[20:00] **[發言者 A]**：第一句。\n"
+            "[20:20] **[發言者 A]**：第二句。\n"
+            "[20:10] **[發言者 B]**：小幅估算誤差。"
+        )
+
+        issues = tasks._segment_transcript_current_quality_issues(
+            transcript,
+            segment_index=0,
+            total_segments=1,
+            expected_start_seconds=1200,
+            expected_end_seconds=1800,
+            is_last_segment=True,
+        )
+        tolerated_issues = tasks._segment_transcript_current_quality_issues(
+            tolerated,
+            segment_index=0,
+            total_segments=1,
+            expected_start_seconds=1200,
+            expected_end_seconds=1800,
+            is_last_segment=True,
+        )
+        reuse_issues = tasks._record_segment_reuse_blocking_issues(
+            transcript,
+            segment_index=0,
+            total_segments=1,
+            expected_start_seconds=1200,
+            expected_end_seconds=1800,
+        )
+        report = tasks._build_quality_report(
+            {"warnings": []},
+            [{
+                "index": 0,
+                "start_seconds": 1200,
+                "end_seconds": 1800,
+                "status": "transcribed",
+                "issues": issues,
+            }],
+            transcript,
+        )
+
+        self.assertTrue(any(
+            tasks.TRANSCRIPT_TIMESTAMP_ORDER_ISSUE_MARKER in issue
+            for issue in issues
+        ))
+        self.assertFalse(any(
+            tasks.TRANSCRIPT_TIMESTAMP_ORDER_ISSUE_MARKER in issue
+            for issue in tolerated_issues
+        ))
+        self.assertTrue(tasks._requires_independent_transcription_recovery(issues))
+        self.assertTrue(any(
+            tasks.TRANSCRIPT_TIMESTAMP_ORDER_ISSUE_MARKER in issue
+            for issue in reuse_issues
+        ))
+        self.assertEqual(report["blocking_segment_indices"], [0])
+
     def test_old_record_reuse_blocks_hallucination_and_missing_timestamps_but_allows_sparse_legacy_timestamps(self):
         from backend.tasks import _record_segment_reuse_blocking_issues
 
@@ -2101,6 +2649,9 @@ class TaskRegressionTests(unittest.TestCase):
             mismatched = dict(context)
             mismatched["model"] = "another-model"
             self.assertIsNone(_load_segment_transcript_cache(output_dir, "resume-job", 0, mismatched))
+            older_planner = dict(context)
+            older_planner["cache_version"] = context["cache_version"] - 1
+            self.assertIsNone(_load_segment_transcript_cache(output_dir, "resume-job", 0, older_planner))
 
     def test_segment_cache_isolated_by_custom_vocabulary_but_accepts_legacy_empty_cache(self):
         from backend.tasks import (
@@ -2186,6 +2737,67 @@ class TaskRegressionTests(unittest.TestCase):
 
             self.assertIsNone(_load_segment_transcript_cache(output_dir, "resume-job", 0, context))
             self.assertFalse(_segment_cache_file(output_dir, "resume-job", 0).exists())
+
+    def test_fragmented_cached_and_existing_transcripts_are_not_reused(self):
+        from backend import tasks
+
+        broken_turns = "\n".join(
+            f"[{tasks._format_mmss(second)}] **[發言者 A]**：因為這個片段都。"
+            for second in range(0, 65, 5)
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "output"
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            context = tasks._segment_cache_context(
+                audio_path=audio_path,
+                model="gemini-test",
+                total_segments=1,
+                segment_minutes=2,
+                segment_bounds=[[0, 120]],
+            )
+            cache_file = tasks._segment_cache_file(output_dir, "resume-job", 0)
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(
+                json.dumps({
+                    **context,
+                    "segment_index": 0,
+                    "transcript": broken_turns,
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            cache_issues = tasks._segment_cache_quality_issues(
+                broken_turns,
+                segment_index=0,
+                context=context,
+            )
+            existing_issues = tasks._record_segment_reuse_blocking_issues(
+                broken_turns,
+                segment_index=0,
+                total_segments=1,
+                expected_start_seconds=0,
+                expected_end_seconds=120,
+            )
+
+            self.assertTrue(any(
+                tasks.TRANSCRIPT_FRAGMENTATION_ISSUE_MARKER in issue
+                for issue in cache_issues
+            ))
+            self.assertTrue(any(
+                tasks.TRANSCRIPT_FRAGMENTATION_ISSUE_MARKER in issue
+                for issue in existing_issues
+            ))
+            self.assertIsNone(
+                tasks._load_segment_transcript_cache(
+                    output_dir,
+                    "resume-job",
+                    0,
+                    context,
+                )
+            )
+            self.assertFalse(cache_file.exists())
 
     def test_segment_transcript_cache_does_not_save_repeated_hallucination(self):
         from backend.tasks import (
@@ -2457,12 +3069,19 @@ class TaskRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             seg = root / "_seg_meeting_000.mp3"
+            focused = root / "_speech_focus_v1_meeting.mp3"
             sub1 = root / "_sub__seg_meeting_000_300s_000.mp3"
             sub2 = root / "_sub__seg_meeting_000_300s_001.mp3"
-            for path in (seg, sub1, sub2):
+            for path in (seg, focused, sub1, sub2):
                 path.write_bytes(path.name.encode("utf-8"))
+            temp_segment_paths = []
 
-            with mock.patch.object(tasks, "_split_audio_to_subsegments", return_value=[(sub1, 0, 300), (sub2, 300, 600)]), \
+            with mock.patch.object(
+                tasks,
+                "_prepare_recovery_speech_focus_audio",
+                return_value=(focused, "speech_focus_v1"),
+            ) as focus_mock, \
+                 mock.patch.object(tasks, "_split_audio_to_subsegments", return_value=[(sub1, 0, 300), (sub2, 300, 600)]) as split_mock, \
                  mock.patch.object(
                      tasks,
                      "_transcribe_segment",
@@ -2483,14 +3102,138 @@ class TaskRegressionTests(unittest.TestCase):
                     offset_seconds=0,
                     duration_seconds=600,
                     is_last_segment=False,
-                    temp_segment_paths=[],
+                    temp_segment_paths=temp_segment_paths,
                     quality_events=[],
                     direct_recovery=True,
                 )
 
+        focus_mock.assert_called_once_with(seg, job_id="direct-recovery-job")
+        split_mock.assert_called_once_with(focused, 300)
+        self.assertIn(focused, temp_segment_paths)
         self.assertEqual([call.args[1] for call in transcribe_mock.call_args_list], [sub1, sub2])
         self.assertIn("[00:00] **[發言者 A]**：小段前半。", transcript)
         self.assertIn("[05:00] **[發言者 B]**：小段後半。", transcript)
+
+    def test_initial_major_repetition_skips_local_merge_and_starts_short_full_recovery(self):
+        import backend.tasks as tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segment = root / "_seg_meeting_000.mp3"
+            focused = root / "_speech_focus_meeting.flac"
+            first_child = root / "_sub_meeting_000.flac"
+            second_child = root / "_sub_meeting_001.flac"
+            for path in (segment, focused, first_child, second_child):
+                path.write_bytes(path.name.encode("utf-8"))
+            initial_loop_error = RuntimeError(
+                "第 1/2 段轉錄不完整："
+                "分段疑似短句重複轉錄幻覺（「重複句」連續重複 31 次）"
+            )
+            quality_events = []
+            with mock.patch.object(
+                tasks,
+                "_prepare_recovery_speech_focus_audio",
+                return_value=(focused, "speech_focus_v1"),
+            ), mock.patch.object(
+                tasks,
+                "_split_audio_to_subsegments",
+                return_value=[(first_child, 0, 300), (second_child, 300, 600)],
+            ) as split_mock, mock.patch.object(
+                tasks,
+                "_transcribe_segment",
+                side_effect=[
+                    "[00:00] **[發言者 A]**：重複句。",
+                    "[00:00] **[發言者 A]**：重新轉錄前半段。",
+                    "[00:00] **[發言者 B]**：重新轉錄後半段。",
+                ],
+            ) as transcribe_mock, mock.patch.object(
+                tasks,
+                "_raise_if_segment_transcript_incomplete",
+                side_effect=[initial_loop_error, None, None, None],
+            ), mock.patch.object(
+                tasks,
+                "_repair_existing_segment_timestamp_gaps",
+            ) as repair_mock, mock.patch.object(
+                tasks,
+                "is_job_cancel_requested",
+                return_value=False,
+            ), mock.patch.object(tasks, "update_job_status"):
+                transcript = tasks._transcribe_segment_with_recovery(
+                    object(),
+                    segment,
+                    0,
+                    2,
+                    "initial-loop-job",
+                    "gemini-primary",
+                    offset_seconds=0,
+                    duration_seconds=600,
+                    is_last_segment=False,
+                    quality_events=quality_events,
+                )
+
+        split_mock.assert_called_once_with(
+            focused,
+            tasks.TRANSCRIPT_LOCAL_REPAIR_RECOVERY_SECONDS,
+        )
+        repair_mock.assert_not_called()
+        self.assertEqual(
+            [call.args[1] for call in transcribe_mock.call_args_list],
+            [segment, first_child, second_child],
+        )
+        self.assertIn("重新轉錄後半段", transcript)
+        self.assertTrue(any(
+            "重大轉錄迴圈，略過局部拼接" in event["issue"]
+            for event in quality_events
+        ))
+
+    def test_direct_recovery_forwards_quality_focus_to_each_child(self):
+        import backend.tasks as tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segment = root / "_seg_meeting_000.mp3"
+            first_child = root / "_sub_meeting_000.mp3"
+            second_child = root / "_sub_meeting_001.mp3"
+            for path in (segment, first_child, second_child):
+                path.write_bytes(path.name.encode("utf-8"))
+
+            focus = tasks._transcript_repair_focus_prompt([
+                "分段疑似數列延伸轉錄幻覺",
+            ])
+            with mock.patch.object(
+                tasks,
+                "_split_audio_to_subsegments",
+                return_value=[(first_child, 0, 180), (second_child, 180, 360)],
+            ), mock.patch.object(
+                tasks,
+                "_transcribe_segment",
+                side_effect=[
+                    "[00:00] **[發言者 A]**：第一個子段。",
+                    "[00:00] **[發言者 B]**：第二個子段。",
+                ],
+            ) as transcribe_mock, mock.patch.object(
+                tasks, "_raise_if_segment_transcript_incomplete"
+            ), mock.patch.object(
+                tasks, "is_job_cancel_requested", return_value=False
+            ), mock.patch.object(tasks, "update_job_status"):
+                tasks._transcribe_segment_with_recovery(
+                    object(),
+                    segment,
+                    0,
+                    1,
+                    "repair-focus-job",
+                    "gemini-test",
+                    offset_seconds=0,
+                    duration_seconds=360,
+                    is_last_segment=True,
+                    direct_recovery=True,
+                    repair_focus=focus,
+                )
+
+        self.assertEqual(transcribe_mock.call_count, 2)
+        for call in transcribe_mock.call_args_list:
+            self.assertIn("【品質補救模式】", call.kwargs["repair_focus"])
+            self.assertIn("數字、上下限、百分比、日期、型號與表格列", call.kwargs["repair_focus"])
 
     def test_quality_report_label_does_not_say_good_when_review_is_needed(self):
         import backend.tasks as tasks
@@ -2513,6 +3256,123 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertEqual(report["label"], "可用，建議抽查")
         self.assertEqual(report["review_segments"][0]["index"], 0)
         self.assertTrue(any("逐字稿品質警示" in warning for warning in report["warnings"]))
+
+    def test_quality_report_escalates_audio_proven_omission_to_manual_review(self):
+        import backend.tasks as tasks
+
+        report = tasks._build_quality_report(
+            audio_report={"warnings": []},
+            segment_report=[
+                {
+                    "index": 2,
+                    "start_seconds": 1200,
+                    "end_seconds": 1800,
+                    "status": "rechecked",
+                    "issues": [
+                        "音訊語音密度高但逐字稿文字量偏低（10 字／146 秒有效語音，0.1 字/秒）"
+                    ],
+                }
+            ],
+            full_transcript="[20:00] **[發言者 A]**：僅有少量內容。",
+        )
+
+        self.assertEqual(report["score"], 80)
+        self.assertEqual(report["label"], "需人工確認")
+        self.assertEqual(report["blocking_segment_indices"], [2])
+
+    def test_fragmented_turn_detector_marks_rerunnable_advisory_without_blocking_delivery(self):
+        import backend.tasks as tasks
+
+        broken_turns = "\n".join(
+            f"[{tasks._format_mmss(second)}] **[發言者 A]**：因為這個片段都。"
+            for second in range(0, 65, 5)
+        )
+        transcript = "### 【第 1 段｜00:00 – 02:00】\n\n" + broken_turns
+        normal_discussion = "\n".join(
+            f"[00:{second:02d}] **[發言者 A]**：好。"
+            for second in range(0, 30, 2)
+        )
+        normal_multi_speaker_discussion = "\n".join(
+            f"[{tasks._format_mmss(second)}] **[發言者 {'A' if position % 2 == 0 else 'B'}]**：好。"
+            for position, second in enumerate(range(0, 65, 5))
+        )
+        normal_single_speaker_discussion = "\n".join(
+            f"[{tasks._format_mmss(second)}] **[發言者 A]**：確認完成。"
+            for second in range(0, 65, 5)
+        )
+
+        issue = tasks._fragmented_transcript_turn_review_issue(
+            broken_turns,
+            expected_start_seconds=0,
+            expected_end_seconds=120,
+        )
+        normal_issue = tasks._fragmented_transcript_turn_review_issue(
+            normal_discussion,
+            expected_start_seconds=0,
+            expected_end_seconds=120,
+        )
+        normal_multi_speaker_issue = tasks._fragmented_transcript_turn_review_issue(
+            normal_multi_speaker_discussion,
+            expected_start_seconds=0,
+            expected_end_seconds=120,
+        )
+        normal_single_speaker_issue = tasks._fragmented_transcript_turn_review_issue(
+            normal_single_speaker_discussion,
+            expected_start_seconds=0,
+            expected_end_seconds=120,
+        )
+        report = tasks._build_quality_report(
+            {"warnings": []},
+            [{"index": 0, "start_seconds": 0, "end_seconds": 120, "status": "transcribed", "issues": []}],
+            transcript,
+        )
+        segment_issues = tasks._segment_transcript_current_quality_issues(
+            broken_turns,
+            segment_index=0,
+            total_segments=1,
+            expected_start_seconds=0,
+            expected_end_seconds=120,
+            is_last_segment=True,
+        )
+
+        self.assertIn(tasks.TRANSCRIPT_FRAGMENTATION_ISSUE_MARKER, issue)
+        self.assertIsNone(normal_issue)
+        self.assertIsNone(normal_multi_speaker_issue)
+        self.assertIsNone(normal_single_speaker_issue)
+        self.assertEqual(report["blocking_segment_indices"], [])
+        self.assertIn(
+            tasks.TRANSCRIPT_FRAGMENTATION_ISSUE_MARKER,
+            report["review_segments"][0]["issues"][0],
+        )
+        self.assertTrue(any(
+            tasks.TRANSCRIPT_FRAGMENTATION_ISSUE_MARKER in item
+            for item in segment_issues
+        ))
+        self.assertTrue(tasks._requires_independent_transcription_recovery(segment_issues))
+        self.assertEqual(
+            tasks._independent_recovery_chunk_seconds(
+                None,
+                [],
+                segment_issues,
+            ),
+            tasks.TRANSCRIPT_LOCAL_REPAIR_RECOVERY_SECONDS,
+        )
+        self.assertEqual(tasks._critical_quality_report_segment_indices(report, [0]), [0])
+
+    def test_recheck_keeps_manual_label_for_audio_proven_omission_with_prior_warning(self):
+        import backend.tasks as tasks
+
+        transcript = "[00:00] **[發言者 A]**：內容不足。"
+        previous_report = {"warnings": ["原始音檔有爆音"]}
+        with mock.patch.object(
+            tasks,
+            "_segment_transcript_current_quality_issues",
+            return_value=["音訊含持續語音但時間戳在 00:00 至 02:00 間隔 120 秒"],
+        ):
+            report = tasks.recheck_transcript_quality_report(transcript, previous_report)
+
+        self.assertEqual(report["label"], "需人工確認")
+        self.assertEqual(report["blocking_segment_indices"], [0])
 
     def test_audio_task_persists_client_recording_warning_in_quality_report(self):
         import backend.tasks as tasks
@@ -2562,6 +3422,14 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertEqual(quality_report["recording"]["profile"], "video_balanced")
         self.assertEqual(quality_report["score"], 95)
         self.assertEqual(quality_report["label"], "可用，建議抽查")
+
+    def test_client_audio_clipping_warning_is_preserved(self):
+        import backend.tasks as tasks
+
+        warning = "音訊品質警示：錄製期間偵測到音訊峰值持續接近飽和，可能影響語音辨識。"
+
+        self.assertEqual(tasks.normalize_client_recording_warning(warning), warning)
+        self.assertIsNone(tasks.normalize_client_recording_warning("任意瀏覽器訊息"))
 
     def test_quality_report_score_reflects_multiple_review_segments(self):
         import backend.tasks as tasks
@@ -3085,6 +3953,24 @@ class DurableQueueRegressionTests(unittest.TestCase):
             self.assertIn("服務暫時忙碌", job["message"])
             self.assertIsNone(database.claim_next_pending_job())
 
+    def test_transient_retry_delay_uses_bounded_exponential_backoff(self):
+        database = self._isolated_database()
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "JOB_QUEUE_TRANSIENT_RETRY_DELAY_SECONDS": "30",
+                "JOB_QUEUE_TRANSIENT_RETRY_BACKOFF_MULTIPLIER": "2",
+                "JOB_QUEUE_TRANSIENT_RETRY_MAX_DELAY_SECONDS": "180",
+            },
+            clear=False,
+        ):
+            self.assertEqual(database._transient_retry_delay_seconds(1), 30)
+            self.assertEqual(database._transient_retry_delay_seconds(2), 60)
+            self.assertEqual(database._transient_retry_delay_seconds(3), 120)
+            self.assertEqual(database._transient_retry_delay_seconds(4), 180)
+            self.assertEqual(database._transient_retry_delay_seconds(5), 180)
+
     def test_interrupted_processing_jobs_are_requeued_on_startup(self):
         database = self._isolated_database()
         database.create_job(
@@ -3287,17 +4173,34 @@ class TempCleanupRegressionTests(unittest.TestCase):
             source_dir = Path(tmpdir)
             stale_segment = source_dir / "_seg_meeting_000.mp3"
             stale_recovery = source_dir / "_sub__seg_meeting_000_300s_001.mp3"
+            stale_gap = source_dir / "_gap__seg_meeting_000_60_120.mp3"
+            stale_speech_focus = source_dir / "_speech_focus_v4_meeting_job.flac"
             fresh_recovery = source_dir / "_sub__seg_fresh_000.mp3"
             active_recovery = source_dir / "_sub__seg_active_000.mp3"
             retained_source = source_dir / "abc12345_20260720_100000.webm"
 
-            for path in (stale_segment, stale_recovery, fresh_recovery, active_recovery, retained_source):
+            for path in (
+                stale_segment,
+                stale_recovery,
+                stale_gap,
+                stale_speech_focus,
+                fresh_recovery,
+                active_recovery,
+                retained_source,
+            ):
                 path.write_bytes(b"audio")
 
             old_time = 1_700_000_000
             now = old_time + 7200
             import os
-            for path in (stale_segment, stale_recovery, active_recovery, retained_source):
+            for path in (
+                stale_segment,
+                stale_recovery,
+                stale_gap,
+                stale_speech_focus,
+                active_recovery,
+                retained_source,
+            ):
                 os.utime(path, (old_time, old_time))
             os.utime(fresh_recovery, (now, now))
 
@@ -3308,9 +4211,19 @@ class TempCleanupRegressionTests(unittest.TestCase):
                 now=now,
             )
 
-            self.assertEqual({path.name for path in deleted}, {stale_segment.name, stale_recovery.name})
+            self.assertEqual(
+                {path.name for path in deleted},
+                {
+                    stale_segment.name,
+                    stale_recovery.name,
+                    stale_gap.name,
+                    stale_speech_focus.name,
+                },
+            )
             self.assertFalse(stale_segment.exists())
             self.assertFalse(stale_recovery.exists())
+            self.assertFalse(stale_gap.exists())
+            self.assertFalse(stale_speech_focus.exists())
             self.assertTrue(fresh_recovery.exists())
             self.assertTrue(active_recovery.exists())
             self.assertTrue(retained_source.exists())
@@ -4445,6 +5358,23 @@ class SearchRegressionTests(unittest.TestCase):
                 },
             ],
         )
+        recovery_summary_text = (
+            "逐字稿品質警示：以下分段曾觸發轉錄品質補救或需複核："
+            "第 4 段｜30:02-40:05（分段時間戳超過段尾 40:05：40:27）、"
+            "第 5 段｜40:02-50:03（音訊含持續語音但時間戳在 41:08 至 43:02 間隔 114 秒）、"
+            "第 7 段｜59:59-70:04（疑似連續重複轉錄；同一句連續重複 4 次：那時候你把那個做；"
+            "重複時間：64:47-65:44）。"
+        )
+        recovery_details = {
+            detail["index"]: detail.get("issues", [])
+            for detail in review_segment_details_from_text(recovery_summary_text)
+        }
+        self.assertEqual(recovery_details[3], ["分段時間戳超過段尾 40:05：40:27"])
+        self.assertEqual(
+            recovery_details[6],
+            ["疑似連續重複轉錄；同一句連續重複 4 次：那時候你把那個做；重複時間：64:47-65:44"],
+        )
+        self.assertNotIn("疑似連續重複轉錄", "\n".join(recovery_details[3]))
         boundary_text = "逐字稿品質警示：疑似連續重複轉錄（重複時間：09:59-10:02）"
         self.assertEqual(review_segment_indices_from_text(boundary_text), [0, 1])
         self.assertEqual(
@@ -4917,7 +5847,11 @@ class SearchRegressionTests(unittest.TestCase):
             "warnings": ["錄音音量偏低"],
             "segments": [{"index": 0, "start_seconds": 0, "end_seconds": 600, "issues": [issue]}],
             "review_segments": [{"index": 0, "label": "第 1 段", "start_seconds": 0, "end_seconds": 600, "issues": [issue]}],
-            "recheck": {"version": 2, "method": "local_transcript_and_audio", "source_audio_checked": True},
+            "recheck": {
+                "version": database.TRANSCRIPT_QUALITY_RECHECK_VERSION,
+                "method": "local_transcript_and_audio",
+                "source_audio_checked": True,
+            },
         }
         meeting_id = database.save_meeting(
             title="Locally Rechecked Quality",
@@ -4953,6 +5887,49 @@ class SearchRegressionTests(unittest.TestCase):
         for field in shared_fields:
             self.assertEqual(detail[field], listed[field], field)
 
+    def test_current_local_recheck_uses_structured_segment_issues_over_summary_warning(self):
+        database, _tmp_path = self._isolated_database()
+        repeated_issue = (
+            "疑似連續重複轉錄；同一句連續重複 4 次：那時候你把那個做；"
+            "重複時間：64:47-65:44"
+        )
+        timestamp_issue = "分段時間戳超過段尾 40:05：40:27"
+        record = {
+            "quality_report": {
+                "warnings": [
+                    "逐字稿品質警示：以下分段曾觸發轉錄品質補救或需複核："
+                    "第 4 段｜30:02-40:05（分段時間戳超過段尾 40:05：40:27）、"
+                    "第 7 段｜59:59-70:04（疑似連續重複轉錄；同一句連續重複 4 次：那時候你把那個做；"
+                    "重複時間：64:47-65:44）。"
+                ],
+                "segments": [
+                    {"index": 3, "start_seconds": 1802, "end_seconds": 2405, "issues": [timestamp_issue]},
+                    {"index": 6, "start_seconds": 3599, "end_seconds": 4204, "issues": [repeated_issue]},
+                ],
+                "review_segments": [
+                    {"index": 3, "label": "第 4 段", "start_seconds": 1802, "end_seconds": 2405, "issues": [timestamp_issue]},
+                    {"index": 6, "label": "第 7 段", "start_seconds": 3599, "end_seconds": 4204, "issues": [repeated_issue]},
+                ],
+                "recheck": {
+                    "version": database.TRANSCRIPT_QUALITY_RECHECK_VERSION,
+                    "method": "local_transcript_and_audio",
+                    "source_audio_checked": True,
+                },
+            },
+            "full_content": "",
+            "output_path": "",
+        }
+
+        preview = database.apply_quality_preview_fields(record)
+        details = {
+            detail["index"]: detail["issues"]
+            for detail in preview["quality_review_segment_details"]
+        }
+
+        self.assertEqual(details[3], [timestamp_issue])
+        self.assertEqual(details[6], [repeated_issue])
+        self.assertNotIn(repeated_issue, details[3])
+
     def test_stale_local_recheck_rederives_repeated_segment_location(self):
         database, _tmp_path = self._isolated_database()
         repeated_turns = "\n".join(
@@ -4968,9 +5945,13 @@ class SearchRegressionTests(unittest.TestCase):
                 ],
                 "segments": [],
                 "review_segments": [],
-                # A method-only result is from before the current location
-                # rules and must not suppress fresh transcript-derived detail.
-                "recheck": {"method": "local_transcript_and_audio", "source_audio_checked": True},
+                # A previous recheck generation must not suppress fresh
+                # transcript-derived detail after the location rules change.
+                "recheck": {
+                    "version": database.TRANSCRIPT_QUALITY_RECHECK_VERSION - 1,
+                    "method": "local_transcript_and_audio",
+                    "source_audio_checked": True,
+                },
             },
             "full_content": (
                 "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
@@ -7009,6 +7990,48 @@ class JobQueueWorkerRegressionTests(unittest.TestCase):
 
         self.assertEqual(database.get_job("worker-default-attempts-job")["max_attempts"], 5)
 
+    def test_audio_worker_forwards_full_meeting_rerun_time_ranges(self):
+        database, tmpdir = self._isolated_database()
+        import backend.job_queue as job_queue
+
+        audio_path = tmpdir / "rerun-source.webm"
+        output_path = tmpdir / "rerun-output.md"
+        audio_path.write_bytes(b"audio")
+        output_path.write_text("done", encoding="utf-8")
+        job_queue.enqueue_audio_job(
+            "worker-time-range-rerun-job",
+            audio_path=audio_path,
+            output_dir=tmpdir,
+            model="test-model",
+            force_segment_indices=[0, 1, 2],
+            force_full_segment_ranges=[{
+                "source_segment_index": 1,
+                "start_seconds": 600,
+                "end_seconds": 1200,
+                "issues": [
+                    "音訊局部語音密度高但逐字稿文字量偏低（問題時間：10:20-11:00，3 字／40 秒有效語音，0.1 字/秒）",
+                ],
+            }],
+            force_full_meeting_rerun=True,
+        )
+        worker = job_queue.JobQueueWorker(poll_interval=0.01)
+        claim = database.claim_next_pending_job()
+
+        with mock.patch.object(job_queue, "process_audio_task", return_value=output_path) as process:
+            worker.process_job(claim)
+
+        self.assertEqual(process.call_args.kwargs["force_segment_indices"], [0, 1, 2])
+        self.assertEqual(process.call_args.kwargs["force_full_segment_ranges"], [{
+            "source_segment_index": 1,
+            "start_seconds": 600,
+            "end_seconds": 1200,
+            "issues": [
+                "音訊局部語音密度高但逐字稿文字量偏低（問題時間：10:20-11:00，3 字／40 秒有效語音，0.1 字/秒）",
+            ],
+        }])
+        self.assertTrue(process.call_args.kwargs["force_full_meeting_rerun"])
+        self.assertFalse(process.call_args.kwargs["force_all_segments_full_rerun"])
+
     def test_quality_recheck_worker_uses_local_quality_task(self):
         database, tmpdir = self._isolated_database()
         import backend.job_queue as job_queue
@@ -7040,6 +8063,42 @@ class JobQueueWorkerRegressionTests(unittest.TestCase):
             source_audio_dir=expected_source_audio_dir,
         )
         self.assertEqual(database.get_job("quality-recheck-worker-job")["status"], "done")
+
+    def test_semantic_review_worker_runs_only_the_requested_meeting(self):
+        database, _ = self._isolated_database()
+        import backend.job_queue as job_queue
+
+        job_queue.enqueue_meeting_semantic_review_job(
+            "semantic-review-worker-job",
+            meeting_id=73,
+            model="semantic-primary",
+            fallback_model="semantic-fallback",
+        )
+        worker = job_queue.JobQueueWorker(poll_interval=0.01)
+        claim = database.claim_next_pending_job()
+
+        def mark_done(job_id, *, meeting_id, model, fallback_model):
+            self.assertEqual(meeting_id, 73)
+            self.assertEqual(model, "semantic-primary")
+            self.assertEqual(fallback_model, "semantic-fallback")
+            database.update_job_status(job_id, "done", "語意品質檢核完成")
+            return {"findings": []}
+
+        with mock.patch.object(
+            job_queue,
+            "review_saved_meeting_transcript_semantics",
+            side_effect=mark_done,
+        ) as review_mock:
+            worker.process_job(claim)
+
+        self.assertEqual(claim["task_type"], "meeting_semantic_review")
+        review_mock.assert_called_once_with(
+            "semantic-review-worker-job",
+            meeting_id=73,
+            model="semantic-primary",
+            fallback_model="semantic-fallback",
+        )
+        self.assertEqual(database.get_job("semantic-review-worker-job")["status"], "done")
 
     def test_batch_quality_recheck_updates_available_transcripts_without_ai(self):
         from backend import tasks
@@ -7087,6 +8146,127 @@ class JobQueueWorkerRegressionTests(unittest.TestCase):
         update_mock.assert_called_once_with(71, refreshed_report)
         self.assertEqual(status_mock.call_args.args[1], "done")
         self.assertIn("未使用 Gemini", status_mock.call_args.args[2])
+
+    def test_quality_recheck_normalizes_saved_terms_with_reversible_revision(self):
+        from backend import tasks
+
+        database, root = self._isolated_database()
+        source_audio_dir = root / "source_audio"
+        source_audio_dir.mkdir()
+        (source_audio_dir / "source.webm").write_bytes(b"webm")
+        output_path = root / "meeting.md"
+        original = (
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n\n"
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：主機的政府正 20% 要搭配氣械測試。\n"
+        )
+        output_path.write_text(original, encoding="utf-8")
+        meeting_id = database.save_meeting(
+            "術語正規化測試",
+            "2026/07/28",
+            "source.webm",
+            str(output_path),
+            "政府正 20% 的測試摘要",
+        )
+        refreshed_report = {
+            "score": 100,
+            "label": "良好",
+            "warnings": [],
+            "segments": [{"index": 0, "issues": []}],
+            "review_segments": [],
+            "recheck": {"source_audio_checked": True},
+        }
+
+        with mock.patch.object(tasks, "recheck_transcript_quality_report", return_value=refreshed_report), \
+             mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+             mock.patch.object(tasks, "update_job_status"):
+            summary = tasks.recheck_all_saved_meeting_quality_reports(
+                "term-normalization-job",
+                source_audio_dir=source_audio_dir,
+            )
+
+        updated = output_path.read_text(encoding="utf-8")
+        revisions = database.list_meeting_revisions(meeting_id)
+        refreshed = database.get_meeting(meeting_id)
+        self.assertEqual(summary["checked"], 1)
+        self.assertEqual(summary["transcript_normalized"], 1)
+        self.assertIn("振幅正 20%", updated)
+        self.assertIn("器械測試", updated)
+        self.assertNotIn("政府正 20%", updated)
+        self.assertEqual(refreshed["summary"], "振幅正 20% 的測試摘要")
+        self.assertEqual(len(revisions), 1)
+        self.assertEqual(revisions[0]["source"], "transcript_normalization")
+        self.assertEqual(revisions[0]["content"], original)
+
+    def test_quality_recheck_syncs_markdown_frontmatter_and_review_note(self):
+        from backend import tasks
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        source_audio_dir = root / "source_audio"
+        source_audio_dir.mkdir()
+        (source_audio_dir / "source.webm").write_bytes(b"webm")
+        output_path = root / "meeting.md"
+        output_path.write_text(
+            "---\n"
+            "title: 品質同步測試\n"
+            "quality_score: 95\n"
+            "quality_label: 良好\n"
+            "---\n\n"
+            "## 📝 四、完整逐字稿 (Verbatim Transcript)\n\n"
+            "### 【第 1 段｜00:00 – 10:00】\n"
+            "[00:00] **[發言者 A]**：測試逐字稿。\n",
+            encoding="utf-8",
+        )
+        record = {
+            "id": 72,
+            "title": "品質同步測試",
+            "date": "2026/07/28",
+            "source_audio": "source.webm",
+            "output_path": str(output_path),
+            "quality_report": {"segments": []},
+            "full_content": output_path.read_text(encoding="utf-8"),
+        }
+        refreshed_report = {
+            "score": 50,
+            "label": "需人工確認",
+            "warnings": [],
+            "segments": [{
+                "index": 0,
+                "start_seconds": 0,
+                "end_seconds": 600,
+                "issues": ["音訊含持續語音但時間戳在 01:00 至 03:00 間隔 120 秒"],
+            }],
+            "review_segments": [{
+                "index": 0,
+                "label": "第 1 段",
+                "start_seconds": 0,
+                "end_seconds": 600,
+                "issues": ["音訊含持續語音但時間戳在 01:00 至 03:00 間隔 120 秒"],
+            }],
+            "recheck": {"source_audio_checked": True},
+        }
+
+        with mock.patch.object(tasks, "list_meetings", return_value=[{"id": 72}]), \
+             mock.patch.object(tasks, "get_meeting", return_value=record), \
+             mock.patch.object(tasks, "recheck_transcript_quality_report", return_value=refreshed_report), \
+             mock.patch.object(tasks, "update_meeting_quality_report", return_value=True) as update_mock, \
+             mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+             mock.patch.object(tasks, "update_job_status"):
+            summary = tasks.recheck_all_saved_meeting_quality_reports(
+                "quality-markdown-sync-job",
+                source_audio_dir=source_audio_dir,
+            )
+
+        self.assertEqual(summary["checked"], 1)
+        self.assertEqual(summary["markdown_synced"], 1)
+        update_mock.assert_called_once_with(72, refreshed_report)
+        updated = output_path.read_text(encoding="utf-8")
+        self.assertIn("quality_score: 50", updated)
+        self.assertIn("quality_label: 需人工確認", updated)
+        self.assertIn("逐字稿品質複核提示", updated)
+        self.assertIn("第 1 段", updated)
+        self.assertIn("測試逐字稿", updated)
 
     def test_summary_linkage_quality_warnings_replace_stale_values(self):
         from backend.tasks import _refresh_quality_report_summary_warnings
@@ -8078,7 +9258,8 @@ console.log('summary_editor_quality_note_ok');
         self.assertIn("async function rerunMeeting", html)
         self.assertIn("/meetings/${id}/rerun", html)
         self.assertIn("setDetailStatus(`正在建立重跑任務：${segmentText}`)", html)
-        self.assertIn("setDetailStatus(`已建立重跑任務：${data.job_id}`)", html)
+        self.assertIn("const taskMessage = data.message || `已建立重跑任務：${data.job_id}`;", html)
+        self.assertIn("setDetailStatus(taskMessage);", html)
         self.assertIn("setDetailStatus(`重跑失敗：${err.message}`)", html)
         self.assertIn("function segmentIndicesDisplayText", html)
         self.assertIn("`優先局部補救 ${segmentIndices.length} 個問題分段（${segmentTextLabel}）`", html)
@@ -8098,6 +9279,16 @@ console.log('summary_editor_quality_note_ok');
         self.assertIn("⌁ 重新檢核", html)
         self.assertIn("await Promise.all([", html)
         self.assertIn("const recheck = report.recheck", html)
+
+    def test_web_ui_can_queue_advisory_transcript_semantic_review(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("async function reviewMeetingTranscriptSemantics", html)
+        self.assertIn("/meetings/${id}/quality/semantic-review", html)
+        self.assertIn("不會改寫逐字稿、摘要或待辦事項", html)
+        self.assertIn("id=\"quality-semantic-review-button\"", html)
+        self.assertIn("⌁ 語意檢核", html)
+        self.assertIn("語意檢核 ${semanticFindingCount} 項", html)
 
     def test_web_ui_can_queue_all_meeting_quality_rechecks_without_ai(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
@@ -8264,6 +9455,11 @@ console.log('summary_editor_quality_note_ok');
         self.assertIn("function clearRecordingPreviewQualityMonitor", html)
         self.assertIn("function startRecordingPreviewQualityMonitor", html)
         self.assertIn("function checkRecordingPreviewQuality", html)
+        self.assertIn("function checkRecordingAudioClipping", html)
+        self.assertIn("function recordingAudioClippingWarningText", html)
+        self.assertIn("function recordingQualityWarningText", html)
+        self.assertIn("autoGainControl: false", html)
+        self.assertIn("getFloatTimeDomainData", html)
         self.assertIn("預覽畫面幾乎全黑", html)
         self.assertIn("startRecordingPreviewQualityMonitor();", html)
         self.assertIn("clearRecordingPreviewQualityMonitor();", html)
@@ -8310,7 +9506,7 @@ console.log('summary_editor_quality_note_ok');
         self.assertIn("activeRecordingProfileId = getRecordingProfileId();", html)
         self.assertIn("const completedProfileId = activeRecordingProfileId || getRecordingProfileId();", html)
         self.assertIn("formData.append('recording_profile', completedProfileId);", html)
-        self.assertIn("const recordingWarning = recordingPreviewQualityWarningText(completedMode);", html)
+        self.assertIn("const recordingWarning = recordingQualityWarningText(completedMode);", html)
         self.assertIn("formData.append('recording_warning', recordingWarning);", html)
         self.assertIn("setRecordingSubmissionLocked(true);", html)
         self.assertIn("setRecordingSubmissionLocked(false);", html)
@@ -8383,6 +9579,7 @@ var recPreviewQualityTimer = null;
 var recPreviewBlankSamples = 0;
 var recPreviewQualityWarning = false;
 var recPreviewQualityWarningSeen = false;
+var recAudioClippingWarningSeen = false;
 checkRecordingPreviewQuality();
 firstMessage = recStatusEl.textContent;
 checkRecordingPreviewQuality();
@@ -8431,6 +9628,82 @@ if (sandbox.clearedWarning) {{
   process.exit(11);
 }}
 console.log('recording_black_preview_warning_ok');
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_recording_audio_clipping_warning_requires_sustained_peak(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('function checkRecordingAudioClipping'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nfunction ', start + 1);
+  return script.slice(start, next < 0 ? script.length : next);
+}}
+const code = [
+  grab('recordingModeLabel'),
+  grab('recordingLiveStatusText'),
+  grab('recordingPreviewQualityWarningText'),
+  grab('recordingAudioClippingWarningText'),
+  grab('recordingQualityWarningText'),
+  grab('checkRecordingAudioClipping')
+].join('\\n');
+const sandbox = {{ console }};
+vm.runInNewContext(code + `
+var mediaRecorder = {{ state: 'recording' }};
+var recMode = 'audio';
+var activeRecordingMode = null;
+var recPreviewQualityWarning = false;
+var recPreviewQualityWarningSeen = false;
+var recAudioClipSamples = 0;
+var recAudioClippingWarningSeen = false;
+var recAudioTimeData = null;
+var recStatusEl = {{ textContent: '' }};
+var audioSamples = new Float32Array([0.1, -0.2, 0.99, -0.1]);
+var analyser = {{
+  fftSize: 4,
+  getFloatTimeDomainData(target) {{ target.set(audioSamples); }}
+}};
+for (let index = 0; index < 11; index += 1) checkRecordingAudioClipping();
+beforeThreshold = recordingQualityWarningText();
+checkRecordingAudioClipping();
+atThreshold = recordingQualityWarningText();
+audioSamples = new Float32Array([0.1, -0.2, 0.3, -0.1]);
+for (let index = 0; index < 12; index += 1) checkRecordingAudioClipping();
+afterRecovery = recordingQualityWarningText();
+`, sandbox);
+if (sandbox.beforeThreshold) {{
+  console.error(sandbox.beforeThreshold);
+  process.exit(4);
+}}
+if (!sandbox.atThreshold.includes('音訊峰值持續接近飽和')) {{
+  console.error(sandbox.atThreshold);
+  process.exit(5);
+}}
+if (!sandbox.afterRecovery.includes('音訊品質警示')) {{
+  console.error(sandbox.afterRecovery);
+  process.exit(6);
+}}
+console.log('recording_audio_clipping_warning_ok');
 """
         try:
             result = subprocess.run(
@@ -8819,7 +10092,38 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
 
         self.assertEqual(
             [(start, end) for _path, start, end in subsegments],
-            [(0, 302), (302, 603)],
+            [
+                (0, 302 + tasks.RECOVERY_SUBSEGMENT_OVERLAP_SECONDS),
+                (302 - tasks.RECOVERY_SUBSEGMENT_OVERLAP_SECONDS, 603),
+            ],
+        )
+
+    def test_short_recovery_subsegments_keep_extra_boundary_context(self):
+        from backend import tasks
+
+        class FakeChunk:
+            def export(self, path, **_kwargs):
+                Path(path).write_bytes(b"chunk")
+
+        class FakeAudio:
+            def __len__(self):
+                return 60_000
+
+            def __getitem__(self, _slice):
+                return FakeChunk()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "short-segment.mp3"
+            audio_path.write_bytes(b"audio")
+            with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+                 mock.patch.object(tasks, "RECOVERY_SUBSEGMENT_OVERLAP_SECONDS", 2), \
+                 mock.patch.object(tasks, "RECOVERY_SHORT_SUBSEGMENT_OVERLAP_SECONDS", 4), \
+                 mock.patch.object(tasks, "RECOVERY_SHORT_SUBSEGMENT_MAX_SECONDS", 30):
+                subsegments = tasks._split_audio_to_subsegments(audio_path, chunk_seconds=30)
+
+        self.assertEqual(
+            [(start, end) for _path, start, end in subsegments],
+            [(0, 34), (26, 60)],
         )
 
     def test_confirmed_speech_gap_prefers_shorter_stable_recovery_chunks(self):
@@ -8839,6 +10143,1072 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             180,
         )
         self.assertEqual(tasks._next_recovery_chunk_seconds(600), 300)
+
+    def test_localized_omission_or_hallucination_prefers_60_second_repair_chunks(self):
+        from backend import tasks
+
+        for issue in (
+            tasks.TRANSCRIPT_LOCAL_DENSITY_ISSUE_MARKER,
+            "分段疑似數列延伸轉錄幻覺",
+            "分段疑似連續重複轉錄幻覺",
+        ):
+            preferred = tasks._preferred_recovery_chunk_seconds([{
+                "start_seconds": 300,
+                "end_seconds": 370,
+                "issue": issue,
+            }])
+            self.assertEqual(preferred, tasks.TRANSCRIPT_LOCAL_REPAIR_RECOVERY_SECONDS)
+            self.assertEqual(
+                tasks._next_recovery_chunk_seconds(90, preferred_chunk_seconds=preferred),
+                preferred,
+            )
+
+    def test_extreme_audio_confirmed_local_omission_prefers_30_second_recovery_chunks(self):
+        from backend import tasks
+
+        severe_issue = (
+            f"{tasks.TRANSCRIPT_LOCAL_DENSITY_ISSUE_MARKER}"
+            "（問題時間：59:49-64:01，2 字／53 秒有效語音，0.0 字/秒）"
+        )
+        ordinary_issue = (
+            f"{tasks.TRANSCRIPT_LOCAL_DENSITY_ISSUE_MARKER}"
+            "（問題時間：50:35-52:50，58 字／53 秒有效語音，1.1 字/秒）"
+        )
+
+        severe_preferred = tasks._preferred_recovery_chunk_seconds([{
+            "start_seconds": 3589,
+            "end_seconds": 3841,
+            "issue": severe_issue,
+        }])
+        ordinary_preferred = tasks._preferred_recovery_chunk_seconds([{
+            "start_seconds": 3035,
+            "end_seconds": 3170,
+            "issue": ordinary_issue,
+        }])
+
+        self.assertTrue(tasks._is_severe_local_density_issue(severe_issue))
+        self.assertFalse(tasks._is_severe_local_density_issue(ordinary_issue))
+        self.assertEqual(
+            severe_preferred,
+            tasks.TRANSCRIPT_SEVERE_LOCAL_DENSITY_RECOVERY_SECONDS,
+        )
+        self.assertEqual(
+            tasks._next_recovery_chunk_seconds(252, preferred_chunk_seconds=severe_preferred),
+            tasks.TRANSCRIPT_SEVERE_LOCAL_DENSITY_RECOVERY_SECONDS,
+        )
+        self.assertEqual(
+            ordinary_preferred,
+            tasks.TRANSCRIPT_LOCAL_REPAIR_RECOVERY_SECONDS,
+        )
+
+    def test_multiple_confirmed_speech_gaps_start_with_shorter_recovery_chunks(self):
+        from backend import tasks
+
+        repair_ranges = [
+            {
+                "start_seconds": 3000 + index * 90,
+                "end_seconds": 3050 + index * 90,
+                "issue": f"音訊含持續語音但時間戳有缺口 {index + 1}",
+            }
+            for index in range(tasks.TRANSCRIPT_AUTO_REPAIR_MAX_RANGES + 1)
+        ]
+
+        preferred = tasks._preferred_recovery_chunk_seconds(repair_ranges)
+
+        self.assertEqual(
+            preferred,
+            min(
+                tasks.TRANSCRIPT_MULTI_GAP_RECOVERY_SECONDS,
+                tasks.TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS,
+            ),
+        )
+        self.assertEqual(
+            tasks._next_recovery_chunk_seconds(600, preferred_chunk_seconds=preferred),
+            preferred,
+        )
+
+    def test_multiple_extreme_local_omissions_start_with_30_second_recovery_chunks(self):
+        from backend import tasks
+
+        repair_ranges = [
+            {
+                "start_seconds": 3000 + index * 90,
+                "end_seconds": 3050 + index * 90,
+                "issue": (
+                    f"{tasks.TRANSCRIPT_LOCAL_DENSITY_ISSUE_MARKER}"
+                    "（問題時間：50:00-50:50，3 字／42 秒有效語音，0.1 字/秒）"
+                ),
+            }
+            for index in range(tasks.TRANSCRIPT_AUTO_REPAIR_MAX_RANGES + 1)
+        ]
+
+        preferred = tasks._preferred_recovery_chunk_seconds(repair_ranges)
+
+        self.assertEqual(preferred, tasks.TRANSCRIPT_SEVERE_LOCAL_DENSITY_RECOVERY_SECONDS)
+        self.assertEqual(
+            tasks._next_recovery_chunk_seconds(600, preferred_chunk_seconds=preferred),
+            tasks.TRANSCRIPT_SEVERE_LOCAL_DENSITY_RECOVERY_SECONDS,
+        )
+
+    def test_sparse_density_issue_uses_stable_recovery_chunks(self):
+        from backend import tasks
+
+        initial = "[00:00] **[發言者 A]**：文字量過少的初稿。"
+
+        def reject_sparse_initial(transcript, **_kwargs):
+            if transcript == initial:
+                raise RuntimeError(
+                    "第 1/1 段轉錄不完整："
+                    + tasks.TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            segment = Path(tmpdir) / "segment.mp3"
+            segment.write_bytes(b"segment")
+            with mock.patch.object(
+                tasks,
+                "_transcribe_segment",
+                side_effect=[
+                    initial,
+                    "[00:00] **[發言者 A]**：穩定重跑的前半段。",
+                    "[00:00] **[發言者 B]**：穩定重跑的後半段。",
+                ],
+            ), \
+                 mock.patch.object(
+                     tasks,
+                     "_raise_if_segment_transcript_incomplete",
+                     side_effect=reject_sparse_initial,
+                 ), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(
+                     tasks,
+                     "_split_audio_to_subsegments",
+                     return_value=[(segment, 0, 180), (segment, 180, 360)],
+                 ) as split_mock, \
+                 mock.patch.object(tasks, "update_job_status"):
+                transcript = tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    0,
+                    1,
+                    "sparse-density-job",
+                    "gemini-test",
+                    offset_seconds=0,
+                    duration_seconds=360,
+                    is_last_segment=True,
+                )
+
+        self.assertIn("穩定重跑的前半段", transcript)
+        self.assertIn("穩定重跑的後半段", transcript)
+        self.assertEqual(
+            split_mock.call_args.args[1],
+            tasks.TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS,
+        )
+
+    def test_local_sparse_range_uses_targeted_repair_before_full_rerun(self):
+        from backend import tasks
+
+        initial = "[00:00] **[發言者 A]**：局部漏字前的初稿。"
+        repaired = "[00:00] **[發言者 A]**：局部補救後的完整內容。"
+        local_range = {
+            "start_seconds": 90,
+            "end_seconds": 180,
+            "issue": (
+                f"{tasks.TRANSCRIPT_LOCAL_DENSITY_ISSUE_MARKER}"
+                "（問題時間：01:30-03:00，8 字／80 秒有效語音，0.1 字/秒）"
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            segment = Path(tmpdir) / "segment.mp3"
+            segment.write_bytes(b"segment")
+            with mock.patch.object(tasks, "_transcribe_segment", return_value=initial), \
+                 mock.patch.object(
+                     tasks,
+                     "_raise_if_segment_transcript_incomplete",
+                     side_effect=RuntimeError(
+                         "第 1/1 段轉錄不完整："
+                         + tasks.TRANSCRIPT_LOCAL_DENSITY_ISSUE_MARKER
+                     ),
+                 ), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", return_value=[]), \
+                 mock.patch.object(
+                     tasks,
+                     "_speech_backed_transcript_local_density_quality_ranges",
+                     return_value=[local_range],
+                 ), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(
+                     tasks,
+                     "_repair_existing_segment_timestamp_gaps",
+                     return_value=(repaired, ["已局部補救局部漏字：01:30-03:00"]),
+                 ) as repair_mock, \
+                 mock.patch.object(tasks, "update_job_status"):
+                transcript = tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    0,
+                    1,
+                    "local-density-repair-job",
+                    "gemini-test",
+                    offset_seconds=0,
+                    duration_seconds=300,
+                    is_last_segment=True,
+                )
+
+        self.assertEqual(transcript, repaired)
+        repair_ranges = repair_mock.call_args.kwargs["gap_ranges"]
+        self.assertEqual(len(repair_ranges), 1)
+        self.assertEqual(repair_ranges[0]["start_seconds"], local_range["start_seconds"])
+        self.assertEqual(repair_ranges[0]["end_seconds"], local_range["end_seconds"])
+        self.assertIn(local_range["issue"], repair_ranges[0]["issues"])
+
+    def test_sparse_density_issue_blocks_meeting_conclusions(self):
+        from backend import tasks
+
+        findings = tasks._delivery_blocking_segment_quality_issues([{
+            "index": 2,
+            "issues": [tasks.TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER],
+        }])
+
+        self.assertEqual(
+            findings,
+            [f"第 3 段：{tasks.TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER}"],
+        )
+
+    def test_recovery_subsegment_cache_context_uses_retained_source_identity(self):
+        from backend import tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            child = Path(tmpdir) / "_sub_transient_000.mp3"
+            child.write_bytes(b"recovery-child")
+            context = tasks._recovery_subsegment_cache_context(
+                child,
+                "gemini-test",
+                parent_segment_index=5,
+                start_seconds=3000,
+                end_seconds=3120,
+                is_last_segment=False,
+                source_audio_sha256="retained-source-sha",
+                custom_vocabulary=["佳世達"],
+            )
+
+        self.assertEqual(context["source_audio_sha256"], "retained-source-sha")
+        self.assertEqual(context["segment_bounds"], [[3000, 3120]])
+        self.assertEqual(context["total_segments"], 2)
+        self.assertEqual(context["recovery_parent_segment_index"], 5)
+        self.assertEqual(context["custom_vocabulary"], ["佳世達"])
+        self.assertEqual(context["recovery_speaker_context"], "")
+        for volatile_key in (
+            "source_audio_path",
+            "source_audio_name",
+            "source_audio_size",
+            "source_audio_mtime_ns",
+        ):
+            self.assertNotIn(volatile_key, context)
+
+    def test_recovery_subsegment_cache_reuses_recreated_temp_audio(self):
+        from backend import tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            first_child = root / "_sub_first_attempt.mp3"
+            first_child.write_bytes(b"same-recovery-audio")
+            first_context = tasks._recovery_subsegment_cache_context(
+                first_child,
+                "gemini-test",
+                parent_segment_index=0,
+                start_seconds=0,
+                end_seconds=60,
+                is_last_segment=True,
+                source_audio_sha256="retained-source-sha",
+            )
+            tasks._save_segment_transcript_cache(
+                root / "output",
+                "first-recovery-job",
+                0,
+                first_context,
+                "[00:00] **[發言者 A]**：已驗證的恢復小段。",
+            )
+
+            second_child = root / "_sub_second_attempt.mp3"
+            second_child.write_bytes(b"same-recovery-audio")
+            second_context = tasks._recovery_subsegment_cache_context(
+                second_child,
+                "gemini-test",
+                parent_segment_index=0,
+                start_seconds=0,
+                end_seconds=60,
+                is_last_segment=True,
+                source_audio_sha256="retained-source-sha",
+            )
+            cached = tasks._load_segment_transcript_cache(
+                root / "output",
+                "second-recovery-job",
+                0,
+                second_context,
+            )
+
+        self.assertEqual(cached, "[00:00] **[發言者 A]**：已驗證的恢復小段。")
+
+    def test_recovery_subsegment_cache_does_not_reuse_different_speaker_anchor(self):
+        from backend import tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            first_child = root / "_sub_first_attempt.mp3"
+            first_child.write_bytes(b"same-recovery-audio")
+            first_context = tasks._recovery_subsegment_cache_context(
+                first_child,
+                "gemini-test",
+                parent_segment_index=0,
+                start_seconds=178,
+                end_seconds=300,
+                is_last_segment=False,
+                source_audio_sha256="retained-source-sha",
+                speaker_context=(
+                    "Existing speaker labels from earlier segments: 發言者 A\n"
+                    "Cross-segment boundary anchor (label and timestamp only): "
+                    "At 02:58, the prior assigned label was [發言者 A]."
+                ),
+            )
+            tasks._save_segment_transcript_cache(
+                root / "output",
+                "first-recovery-job",
+                0,
+                first_context,
+                "[02:58] **[發言者 A]**：已驗證的恢復小段。",
+            )
+
+            second_child = root / "_sub_second_attempt.mp3"
+            second_child.write_bytes(b"same-recovery-audio")
+            second_context = tasks._recovery_subsegment_cache_context(
+                second_child,
+                "gemini-test",
+                parent_segment_index=0,
+                start_seconds=178,
+                end_seconds=300,
+                is_last_segment=False,
+                source_audio_sha256="retained-source-sha",
+                speaker_context=(
+                    "Existing speaker labels from earlier segments: 發言者 B\n"
+                    "Cross-segment boundary anchor (label and timestamp only): "
+                    "At 02:58, the prior assigned label was [發言者 B]."
+                ),
+            )
+            cached = tasks._load_segment_transcript_cache(
+                root / "output",
+                "second-recovery-job",
+                0,
+                second_context,
+            )
+
+        self.assertIsNone(cached)
+
+    def test_recovery_subsegment_cache_does_not_reuse_generic_child_for_quality_focus(self):
+        from backend import tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            first_child = root / "_sub_generic.mp3"
+            first_child.write_bytes(b"same-recovery-audio")
+            generic_context = tasks._recovery_subsegment_cache_context(
+                first_child,
+                "gemini-test",
+                parent_segment_index=0,
+                start_seconds=0,
+                end_seconds=60,
+                is_last_segment=True,
+                source_audio_sha256="retained-source-sha",
+            )
+            tasks._save_segment_transcript_cache(
+                root / "output",
+                "generic-recovery-job",
+                0,
+                generic_context,
+                "[00:00] **[發言者 A]**：一般模式的已驗證小段。",
+            )
+
+            focus = tasks._transcript_repair_focus_prompt([
+                "分段疑似數列延伸轉錄幻覺",
+            ])
+            focused_child = root / "_sub_focused.mp3"
+            focused_child.write_bytes(b"same-recovery-audio")
+            focused_context = tasks._recovery_subsegment_cache_context(
+                focused_child,
+                "gemini-test",
+                parent_segment_index=0,
+                start_seconds=0,
+                end_seconds=60,
+                is_last_segment=True,
+                source_audio_sha256="retained-source-sha",
+                repair_focus=focus,
+            )
+            cached = tasks._load_segment_transcript_cache(
+                root / "output",
+                "focused-recovery-job",
+                0,
+                focused_context,
+            )
+
+        self.assertIsNone(cached)
+        self.assertIn("recovery_quality_focus_sha256", focused_context)
+        self.assertNotIn("品質補救模式", focused_context["recovery_quality_focus_sha256"])
+
+    def test_interrupted_recovery_persists_parent_plan_before_child_call(self):
+        from backend import tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segment = root / "segment.mp3"
+            child = root / "child.mp3"
+            second_child = root / "child-2.mp3"
+            for path in (segment, child, second_child):
+                path.write_bytes(b"segment")
+            output_dir = root / "output"
+            context = tasks._segment_recovery_plan_context(
+                model="gemini-test",
+                source_audio_sha256="retained-source-sha",
+                segment_index=4,
+                total_segments=7,
+                start_seconds=2400,
+                end_seconds=3000,
+                custom_vocabulary=["佳世達"],
+            )
+
+            with mock.patch.object(
+                tasks,
+                "_transcribe_segment",
+                side_effect=[
+                    "[00:00] **[發言者 A]**：初稿有缺口。",
+                    RuntimeError("503 UNAVAILABLE"),
+                ],
+            ), \
+                 mock.patch.object(
+                     tasks,
+                     "_raise_if_segment_transcript_incomplete",
+                     side_effect=[
+                         RuntimeError("第 5/7 段轉錄不完整：音訊含持續語音"),
+                         None,
+                     ],
+                 ), \
+                 mock.patch.object(
+                     tasks,
+                     "_speech_backed_timestamp_gap_quality_ranges",
+                     return_value=[
+                         {"start_seconds": 2450, "end_seconds": 2520, "issue": "音訊含持續語音"},
+                         {"start_seconds": 2600, "end_seconds": 2670, "issue": "音訊含持續語音"},
+                         {"start_seconds": 2750, "end_seconds": 2820, "issue": "音訊含持續語音"},
+                     ],
+                 ), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(
+                     tasks,
+                     "_split_audio_to_subsegments",
+                     return_value=[(child, 0, 120), (second_child, 120, 600)],
+                 ), \
+                 mock.patch.object(tasks, "update_job_status"):
+                with self.assertRaisesRegex(RuntimeError, "503 UNAVAILABLE"):
+                    tasks._transcribe_segment_with_recovery(
+                        None,
+                        segment,
+                        4,
+                        7,
+                        "interrupted-recovery-job",
+                        "gemini-test",
+                        offset_seconds=2400,
+                        duration_seconds=600,
+                        is_last_segment=False,
+                        recovery_cache_output_dir=output_dir,
+                        recovery_cache_source_sha256="retained-source-sha",
+                        recovery_plan_context=context,
+                    )
+
+            self.assertEqual(
+                tasks._load_segment_recovery_plan(output_dir, context),
+                tasks.TRANSCRIPT_MULTI_GAP_RECOVERY_SECONDS,
+            )
+
+    def test_process_resumes_interrupted_segment_from_recovery_plan(self):
+        from backend import tasks
+
+        class FakeClient:
+            pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            first_segment = root / "first.mp3"
+            second_segment = root / "second.mp3"
+            for path in (audio_path, first_segment, second_segment):
+                path.write_bytes(b"audio")
+            output_dir = root / "output"
+            source_sha = tasks._sha256_file(audio_path)
+            context = tasks._segment_recovery_plan_context(
+                model="gemini-test",
+                source_audio_sha256=source_sha,
+                segment_index=1,
+                total_segments=2,
+                start_seconds=600,
+                end_seconds=1200,
+            )
+            tasks._save_segment_recovery_plan(
+                output_dir,
+                context,
+                chunk_seconds=tasks.TRANSCRIPT_MULTI_GAP_RECOVERY_SECONDS,
+                reason="previous 503",
+            )
+            slices = [
+                tasks.AudioSlice(first_segment, 0, 600),
+                tasks.AudioSlice(second_segment, 600, 1200),
+            ]
+            calls = []
+
+            def transcribe_with_recovery(*args, **kwargs):
+                calls.append(kwargs)
+                index = int(args[2])
+                return (
+                    "[00:00] **[發言者 A]**：第一段完成。"
+                    if index == 0
+                    else "[10:00] **[發言者 B]**：第二段續跑完成。"
+                )
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", return_value=FakeClient()), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=slices), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", side_effect=transcribe_with_recovery), \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_generate_meeting_content_from_transcript", return_value=("會議內容", "gemma-test")), \
+                 mock.patch.object(tasks, "_repair_meeting_content_if_needed", side_effect=lambda **kwargs: kwargs["meeting_content"]), \
+                 mock.patch.object(tasks, "_finalize_meeting_content", side_effect=lambda meeting_content, *_args: meeting_content), \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting"):
+                output_path = tasks.process_audio_task(
+                    job_id="resume-recovery-plan-job",
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    model="gemini-test",
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertEqual(len(calls), 2)
+            self.assertFalse(calls[0]["direct_recovery"])
+            self.assertTrue(calls[1]["direct_recovery"])
+            self.assertEqual(
+                calls[1]["preferred_recovery_chunk_seconds"],
+                tasks.TRANSCRIPT_MULTI_GAP_RECOVERY_SECONDS,
+            )
+            self.assertIsNone(tasks._load_segment_recovery_plan(output_dir, context))
+
+    def test_process_resumes_better_recovery_candidate_with_its_model(self):
+        from backend import tasks
+
+        class FakeClient:
+            pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            first_segment = root / "first.mp3"
+            second_segment = root / "second.mp3"
+            for path in (audio_path, first_segment, second_segment):
+                path.write_bytes(b"audio")
+            output_dir = root / "output"
+            source_sha = tasks._sha256_file(audio_path)
+            context = tasks._segment_recovery_plan_context(
+                model="gemini-primary",
+                source_audio_sha256=source_sha,
+                segment_index=1,
+                total_segments=2,
+                start_seconds=600,
+                end_seconds=1200,
+            )
+            tasks._save_segment_recovery_plan(
+                output_dir,
+                context,
+                chunk_seconds=tasks.TRANSCRIPT_LOCAL_REPAIR_RECOVERY_SECONDS,
+                reason="better recovery candidate",
+                candidate_transcript="[10:00] **[發言者 B]**：補救模型已保留大部分內容。",
+                candidate_issues=["音訊含持續語音但時間戳在 17:00 至 18:05 間隔 65 秒"],
+                candidate_model="gemini-recovery",
+            )
+            slices = [
+                tasks.AudioSlice(first_segment, 0, 600),
+                tasks.AudioSlice(second_segment, 600, 1200),
+            ]
+            calls = []
+
+            def transcribe_with_recovery(*args, **kwargs):
+                calls.append((args, kwargs))
+                index = int(args[2])
+                return (
+                    "[00:00] **[發言者 A]**：第一段完成。"
+                    if index == 0
+                    else "[10:00] **[發言者 B]**：以補救模型接續完成。"
+                )
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", return_value=FakeClient()), \
+                 mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"), \
+                 mock.patch.object(tasks, "TRANSCRIPTION_RECOVERY_MODEL", "gemini-recovery"), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=slices), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_speech_backed_transcript_local_density_quality_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", side_effect=transcribe_with_recovery), \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_generate_meeting_content_from_transcript", return_value=("會議內容", "gemma-test")), \
+                 mock.patch.object(tasks, "_repair_meeting_content_if_needed", side_effect=lambda **kwargs: kwargs["meeting_content"]), \
+                 mock.patch.object(tasks, "_finalize_meeting_content", side_effect=lambda meeting_content, *_args: meeting_content), \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting"):
+                output_path = tasks.process_audio_task(
+                    job_id="resume-better-recovery-model-job",
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    model="gemini-primary",
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0][0][5], "gemini-primary")
+            self.assertEqual(calls[1][0][5], "gemini-recovery")
+            self.assertTrue(calls[1][1]["direct_recovery"])
+            self.assertEqual(
+                calls[1][1]["preferred_recovery_chunk_seconds"],
+                tasks.TRANSCRIPT_LOCAL_REPAIR_RECOVERY_SECONDS,
+            )
+            self.assertIsNone(tasks._load_segment_recovery_plan(output_dir, context))
+
+    def test_single_segment_resume_uses_better_recovery_candidate_model(self):
+        from backend import tasks
+
+        class FakeClient:
+            pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "short-meeting.webm"
+            audio_path.write_bytes(b"audio")
+            output_dir = root / "output"
+            source_sha = tasks._sha256_file(audio_path)
+            context = tasks._segment_recovery_plan_context(
+                model="gemini-primary",
+                source_audio_sha256=source_sha,
+                segment_index=0,
+                total_segments=1,
+                start_seconds=0,
+                end_seconds=240,
+            )
+            tasks._save_segment_recovery_plan(
+                output_dir,
+                context,
+                chunk_seconds=tasks.TRANSCRIPT_LOCAL_REPAIR_RECOVERY_SECONDS,
+                reason="better single-segment recovery candidate",
+                candidate_transcript="[00:00] **[發言者 A]**：補救模型已保留大部分內容。",
+                candidate_issues=["音訊含持續語音但時間戳在 02:00 至 03:05 間隔 65 秒"],
+                candidate_model="gemini-recovery",
+            )
+            slice_ = tasks.AudioSlice(audio_path, 0, 240)
+            calls = []
+
+            def transcribe_with_recovery(*args, **kwargs):
+                calls.append((args, kwargs))
+                return "[00:00] **[發言者 A]**：以補救模型接續完成。"
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", return_value=FakeClient()), \
+                 mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"), \
+                 mock.patch.object(tasks, "TRANSCRIPTION_RECOVERY_MODEL", "gemini-recovery"), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=[slice_]), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_speech_backed_transcript_local_density_quality_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", side_effect=transcribe_with_recovery), \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_generate_meeting_content_from_transcript", return_value=("會議內容", "gemma-test")), \
+                 mock.patch.object(tasks, "_repair_meeting_content_if_needed", side_effect=lambda **kwargs: kwargs["meeting_content"]), \
+                 mock.patch.object(tasks, "_finalize_meeting_content", side_effect=lambda meeting_content, *_args: meeting_content), \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting"):
+                output_path = tasks.process_audio_task(
+                    job_id="single-resume-better-recovery-model-job",
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    model="gemini-primary",
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0][5], "gemini-recovery")
+            self.assertTrue(calls[0][1]["direct_recovery"])
+            self.assertIsNone(tasks._load_segment_recovery_plan(output_dir, context))
+
+    def test_direct_recovery_saves_verified_subsegment_cache(self):
+        from backend import tasks
+
+        first = "[00:00] **[發言者 A]**：第一個已驗證小段。"
+        second = "[00:00] **[發言者 B]**：第二個已驗證小段。"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segment = root / "segment.mp3"
+            first_child = root / "first.mp3"
+            second_child = root / "second.mp3"
+            for path in (segment, first_child, second_child):
+                path.write_bytes(b"segment")
+
+            with mock.patch.object(
+                tasks,
+                "_split_audio_to_subsegments",
+                return_value=[(first_child, 0, 180), (second_child, 180, 360)],
+            ), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
+                 mock.patch.object(tasks, "_transcribe_segment", side_effect=[first, second]), \
+                 mock.patch.object(tasks, "_save_segment_transcript_cache") as save_cache, \
+                 mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete"), \
+                 mock.patch.object(tasks, "update_job_status"):
+                transcript = tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    5,
+                    8,
+                    "recovery-cache-job",
+                    "gemini-test",
+                    offset_seconds=3000,
+                    duration_seconds=360,
+                    is_last_segment=False,
+                    direct_recovery=True,
+                    recovery_cache_output_dir=root / "output",
+                    recovery_cache_source_sha256="retained-source-sha",
+                )
+
+        self.assertIn("第一個已驗證小段", transcript)
+        self.assertIn("第二個已驗證小段", transcript)
+        self.assertEqual(save_cache.call_count, 2)
+        first_call = save_cache.call_args_list[0].kwargs
+        second_call = save_cache.call_args_list[1].kwargs
+        self.assertEqual(first_call["segment_index"], 0)
+        self.assertEqual(
+            first_call["context"]["segment_bounds"],
+            [[3000, 3180]],
+        )
+        self.assertEqual(
+            second_call["context"]["segment_bounds"],
+            [[3180, 3360]],
+        )
+        self.assertEqual(
+            first_call["context"]["source_audio_sha256"],
+            "retained-source-sha",
+        )
+        self.assertIn(".recovery.6.3000-3180", first_call["job_id"])
+
+    def test_direct_recovery_reuses_verified_subsegment_cache(self):
+        from backend import tasks
+
+        first = "[00:00] **[發言者 A]**：已快取的前半段。"
+        second = "[03:00] **[發言者 B]**：已快取的後半段。"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segment = root / "segment.mp3"
+            first_child = root / "first.mp3"
+            second_child = root / "second.mp3"
+            for path in (segment, first_child, second_child):
+                path.write_bytes(b"segment")
+
+            with mock.patch.object(
+                tasks,
+                "_split_audio_to_subsegments",
+                return_value=[(first_child, 0, 180), (second_child, 180, 360)],
+            ), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", side_effect=[first, second]) as load_cache, \
+                 mock.patch.object(tasks, "_transcribe_segment") as transcribe, \
+                 mock.patch.object(tasks, "_save_segment_transcript_cache") as save_cache, \
+                 mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete"), \
+                 mock.patch.object(tasks, "update_job_status") as update_status:
+                transcript = tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    5,
+                    8,
+                    "recovery-cache-job",
+                    "gemini-test",
+                    offset_seconds=3000,
+                    duration_seconds=360,
+                    is_last_segment=False,
+                    direct_recovery=True,
+                    recovery_cache_output_dir=root / "output",
+                    recovery_cache_source_sha256="retained-source-sha",
+                )
+
+        self.assertIn("已快取的前半段", transcript)
+        self.assertIn("已快取的後半段", transcript)
+        self.assertEqual(load_cache.call_count, 2)
+        transcribe.assert_not_called()
+        save_cache.assert_not_called()
+        self.assertTrue(any(
+            "已沿用第 6/8 段補救小段 1/2 的已驗證逐字稿"
+            in str(call.args[2] if len(call.args) > 2 else call.kwargs.get("message", ""))
+            for call in update_status.call_args_list
+        ))
+
+    def test_recovery_child_using_transient_fallback_uses_isolated_model_cache(self):
+        from backend import tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segment = root / "segment.mp3"
+            first_child = root / "first_child.mp3"
+            second_child = root / "second_child.mp3"
+            for path in (segment, first_child, second_child):
+                path.write_bytes(b"segment")
+
+            def transcribe_with_fallback(*_args, **kwargs):
+                kwargs["transient_fallback_models"].append("gemini-recovery")
+                kwargs["response_models"].append("gemini-recovery")
+                return "[00:00] **[發言者 A]**：備援模型完成這段逐字稿。"
+
+            transient_fallback_models = []
+            with mock.patch.object(
+                tasks,
+                "_split_audio_to_subsegments",
+                return_value=[(first_child, 0, 180), (second_child, 180, 360)],
+            ), \
+                 mock.patch.object(tasks, "_transcribe_segment", side_effect=transcribe_with_fallback), \
+                 mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete"), \
+                 mock.patch.object(tasks, "_save_segment_transcript_cache") as save_cache, \
+                 mock.patch.object(tasks, "update_job_status"):
+                transcript = tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    0,
+                    1,
+                    "fallback-cache-job",
+                    "gemini-primary",
+                    offset_seconds=3000,
+                    duration_seconds=360,
+                    is_last_segment=True,
+                    direct_recovery=True,
+                    preferred_recovery_chunk_seconds=180,
+                    recovery_cache_output_dir=root / "output",
+                    recovery_cache_source_sha256="retained-source-sha",
+                    transient_fallback_models=transient_fallback_models,
+                )
+
+        self.assertIn("備援模型完成這段逐字稿", transcript)
+        self.assertEqual(transient_fallback_models, ["gemini-recovery", "gemini-recovery"])
+        self.assertEqual(save_cache.call_count, 2)
+        self.assertTrue(all(
+            call.kwargs["context"]["model"] == "gemini-recovery"
+            for call in save_cache.call_args_list
+        ))
+
+    def test_recovery_child_reuses_isolated_fallback_model_cache(self):
+        from backend import tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segment = root / "segment.mp3"
+            first_child = root / "first_child.mp3"
+            second_child = root / "second_child.mp3"
+            for path in (segment, first_child, second_child):
+                path.write_bytes(b"segment")
+
+            def load_cache(*_args, **kwargs):
+                if kwargs["context"]["model"] != "gemini-recovery":
+                    return None
+                return (
+                    "[00:00] **[發言者 A]**：備援快取前段。"
+                    if kwargs["context"]["segment_bounds"][0][0] == 0
+                    else "[03:00] **[發言者 B]**：備援快取後段。"
+                )
+
+            with mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"), \
+                 mock.patch.object(tasks, "TRANSCRIPTION_RECOVERY_MODEL", "gemini-recovery"), \
+                 mock.patch.object(
+                     tasks,
+                     "_split_audio_to_subsegments",
+                     return_value=[(first_child, 0, 180), (second_child, 180, 360)],
+                 ), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", side_effect=load_cache) as load_mock, \
+                 mock.patch.object(tasks, "_recovery_subsegment_cached_audio_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_transcribe_segment") as transcribe, \
+                 mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete"), \
+                 mock.patch.object(tasks, "update_job_status"):
+                transcript = tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    0,
+                    1,
+                    "fallback-cache-resume-job",
+                    "gemini-primary",
+                    offset_seconds=0,
+                    duration_seconds=360,
+                    is_last_segment=True,
+                    direct_recovery=True,
+                    preferred_recovery_chunk_seconds=180,
+                    recovery_cache_output_dir=root / "output",
+                    recovery_cache_source_sha256="retained-source-sha",
+                )
+
+        self.assertIn("備援快取前段", transcript)
+        self.assertIn("備援快取後段", transcript)
+        transcribe.assert_not_called()
+        self.assertEqual(
+            [call.kwargs["context"]["model"] for call in load_mock.call_args_list],
+            ["gemini-primary", "gemini-recovery", "gemini-primary", "gemini-recovery"],
+        )
+
+    def test_direct_recovery_discards_cached_subsegment_with_audio_quality_issue(self):
+        from backend import tasks
+
+        cached_first = "[00:00] **[發言者 A]**：快取內容過少。"
+        refreshed_first = "[00:00] **[發言者 A]**：重新轉錄後保留完整內容。"
+        cached_second = "[03:00] **[發言者 B]**：已驗證的後半段。"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segment = root / "segment.mp3"
+            first_child = root / "first.mp3"
+            second_child = root / "second.mp3"
+            for path in (segment, first_child, second_child):
+                path.write_bytes(b"segment")
+
+            with mock.patch.object(
+                tasks,
+                "_split_audio_to_subsegments",
+                return_value=[(first_child, 0, 180), (second_child, 180, 360)],
+            ), \
+                 mock.patch.object(
+                     tasks,
+                     "_load_segment_transcript_cache",
+                     side_effect=[cached_first, cached_second],
+                 ), \
+                 mock.patch.object(
+                     tasks,
+                     "_recovery_subsegment_cached_audio_quality_issues",
+                     side_effect=[[tasks.TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER], []],
+                 ), \
+                 mock.patch.object(tasks, "_transcribe_segment", return_value=refreshed_first) as transcribe, \
+                 mock.patch.object(tasks, "_save_segment_transcript_cache") as save_cache, \
+                 mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete"), \
+                 mock.patch.object(tasks, "update_job_status"):
+                transcript = tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    5,
+                    8,
+                    "recovery-cache-job",
+                    "gemini-test",
+                    offset_seconds=3000,
+                    duration_seconds=360,
+                    is_last_segment=False,
+                    direct_recovery=True,
+                    recovery_cache_output_dir=root / "output",
+                    recovery_cache_source_sha256="retained-source-sha",
+                )
+
+        self.assertIn("重新轉錄後保留完整內容", transcript)
+        self.assertIn("已驗證的後半段", transcript)
+        self.assertNotIn("快取內容過少", transcript)
+        transcribe.assert_called_once()
+        save_cache.assert_called_once()
+
+    def test_direct_recovery_removes_exact_overlap_from_adjacent_children(self):
+        from backend import tasks
+
+        first = "\n\n".join([
+            "[00:00] **[發言者 A]**：前半段的討論內容。",
+            "[02:58] **[發言者 A]**：交界處需要保留的同一句話。",
+        ])
+        second = "\n\n".join([
+            "[00:00] **[發言者 A]**：交界處需要保留的同一句話。",
+            "[00:10] **[發言者 B]**：後半段接續的討論內容。",
+        ])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segment = root / "segment.mp3"
+            first_child = root / "first.mp3"
+            second_child = root / "second.mp3"
+            for path in (segment, first_child, second_child):
+                path.write_bytes(b"segment")
+
+            with mock.patch.object(
+                tasks,
+                "_split_audio_to_subsegments",
+                return_value=[(first_child, 0, 182), (second_child, 178, 360)],
+            ), \
+                 mock.patch.object(tasks, "_transcribe_segment", side_effect=[first, second]), \
+                 mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete"), \
+                 mock.patch.object(tasks, "update_job_status"):
+                transcript = tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    0,
+                    1,
+                    "recovery-overlap-job",
+                    "gemini-test",
+                    offset_seconds=0,
+                    duration_seconds=360,
+                    is_last_segment=True,
+                    direct_recovery=True,
+                )
+
+        self.assertEqual(transcript.count("交界處需要保留的同一句話"), 1)
+        self.assertIn("後半段接續的討論內容", transcript)
+
+    def test_direct_recovery_anchors_speaker_context_between_children(self):
+        from backend import tasks
+
+        first = "[02:58] **[發言者 A]**：交界前仍由同一人發言。"
+        second = "[00:00] **[發言者 A]**：交界後的內容。"
+        contexts = []
+
+        def transcribe_with_context(*_args, **kwargs):
+            contexts.append(kwargs.get("speaker_context") or "")
+            return first if len(contexts) == 1 else second
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segment = root / "segment.mp3"
+            first_child = root / "first.mp3"
+            second_child = root / "second.mp3"
+            for path in (segment, first_child, second_child):
+                path.write_bytes(b"segment")
+
+            with mock.patch.object(
+                tasks,
+                "_split_audio_to_subsegments",
+                return_value=[(first_child, 0, 182), (second_child, 178, 360)],
+            ), \
+                 mock.patch.object(tasks, "_transcribe_segment", side_effect=transcribe_with_context), \
+                 mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete"), \
+                 mock.patch.object(tasks, "update_job_status"):
+                tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    0,
+                    1,
+                    "recovery-speaker-anchor-job",
+                    "gemini-test",
+                    offset_seconds=600,
+                    duration_seconds=360,
+                    is_last_segment=True,
+                    direct_recovery=True,
+                )
+
+        self.assertEqual(len(contexts), 2)
+        self.assertIn("Cross-segment boundary anchor", contexts[1])
+        self.assertIn("[發言者 A]", contexts[1])
+        self.assertIn("12:58", contexts[1])
 
     def test_speech_backed_timestamp_gap_requires_active_audio(self):
         from backend import tasks
@@ -8894,6 +11264,217 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             )
 
         self.assertEqual(issues, [])
+
+    def test_speech_backed_timestamp_gap_detects_active_61_second_gap(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -20.0
+
+            def __len__(self):
+                return 120_000
+
+            def __getitem__(self, _slice):
+                return self
+
+        transcript = (
+            "[00:00] **[發言者 A]**：開始討論。\n"
+            "[01:01] **[發言者 A]**：接續討論。"
+        )
+        with mock.patch.object(tasks, "TRANSCRIPT_SPEECH_GAP_SECONDS", 60), \
+             mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 58_000)]):
+            issues = tasks._speech_backed_timestamp_gap_quality_issues(
+                Path("segment.mp3"),
+                transcript,
+                expected_start_seconds=0,
+                expected_end_seconds=120,
+            )
+
+        self.assertTrue(any("00:00 至 01:01" in issue for issue in issues))
+
+    def test_speech_backed_transcript_density_flags_sparse_dense_audio(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -20.0
+
+            def __len__(self):
+                return 200_000
+
+            def __getitem__(self, _slice):
+                return self
+
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 120_000)]):
+            issues = tasks._speech_backed_transcript_density_quality_issues(
+                Path("dense.mp3"),
+                "[00:00] **[發言者 A]**：太短。",
+                expected_start_seconds=0,
+                expected_end_seconds=200,
+            )
+
+        self.assertTrue(any(
+            tasks.TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER in issue
+            for issue in issues
+        ))
+
+    def test_speech_backed_transcript_density_flags_sparse_short_recovery_chunk(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -20.0
+
+            def __len__(self):
+                return 30_000
+
+            def __getitem__(self, _slice):
+                return self
+
+        # A pre-existing deployment may still set the historical 45-second
+        # value. The duration cap must keep a 30-second child checkable.
+        with mock.patch.object(
+            tasks,
+            "TRANSCRIPT_SPEECH_DENSITY_SHORT_SEGMENT_MIN_ACTIVE_SECONDS",
+            45,
+        ), \
+             mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 24_000)]):
+            issues = tasks._speech_backed_transcript_density_quality_issues(
+                Path("short-dense.mp3"),
+                "[00:00] **[發言者 A]**：太短。",
+                expected_start_seconds=0,
+                expected_end_seconds=30,
+            )
+
+        self.assertTrue(any(
+            tasks.TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER in issue
+            for issue in issues
+        ))
+
+    def test_speech_backed_transcript_density_accepts_substantive_dense_audio(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -20.0
+
+            def __len__(self):
+                return 200_000
+
+            def __getitem__(self, _slice):
+                return self
+
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 120_000)]):
+            issues = tasks._speech_backed_transcript_density_quality_issues(
+                Path("dense.mp3"),
+                "[00:00] **[發言者 A]**：" + "完整內容" * 100,
+                expected_start_seconds=0,
+                expected_end_seconds=200,
+            )
+
+        self.assertEqual(issues, [])
+
+    def test_local_density_locates_sparse_middle_when_whole_segment_density_passes(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -20.0
+
+            def __init__(self, length_ms=300_000):
+                self.length_ms = length_ms
+
+            def __len__(self):
+                return self.length_ms
+
+            def __getitem__(self, audio_slice):
+                start = int(audio_slice.start or 0)
+                end = int(
+                    audio_slice.stop
+                    if audio_slice.stop is not None
+                    else self.length_ms
+                )
+                return FakeAudio(max(0, end - start))
+
+        transcript = (
+            "[00:00] **[發言者 A]**：" + "完整內容" * 125 + "\n"
+            "[01:00] **[發言者 A]**：簡短內容。\n"
+            "[02:00] **[發言者 A]**：簡短內容。\n"
+            "[03:00] **[發言者 A]**：簡短內容。\n"
+            "[04:00] **[發言者 A]**：" + "完整內容" * 125
+        )
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 300_000)]):
+            whole_segment_issues = tasks._speech_backed_transcript_density_quality_issues(
+                Path("middle-sparse.mp3"),
+                transcript,
+                expected_start_seconds=0,
+                expected_end_seconds=300,
+            )
+            local_ranges = tasks._speech_backed_transcript_local_density_quality_ranges(
+                Path("middle-sparse.mp3"),
+                transcript,
+                expected_start_seconds=0,
+                expected_end_seconds=300,
+            )
+
+        self.assertEqual(whole_segment_issues, [])
+        self.assertEqual(len(local_ranges), 1)
+        self.assertEqual(local_ranges[0]["start_seconds"], 45)
+        self.assertEqual(local_ranges[0]["end_seconds"], 225)
+        self.assertIn(tasks.TRANSCRIPT_LOCAL_DENSITY_ISSUE_MARKER, local_ranges[0]["issue"])
+        self.assertIn("問題時間：00:45-03:45", local_ranges[0]["issue"])
+
+    def test_segment_quality_surfaces_local_sparse_window_as_delivery_blocker(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -20.0
+
+            def __init__(self, length_ms=300_000):
+                self.length_ms = length_ms
+
+            def __len__(self):
+                return self.length_ms
+
+            def __getitem__(self, audio_slice):
+                start = int(audio_slice.start or 0)
+                end = int(
+                    audio_slice.stop
+                    if audio_slice.stop is not None
+                    else self.length_ms
+                )
+                return FakeAudio(max(0, end - start))
+
+        transcript = (
+            "[00:00] **[發言者 A]**：" + "完整內容" * 125 + "\n"
+            "[01:00] **[發言者 A]**：簡短內容。\n"
+            "[02:00] **[發言者 A]**：簡短內容。\n"
+            "[03:00] **[發言者 A]**：簡短內容。\n"
+            "[04:00] **[發言者 A]**：" + "完整內容" * 125
+        )
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 300_000)]):
+            issues = tasks._segment_transcript_current_quality_issues(
+                transcript,
+                0,
+                1,
+                expected_start_seconds=0,
+                expected_end_seconds=300,
+                is_last_segment=True,
+                audio_path=Path("middle-sparse.mp3"),
+            )
+
+        self.assertTrue(any(
+            tasks.TRANSCRIPT_LOCAL_DENSITY_ISSUE_MARKER in issue
+            for issue in issues
+        ))
+        findings = tasks._delivery_blocking_segment_quality_issues([{
+            "index": 0,
+            "issues": issues,
+        }])
+        self.assertEqual(len(findings), 1)
+        self.assertIn("問題時間：00:45-03:45", findings[0])
 
     def test_speech_backed_timestamp_gap_detects_active_tail_after_final_timecode(self):
         from backend import tasks
@@ -8988,6 +11569,109 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(ranges[-1]["start_seconds"], 270)
         self.assertEqual(ranges[-1]["end_seconds"], 360)
 
+    def test_nearby_repair_ranges_bridge_one_discussion_turn(self):
+        from backend import tasks
+
+        ranges = tasks._coalesce_transcript_repair_ranges([
+            {
+                "start_seconds": 3013,
+                "end_seconds": 3190,
+                "issue": "音訊含持續語音但時間戳在 50:13 至 53:10 間隔 177 秒",
+            },
+            {
+                "start_seconds": 3206,
+                "end_seconds": 3305,
+                "issue": "音訊含持續語音但時間戳在 53:26 至 55:05 間隔 99 秒",
+            },
+            {
+                "start_seconds": 3496,
+                "end_seconds": 3592,
+                "issue": "音訊含持續語音但時間戳在 58:16 至 59:52 間隔 96 秒",
+            },
+        ])
+
+        self.assertEqual(len(ranges), 2)
+        self.assertEqual(
+            [(item["start_seconds"], item["end_seconds"]) for item in ranges],
+            [(3013, 3305), (3496, 3592)],
+        )
+
+    def test_nearby_gap_repairs_preserve_verified_text_outside_two_windows(self):
+        from backend import tasks
+
+        existing = (
+            "[49:50] **[發言者 A]**：保留第一個缺口前的內容。\n\n"
+            "[50:13] **[發言者 A]**：應被更新的舊內容。\n\n"
+            "[53:15] **[發言者 B]**：仍在合併窗口內的舊內容。\n\n"
+            "[55:10] **[發言者 A]**：保留的中間已驗證內容。\n\n"
+            "[58:16] **[發言者 B]**：應被更新的後段舊內容。\n\n"
+            "[59:55] **[發言者 A]**：保留的結尾內容。"
+        )
+        repaired_first = (
+            "[50:12] **[發言者 A]**：僅供語境的前文。\n\n"
+            "[50:30] **[發言者 A]**：補回第一個窗口的討論。\n\n"
+            "[54:50] **[發言者 B]**：補回合併窗口結尾。\n\n"
+            "[55:11] **[發言者 A]**：僅供語境的後文。"
+        )
+        repaired_second = (
+            "[58:15] **[發言者 B]**：僅供語境的前文。\n\n"
+            "[58:40] **[發言者 B]**：補回第二個窗口的討論。\n\n"
+            "[59:54] **[發言者 A]**：僅供語境的後文。"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gap_paths = [Path(tmpdir) / "gap-one.mp3", Path(tmpdir) / "gap-two.mp3"]
+            for path in gap_paths:
+                path.write_bytes(b"gap")
+            with mock.patch.object(tasks, "_export_audio_gap_segment", side_effect=gap_paths) as export_mock, \
+                 mock.patch.object(
+                     tasks,
+                     "_transcribe_segment_with_recovery",
+                     side_effect=[repaired_first, repaired_second],
+                 ) as transcribe_mock, \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "update_job_status"):
+                result, notes = tasks._repair_existing_segment_timestamp_gaps(
+                    None,
+                    Path(tmpdir) / "segment.mp3",
+                    existing,
+                    gap_ranges=[
+                        {"start_seconds": 3013, "end_seconds": 3190, "issue": "時間缺口"},
+                        {"start_seconds": 3206, "end_seconds": 3305, "issue": "時間缺口"},
+                        {"start_seconds": 3496, "end_seconds": 3592, "issue": "時間缺口"},
+                    ],
+                    segment_index=5,
+                    total_segments=7,
+                    job_id="bridged-gap-repair-job",
+                    model="gemini-test",
+                    segment_start_seconds=2990,
+                    segment_end_seconds=3592,
+                    is_last_segment=False,
+                    speaker_context="",
+                    temp_segment_paths=[],
+                    quality_events=[],
+                )
+
+        self.assertEqual(export_mock.call_count, 2)
+        self.assertEqual(transcribe_mock.call_count, 2)
+        self.assertEqual(
+            [
+                (call.kwargs["gap_start_seconds"], call.kwargs["gap_end_seconds"])
+                for call in export_mock.call_args_list
+            ],
+            [(3013, 3305), (3496, 3592)],
+        )
+        self.assertIn("保留第一個缺口前的內容", result)
+        self.assertIn("保留的中間已驗證內容", result)
+        self.assertIn("保留的結尾內容", result)
+        self.assertIn("補回第一個窗口的討論", result)
+        self.assertIn("補回第二個窗口的討論", result)
+        self.assertNotIn("應被更新的舊內容", result)
+        self.assertNotIn("僅供語境", result)
+        self.assertEqual(
+            notes,
+            ["已局部補救時間缺口：50:13-55:05", "已局部補救時間缺口：58:16-59:52"],
+        )
+
     def test_targeted_gap_repair_replaces_only_timestamp_blocks_inside_gap(self):
         from backend import tasks
 
@@ -9081,6 +11765,113 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(notes, ["已局部補救時間缺口：59:54-64:01"])
         self.assertEqual(transcribe_mock.call_args.kwargs["duration_seconds"], 252)
         self.assertTrue(transcribe_mock.call_args.kwargs["direct_recovery"])
+
+    def test_targeted_local_omission_uses_direct_60_second_recovery_split(self):
+        from backend import tasks
+
+        existing = (
+            "[12:00] **[發言者 A]**：局部漏字前的內容。\n\n"
+            "[13:30] **[發言者 A]**：局部漏字後的內容。"
+        )
+        repaired = "[12:20] **[發言者 A]**：以更短分段補回的內容。"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gap_path = Path(tmpdir) / "local-gap.mp3"
+            gap_path.write_bytes(b"gap")
+            quality_events = []
+            with mock.patch.object(tasks, "_export_audio_gap_segment", return_value=gap_path), \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", return_value=repaired) as transcribe_mock, \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "update_job_status"):
+                result, _notes = tasks._repair_existing_segment_timestamp_gaps(
+                    None,
+                    Path(tmpdir) / "segment.mp3",
+                    existing,
+                    gap_ranges=[{
+                        "start_seconds": 720,
+                        "end_seconds": 780,
+                        "issue": (
+                            f"{tasks.TRANSCRIPT_LOCAL_DENSITY_ISSUE_MARKER}"
+                            "（問題時間：12:00-13:00）"
+                        ),
+                    }],
+                    segment_index=1,
+                    total_segments=3,
+                    job_id="local-gap-repair-job",
+                    model="gemini-test",
+                    segment_start_seconds=600,
+                    segment_end_seconds=900,
+                    is_last_segment=False,
+                    speaker_context="",
+                    temp_segment_paths=[],
+                    quality_events=quality_events,
+                )
+
+        self.assertIn("以更短分段補回的內容", result)
+        self.assertTrue(transcribe_mock.call_args.kwargs["direct_recovery"])
+        self.assertEqual(
+            transcribe_mock.call_args.kwargs["preferred_recovery_chunk_seconds"],
+            tasks.TRANSCRIPT_LOCAL_REPAIR_RECOVERY_SECONDS,
+        )
+        self.assertTrue(any(
+            "局部補救策略：局部漏字" in str(event.get("issue") or "")
+            and f"約 {tasks.TRANSCRIPT_LOCAL_REPAIR_RECOVERY_SECONDS} 秒小段" in str(event.get("issue") or "")
+            for event in quality_events
+        ))
+
+    def test_targeted_local_repair_forwards_recovery_cache_to_child_transcription(self):
+        from backend import tasks
+
+        existing = "[12:00] **[發言者 A]**：局部漏字前的內容。"
+        repaired = "[12:20] **[發言者 A]**：補回的內容。"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            gap_path = root / "local-gap.mp3"
+            gap_path.write_bytes(b"gap")
+            plan_context = {
+                "source_audio_sha256": "a" * 64,
+                "model": "gemini-test",
+                "segment_index": 1,
+            }
+            with mock.patch.object(tasks, "_export_audio_gap_segment", return_value=gap_path), \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", return_value=repaired) as transcribe_mock, \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "update_job_status"):
+                tasks._repair_existing_segment_timestamp_gaps(
+                    None,
+                    root / "segment.mp3",
+                    existing,
+                    gap_ranges=[{
+                        "start_seconds": 720,
+                        "end_seconds": 780,
+                        "issue": f"{tasks.TRANSCRIPT_LOCAL_DENSITY_ISSUE_MARKER}（問題時間：12:00-13:00）",
+                    }],
+                    segment_index=1,
+                    total_segments=3,
+                    job_id="cached-local-gap-repair-job",
+                    model="gemini-test",
+                    segment_start_seconds=600,
+                    segment_end_seconds=900,
+                    is_last_segment=False,
+                    speaker_context="",
+                    temp_segment_paths=[],
+                    quality_events=[],
+                    recovery_cache_output_dir=root / "output",
+                    recovery_cache_source_sha256="a" * 64,
+                    recovery_plan_context=plan_context,
+                )
+
+        self.assertEqual(
+            transcribe_mock.call_args.kwargs["recovery_cache_output_dir"],
+            root / "output",
+        )
+        self.assertEqual(
+            transcribe_mock.call_args.kwargs["recovery_cache_source_sha256"],
+            "a" * 64,
+        )
+        self.assertEqual(
+            transcribe_mock.call_args.kwargs["recovery_plan_context"],
+            plan_context,
+        )
 
     def test_quality_recheck_keeps_retry_history_but_only_reviews_current_issues(self):
         from backend import tasks
@@ -9178,6 +11969,799 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "幾乎沒有可辨識聲音"):
                 tasks._prepare_audio_for_transcription(audio_path, root / "temp", "silent-job")
 
+    def test_audio_preflight_uses_lossless_normalization_for_low_volume_recording(self):
+        import backend.tasks as tasks
+        from pydub.generators import Sine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_path = root / "quiet.wav"
+            source = Sine(440).to_audio_segment(duration=1500).apply_gain(-36)
+            source.export(original_path, format="wav").close()
+
+            prepared_path, report = tasks._prepare_audio_for_transcription(
+                original_path,
+                root / "temp",
+                "quiet-job",
+            )
+
+            self.assertEqual(prepared_path.suffix, ".flac")
+            self.assertTrue(prepared_path.exists())
+            self.assertTrue(report["preprocessed"])
+            self.assertEqual(report["preprocessing_mode"], "normalize_lossless")
+            self.assertIn("無損正規化", "\n".join(report["warnings"]))
+            self.assertEqual(original_path.suffix, ".wav")
+            self.assertLess(source.dBFS, tasks.AUDIO_NORMALIZE_BELOW_DBFS)
+
+    def test_audio_preflight_uses_speech_focus_for_clipped_dense_source(self):
+        import backend.tasks as tasks
+        from pydub import AudioSegment, silence
+
+        class FakeAudio:
+            channels = 1
+            frame_rate = 48_000
+            dBFS = -22.4
+            max_dBFS = 0.0
+
+            def __len__(self):
+                return 600_000
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_path = root / "clipped.webm"
+            focused_path = root / "temp" / "focused.mp3"
+            original_path.write_bytes(b"original")
+            focused_path.parent.mkdir()
+            focused_path.write_bytes(b"focused")
+
+            with mock.patch.object(AudioSegment, "from_file", return_value=FakeAudio()), \
+                 mock.patch.object(silence, "detect_silence", return_value=[(0, 216_000)]), \
+                 mock.patch.object(
+                     tasks,
+                     "_create_speech_focus_audio",
+                     return_value=focused_path,
+                 ) as speech_focus:
+                prepared_path, report = tasks._prepare_audio_for_transcription(
+                    original_path,
+                    root / "temp",
+                    "initial-focus-job",
+                )
+
+            self.assertEqual(prepared_path, focused_path)
+            self.assertEqual(original_path.read_bytes(), b"original")
+            self.assertTrue(report["preprocessed"])
+            self.assertEqual(report["preprocessing_mode"], "speech_focus")
+            self.assertIn("語音聚焦", "\n".join(report["warnings"]))
+            speech_focus.assert_called_once_with(
+                original_path,
+                output_dir=root / "temp",
+                job_id="initial-focus-job",
+                filename_prefix="_prepared_speech_focus",
+                purpose_label="首次轉錄語音聚焦副本",
+            )
+
+    def test_audio_preflight_preserves_dense_source_without_actual_clipping(self):
+        import backend.tasks as tasks
+        from pydub import AudioSegment, silence
+
+        class FakeAudio:
+            channels = 1
+            frame_rate = 48_000
+            dBFS = -24.5
+            max_dBFS = -0.2
+
+            def __len__(self):
+                return 600_000
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_path = root / "normal_peak.webm"
+            original_path.write_bytes(b"original")
+
+            with mock.patch.object(AudioSegment, "from_file", return_value=FakeAudio()), \
+                 mock.patch.object(silence, "detect_silence", return_value=[(0, 216_000)]), \
+                 mock.patch.object(tasks, "_create_speech_focus_audio") as speech_focus:
+                prepared_path, report = tasks._prepare_audio_for_transcription(
+                    original_path,
+                    root / "temp",
+                    "normal-peak-job",
+                )
+
+            self.assertEqual(prepared_path, original_path)
+            self.assertFalse(report["preprocessed"])
+            self.assertEqual(report["preprocessing_mode"], "original")
+            speech_focus.assert_not_called()
+
+    def test_audio_preprocessing_profile_separates_initial_focus_caches(self):
+        from backend import tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "recording.webm"
+            audio_path.write_bytes(b"audio")
+            default_context = tasks._segment_cache_context(
+                audio_path,
+                "gemini-test",
+                total_segments=1,
+                segment_minutes=10,
+            )
+            with mock.patch.object(
+                tasks,
+                "AUDIO_INITIAL_SPEECH_FOCUS_MIN_ACTIVE_RATIO",
+                0.65,
+            ):
+                adjusted_context = tasks._segment_cache_context(
+                    audio_path,
+                    "gemini-test",
+                    total_segments=1,
+                    segment_minutes=10,
+                )
+
+            self.assertTrue(
+                default_context["audio_preprocessing_profile"].startswith(
+                    f"audio_preprocess_v{tasks.AUDIO_PREPROCESSING_VERSION}_"
+                )
+            )
+            self.assertNotEqual(
+                default_context["audio_preprocessing_profile"],
+                adjusted_context["audio_preprocessing_profile"],
+            )
+            self.assertFalse(tasks._segment_cache_matches(
+                {**default_context, "segment_index": 0},
+                adjusted_context,
+                0,
+            ))
+            self.assertNotEqual(
+                tasks._shared_segment_cache_file(root / "output", default_context, 0),
+                tasks._shared_segment_cache_file(root / "output", adjusted_context, 0),
+            )
+
+    def test_recovery_speech_focus_creates_non_destructive_copy_for_clipped_dynamic_audio(self):
+        import backend.tasks as tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_path = root / "problem.mp3"
+            original_path.write_bytes(b"original")
+            commands = []
+            run_options = []
+
+            def fake_ffmpeg(command, **_kwargs):
+                commands.append(command)
+                run_options.append(_kwargs)
+                if "volumedetect" in command:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stderr="mean_volume: -22.0 dB\\nmax_volume: 0.0 dB\\n",
+                    )
+                Path(command[-1]).write_bytes(b"speech-focus")
+                return subprocess.CompletedProcess(command, 0, stderr="")
+
+            with mock.patch.object(tasks.subprocess, "run", side_effect=fake_ffmpeg):
+                focused_path, profile = tasks._prepare_recovery_speech_focus_audio(
+                    original_path,
+                    job_id="focus-job",
+                )
+
+            self.assertTrue(profile.startswith("speech_focus_v4_"))
+            self.assertNotEqual(focused_path, original_path)
+            self.assertTrue(focused_path.is_file())
+            self.assertEqual(focused_path.suffix, ".flac")
+            self.assertEqual(original_path.read_bytes(), b"original")
+            self.assertEqual(len(commands), 2)
+            self.assertIn("volumedetect", commands[0])
+            filter_index = commands[1].index("-af") + 1
+            self.assertIn("highpass=f=70", commands[1][filter_index])
+            self.assertIn("lowpass=f=7800", commands[1][filter_index])
+            self.assertIn("acompressor=", commands[1][filter_index])
+            self.assertIn("loudnorm=I=-19.0:TP=-1.5:LRA=7", commands[1][filter_index])
+            self.assertIn("flac", commands[1])
+            self.assertIn("-compression_level", commands[1])
+            sample_rate_index = commands[1].index("-ar") + 1
+            self.assertEqual(commands[1][sample_rate_index], "24000")
+            self.assertNotIn("libmp3lame", commands[1])
+            self.assertEqual(run_options[1]["timeout"], tasks.SPEECH_FOCUS_TIMEOUT_SECONDS)
+
+    def test_recovery_speech_focus_skips_normal_peak_audio_and_separates_cache_profiles(self):
+        import backend.tasks as tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "normal.mp3"
+            audio_path.write_bytes(b"audio")
+            with mock.patch.object(
+                tasks.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    ["ffmpeg"],
+                    0,
+                    stderr="mean_volume: -22.0 dB\\nmax_volume: -2.0 dB\\n",
+                ),
+            ) as ffmpeg:
+                prepared_path, profile = tasks._prepare_recovery_speech_focus_audio(
+                    audio_path,
+                    job_id="normal-job",
+                )
+
+            raw_context = tasks._recovery_subsegment_cache_context(
+                audio_path,
+                "gemini-test",
+                parent_segment_index=0,
+                start_seconds=0,
+                end_seconds=60,
+                is_last_segment=False,
+                recovery_audio_profile="original",
+            )
+            focused_context = tasks._recovery_subsegment_cache_context(
+                audio_path,
+                "gemini-test",
+                parent_segment_index=0,
+                start_seconds=0,
+                end_seconds=60,
+                is_last_segment=False,
+                recovery_audio_profile="speech_focus_v4",
+            )
+
+            self.assertEqual(prepared_path, audio_path)
+            self.assertEqual(profile, "original")
+            ffmpeg.assert_called_once()
+            self.assertFalse(tasks._segment_cache_matches(
+                {**raw_context, "segment_index": 0},
+                focused_context,
+                0,
+            ))
+            self.assertNotEqual(
+                tasks._shared_segment_cache_file(root / "output", raw_context, 0),
+                tasks._shared_segment_cache_file(root / "output", focused_context, 0),
+            )
+
+    def test_recovery_speech_focus_profile_changes_when_transform_settings_change(self):
+        from backend import tasks
+
+        default_profile = tasks._recovery_speech_focus_profile()
+        with mock.patch.object(tasks, "RECOVERY_SPEECH_FOCUS_TARGET_LUFS", -18.0):
+            adjusted_profile = tasks._recovery_speech_focus_profile()
+
+        self.assertTrue(default_profile.startswith("speech_focus_v4_"))
+        self.assertTrue(adjusted_profile.startswith("speech_focus_v4_"))
+        self.assertNotEqual(default_profile, adjusted_profile)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "segment.mp3"
+            audio_path.write_bytes(b"audio")
+            raw_context = tasks._recovery_subsegment_cache_context(
+                audio_path,
+                "gemini-test",
+                parent_segment_index=0,
+                start_seconds=0,
+                end_seconds=60,
+                is_last_segment=False,
+                recovery_audio_profile=default_profile,
+            )
+            adjusted_context = tasks._recovery_subsegment_cache_context(
+                audio_path,
+                "gemini-test",
+                parent_segment_index=0,
+                start_seconds=0,
+                end_seconds=60,
+                is_last_segment=False,
+                recovery_audio_profile=adjusted_profile,
+            )
+            self.assertFalse(tasks._segment_cache_matches(
+                {**raw_context, "segment_index": 0},
+                adjusted_context,
+                0,
+            ))
+
+    def test_speech_focus_timeout_has_safe_default_and_bounds(self):
+        from backend import tasks
+
+        self.assertEqual(tasks.SPEECH_FOCUS_TIMEOUT_SECONDS, 180)
+        self.assertGreaterEqual(tasks.SPEECH_FOCUS_TIMEOUT_SECONDS, 90)
+        self.assertLessEqual(tasks.SPEECH_FOCUS_TIMEOUT_SECONDS, 600)
+
+    def test_partial_recovery_draft_is_bound_to_matching_recovery_plan(self):
+        from backend import tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            context = tasks._segment_recovery_plan_context(
+                model="gemini-primary",
+                source_audio_sha256="a" * 64,
+                segment_index=5,
+                total_segments=7,
+                start_seconds=3000,
+                end_seconds=3600,
+                custom_vocabulary=["佳世達"],
+            )
+            draft = "[50:00] **[發言者 A]**：已補救大部分內容。"
+            issues = ["音訊含持續語音但時間戳在 57:05 至 58:10 間隔 65 秒"]
+            tasks._save_segment_recovery_plan(
+                root / "output",
+                context,
+                chunk_seconds=60,
+                reason="partial candidate",
+                candidate_transcript=draft,
+                candidate_issues=issues,
+                candidate_model="gemini-recovery",
+            )
+            tasks._save_segment_recovery_plan(
+                root / "output",
+                context,
+                chunk_seconds=60,
+                reason="subsegment retry",
+            )
+            loaded = tasks._load_segment_recovery_draft(root / "output", context)
+            mismatched_context = {**context, "model": "gemini-other"}
+
+            self.assertEqual(loaded["transcript"], draft)
+            self.assertEqual(loaded["issues"], issues)
+            self.assertEqual(loaded["model"], "gemini-recovery")
+            self.assertIsNone(tasks._load_segment_recovery_draft(root / "output", mismatched_context))
+
+    def test_unresolved_recovery_candidate_requires_audio_backed_improvement(self):
+        from backend import tasks
+
+        primary = (
+            "[00:00] **[發言者 A]**：主模型開始。\n"
+            "[05:00] **[發言者 A]**：主模型中段。"
+        )
+        recovery = (
+            "[00:00] **[發言者 A]**：補救模型開始。\n"
+            "[09:20] **[發言者 A]**：補救模型接近段尾。"
+        )
+        primary_issues = [
+            "音訊含持續語音但時間戳在 59:54 至 64:01 間隔 247 秒",
+            "音訊語音密度高但逐字稿文字量偏低（10 字／146 秒有效語音，0.1 字/秒）",
+        ]
+        recovery_issues = [
+            "音訊含持續語音但時間戳在 57:05 至 58:10 間隔 65 秒",
+        ]
+
+        use_recovery, reason = tasks._prefer_recovery_model_candidate_after_partial_failure(
+            primary_transcript=primary,
+            primary_issues=primary_issues,
+            recovery_transcript=recovery,
+            recovery_issues=recovery_issues,
+            segment_index=0,
+            total_segments=1,
+            expected_start_seconds=0,
+            expected_end_seconds=600,
+        )
+        keep_primary, rejected_reason = tasks._prefer_recovery_model_candidate_after_partial_failure(
+            primary_transcript=recovery,
+            primary_issues=recovery_issues,
+            recovery_transcript=primary,
+            recovery_issues=primary_issues,
+            segment_index=0,
+            total_segments=1,
+            expected_start_seconds=0,
+            expected_end_seconds=600,
+        )
+
+        self.assertTrue(use_recovery)
+        self.assertIn("可驗證問題加權較低", reason)
+        self.assertFalse(keep_primary)
+        self.assertIn("未優於主模型", rejected_reason)
+
+    def test_partial_recovery_candidate_is_saved_before_delivery_gate(self):
+        from backend import tasks
+
+        class FakeClient:
+            pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            first_segment = root / "first.mp3"
+            second_segment = root / "second.mp3"
+            for path in (audio_path, first_segment, second_segment):
+                path.write_bytes(b"audio")
+            source_path = root / "existing.md"
+            source_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n"
+                "[00:00] **[發言者 A]**：第一段可沿用。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n"
+                "[10:00] **[發言者 B]**：舊的問題段。\n",
+                encoding="utf-8",
+            )
+            primary = "[10:00] **[發言者 B]**：主模型仍有大範圍漏字。"
+            recovery = "[10:00] **[發言者 B]**：補救模型只剩一個較短缺口。"
+            primary_issues = [
+                "音訊含持續語音但時間戳在 59:54 至 64:01 間隔 247 秒",
+                "音訊語音密度高但逐字稿文字量偏低（10 字／146 秒有效語音，0.1 字/秒）",
+            ]
+            recovery_issues = [
+                "音訊含持續語音但時間戳在 57:05 至 58:10 間隔 65 秒",
+            ]
+
+            def current_issues(transcript, *_args, **_kwargs):
+                if transcript == primary:
+                    return primary_issues
+                if transcript == recovery:
+                    return recovery_issues
+                return []
+
+            def transcribe(*args, **_kwargs):
+                return primary if args[5] == "gemini-primary" else recovery
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}))
+                stack.enter_context(mock.patch.object(tasks.genai, "Client", return_value=FakeClient()))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_RECOVERY_MODEL", "gemini-recovery"))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_prepare_audio_for_transcription",
+                    return_value=(audio_path, {}),
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_split_audio_to_segments",
+                    return_value=[
+                        tasks.AudioSlice(first_segment, 0, 600),
+                        tasks.AudioSlice(second_segment, 600, 1200),
+                    ],
+                ))
+                stack.enter_context(mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None))
+                stack.enter_context(mock.patch.object(tasks, "_record_segment_reuse_blocking_issues", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_issues", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_transcript_density_quality_issues", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_transcript_local_density_quality_issues", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_transcript_local_density_quality_ranges", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_repair_existing_segment_timestamp_gaps", return_value=(None, [])))
+                stack.enter_context(mock.patch.object(tasks, "_segment_transcript_current_quality_issues", side_effect=current_issues))
+                transcribe_mock = stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_transcribe_segment_with_recovery",
+                    side_effect=transcribe,
+                ))
+                stack.enter_context(mock.patch.object(tasks, "is_job_cancel_requested", return_value=False))
+                stack.enter_context(mock.patch.object(tasks, "update_job_status"))
+                output_path = tasks.process_audio_task(
+                    job_id="partial-recovery-draft-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                    model="gemini-primary",
+                    force_segment_indices=[1],
+                    transcript_reuse_source_path=source_path,
+                )
+
+            context = tasks._segment_recovery_plan_context(
+                model="gemini-primary",
+                source_audio_sha256=tasks._sha256_file(audio_path),
+                segment_index=1,
+                total_segments=2,
+                start_seconds=600,
+                end_seconds=1200,
+            )
+            saved_draft = tasks._load_segment_recovery_draft(root / "output", context)
+
+            self.assertIsNone(output_path)
+            self.assertEqual(
+                [call.args[5] for call in transcribe_mock.call_args_list],
+                ["gemini-primary", "gemini-recovery"],
+            )
+            self.assertEqual(saved_draft["transcript"], recovery)
+            self.assertEqual(saved_draft["issues"], recovery_issues)
+            self.assertEqual(saved_draft["model"], "gemini-recovery")
+
+    def test_primary_only_unresolved_segment_is_saved_before_delivery_gate(self):
+        from backend import tasks
+
+        class FakeClient:
+            pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            first_segment = root / "first.mp3"
+            second_segment = root / "second.mp3"
+            for path in (audio_path, first_segment, second_segment):
+                path.write_bytes(b"audio")
+            first_transcript = "[00:00] **[發言者 A]**：第一段完整內容。"
+            unresolved = "[10:00] **[發言者 B]**：主模型仍有短缺口。"
+            issue = "音訊含持續語音但時間戳在 17:05 至 18:10 間隔 65 秒"
+
+            def current_issues(transcript, *_args, **_kwargs):
+                return [issue] if transcript == unresolved else []
+
+            def transcribe(*args, **_kwargs):
+                return first_transcript if args[2] == 0 else unresolved
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}))
+                stack.enter_context(mock.patch.object(tasks.genai, "Client", return_value=FakeClient()))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_RECOVERY_MODEL", "gemini-primary"))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_prepare_audio_for_transcription",
+                    return_value=(audio_path, {}),
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_split_audio_to_segments",
+                    return_value=[
+                        tasks.AudioSlice(first_segment, 0, 600),
+                        tasks.AudioSlice(second_segment, 600, 1200),
+                    ],
+                ))
+                stack.enter_context(mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_segment_transcript_current_quality_issues",
+                    side_effect=current_issues,
+                ))
+                transcribe_mock = stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_transcribe_segment_with_recovery",
+                    side_effect=transcribe,
+                ))
+                summary_mock = stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_generate_meeting_content_from_transcript",
+                ))
+                stack.enter_context(mock.patch.object(tasks, "is_job_cancel_requested", return_value=False))
+                stack.enter_context(mock.patch.object(tasks, "update_job_status"))
+                save_meeting_mock = stack.enter_context(mock.patch.object(tasks, "save_meeting"))
+                output_path = tasks.process_audio_task(
+                    job_id="primary-only-partial-recovery-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                    model="gemini-primary",
+                )
+
+            context = tasks._segment_recovery_plan_context(
+                model="gemini-primary",
+                source_audio_sha256=tasks._sha256_file(audio_path),
+                segment_index=1,
+                total_segments=2,
+                start_seconds=600,
+                end_seconds=1200,
+            )
+            saved_draft = tasks._load_segment_recovery_draft(root / "output", context)
+
+            self.assertIsNone(output_path)
+            self.assertEqual([call.args[5] for call in transcribe_mock.call_args_list], [
+                "gemini-primary",
+                "gemini-primary",
+            ])
+            self.assertEqual(saved_draft["transcript"], unresolved)
+            self.assertEqual(saved_draft["issues"], [issue])
+            self.assertEqual(saved_draft["model"], "gemini-primary")
+            summary_mock.assert_not_called()
+            save_meeting_mock.assert_not_called()
+
+    def test_primary_candidate_is_saved_before_second_model_failure(self):
+        from backend import tasks
+
+        class FakeClient:
+            pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            first_segment = root / "first.mp3"
+            second_segment = root / "second.mp3"
+            for path in (audio_path, first_segment, second_segment):
+                path.write_bytes(b"audio")
+            first_transcript = "[00:00] **[發言者 A]**：第一段完整內容。"
+            primary = "[10:00] **[發言者 B]**：主模型已完成大部分內容。"
+            issue = "音訊含持續語音但時間戳在 17:05 至 18:10 間隔 65 秒"
+
+            def current_issues(transcript, *_args, **_kwargs):
+                return [issue] if transcript == primary else []
+
+            def transcribe(*args, **_kwargs):
+                if args[2] == 0:
+                    return first_transcript
+                if args[5] == "gemini-primary":
+                    return primary
+                raise RuntimeError("503 Service Unavailable")
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}))
+                stack.enter_context(mock.patch.object(tasks.genai, "Client", return_value=FakeClient()))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_RECOVERY_MODEL", "gemini-recovery"))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_prepare_audio_for_transcription",
+                    return_value=(audio_path, {}),
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_split_audio_to_segments",
+                    return_value=[
+                        tasks.AudioSlice(first_segment, 0, 600),
+                        tasks.AudioSlice(second_segment, 600, 1200),
+                    ],
+                ))
+                stack.enter_context(mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_speech_backed_timestamp_gap_quality_ranges",
+                    return_value=[],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_speech_backed_transcript_local_density_quality_ranges",
+                    return_value=[],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_transcript_repetition_repair_ranges",
+                    return_value=[],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_segment_transcript_current_quality_issues",
+                    side_effect=current_issues,
+                ))
+                transcribe_mock = stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_transcribe_segment_with_recovery",
+                    side_effect=transcribe,
+                ))
+                summary_mock = stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_generate_meeting_content_from_transcript",
+                ))
+                stack.enter_context(mock.patch.object(tasks, "is_job_cancel_requested", return_value=False))
+                stack.enter_context(mock.patch.object(tasks, "update_job_status"))
+                save_meeting_mock = stack.enter_context(mock.patch.object(tasks, "save_meeting"))
+                output_path = tasks.process_audio_task(
+                    job_id="primary-candidate-before-fallback-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                    model="gemini-primary",
+                )
+
+            context = tasks._segment_recovery_plan_context(
+                model="gemini-primary",
+                source_audio_sha256=tasks._sha256_file(audio_path),
+                segment_index=1,
+                total_segments=2,
+                start_seconds=600,
+                end_seconds=1200,
+            )
+            saved_draft = tasks._load_segment_recovery_draft(root / "output", context)
+
+            self.assertIsNone(output_path)
+            self.assertEqual([call.args[5] for call in transcribe_mock.call_args_list], [
+                "gemini-primary",
+                "gemini-primary",
+                "gemini-recovery",
+            ])
+            self.assertEqual(saved_draft["transcript"], primary)
+            self.assertEqual(saved_draft["issues"], [issue])
+            self.assertEqual(saved_draft["model"], "gemini-primary")
+            summary_mock.assert_not_called()
+            save_meeting_mock.assert_not_called()
+
+    def test_next_rerun_repairs_only_the_saved_partial_recovery_draft(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{
+                "topic": "接續補救",
+                "summary": "已完成剩餘缺口修補",
+                "evidence_timecodes": ["10:00"],
+            }],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                return type("Response", (), {
+                    "text": json.dumps(summary_payload, ensure_ascii=False),
+                })()
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            first_segment = root / "first.mp3"
+            second_segment = root / "second.mp3"
+            for path in (audio_path, first_segment, second_segment):
+                path.write_bytes(b"audio")
+            candidate = "[10:00] **[發言者 B]**：已補救大部分內容，仍有短缺口。"
+            repaired = "[10:00] **[發言者 B]**：已補救大部分內容與最後短缺口。"
+            issue = "音訊含持續語音但時間戳在 17:05 至 18:10 間隔 65 秒"
+            output_dir = root / "output"
+            context = tasks._segment_recovery_plan_context(
+                model="gemini-primary",
+                source_audio_sha256=tasks._sha256_file(audio_path),
+                segment_index=1,
+                total_segments=2,
+                start_seconds=600,
+                end_seconds=1200,
+            )
+            tasks._save_segment_recovery_plan(
+                output_dir,
+                context,
+                chunk_seconds=60,
+                reason="previous partial candidate",
+                candidate_transcript=candidate,
+                candidate_issues=[issue],
+                candidate_model="gemini-recovery",
+            )
+            source_path = root / "existing.md"
+            source_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n"
+                "[00:00] **[發言者 A]**：第一段可沿用。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n"
+                "[10:00] **[發言者 B]**：較舊的問題段。\n",
+                encoding="utf-8",
+            )
+
+            def current_issues(transcript, *_args, **_kwargs):
+                return [issue] if transcript == candidate else []
+
+            def gap_ranges(_path, transcript, **_kwargs):
+                if transcript == candidate:
+                    return [{"start_seconds": 1025, "end_seconds": 1090, "issue": issue}]
+                return []
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}))
+                stack.enter_context(mock.patch.object(tasks.genai, "Client", side_effect=FakeClient))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_prepare_audio_for_transcription",
+                    return_value=(audio_path, {}),
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_split_audio_to_segments",
+                    return_value=[
+                        tasks.AudioSlice(first_segment, 0, 600),
+                        tasks.AudioSlice(second_segment, 600, 1200),
+                    ],
+                ))
+                stack.enter_context(mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None))
+                stack.enter_context(mock.patch.object(tasks, "_record_segment_reuse_blocking_issues", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_issues", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_transcript_density_quality_issues", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_transcript_local_density_quality_issues", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", side_effect=gap_ranges))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_transcript_local_density_quality_ranges", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]))
+                repair_mock = stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_repair_existing_segment_timestamp_gaps",
+                    return_value=(repaired, ["局部修補完成"]),
+                ))
+                transcribe_mock = stack.enter_context(mock.patch.object(tasks, "_transcribe_segment_with_recovery"))
+                stack.enter_context(mock.patch.object(tasks, "is_job_cancel_requested", return_value=False))
+                stack.enter_context(mock.patch.object(tasks, "update_job_status"))
+                stack.enter_context(mock.patch.object(tasks, "save_meeting"))
+                output_path = tasks.process_audio_task(
+                    job_id="resume-partial-draft-job",
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    model="gemini-primary",
+                    force_segment_indices=[1],
+                    transcript_reuse_source_path=source_path,
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertIn(repaired, output_path.read_text(encoding="utf-8"))
+            self.assertEqual(repair_mock.call_args.args[2], candidate)
+            transcribe_mock.assert_not_called()
+            self.assertIsNone(tasks._load_segment_recovery_draft(output_dir, context))
+
     def test_summary_payload_repairs_ids_refs_and_timecodes_locally(self):
         from backend.tasks import _summary_response_to_markdown
 
@@ -9267,6 +12851,28 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("silently build a fact ledger", prompt)
         self.assertIn("due_source 必須保留逐字稿原句", prompt)
         self.assertIn("我會問品保", prompt)
+        self.assertIn("mark source words that were not verified", prompt)
+
+    def test_quality_report_locates_explicit_uncertainty_markers_without_blocking_delivery(self):
+        from backend.tasks import _build_quality_report
+
+        transcript = """## 【第 1 段｜00:00 – 10:00】
+[00:00] **[發言者 A]**：這段內容是 [聽不清]。
+
+## 【第 2 段｜10:00 – 20:00】
+[10:00] **[發言者 B]**：下一段正常。"""
+        report = _build_quality_report(
+            {"warnings": [], "silence_ratio": 0},
+            [
+                {"index": 0, "start_seconds": 0, "end_seconds": 600, "status": "success"},
+                {"index": 1, "start_seconds": 600, "end_seconds": 1200, "status": "success"},
+            ],
+            transcript,
+        )
+
+        self.assertEqual(report["blocking_segment_indices"], [])
+        self.assertEqual(report["review_segments"][0]["index"], 0)
+        self.assertIn("[聽不清]", report["review_segments"][0]["issues"][0])
 
     def test_meeting_quality_report_round_trips_through_database(self):
         import backend.database as database
@@ -9362,6 +12968,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                      return_value=refreshed_report,
                  ) as recheck_mock, \
                  mock.patch.object(main, "update_meeting_quality_report", return_value=True) as update_mock, \
+                 mock.patch.object(main, "_synchronize_meeting_markdown_quality") as sync_markdown_mock, \
                  mock.patch.object(main, "enqueue_audio_job") as enqueue_mock:
                 response = asgi_request(main.app, "POST", "/meetings/61/quality/recheck")
 
@@ -9372,6 +12979,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("未使用 Gemini", payload["message"])
         self.assertEqual(recheck_mock.call_args.kwargs["source_audio_path"], audio_path)
         update_mock.assert_called_once_with(61, refreshed_report)
+        sync_markdown_mock.assert_called_once_with(record, refreshed_report)
         enqueue_mock.assert_not_called()
 
     def test_all_meeting_quality_recheck_enqueues_local_job(self):
@@ -9396,6 +13004,44 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("未使用 Gemini", payload["message"])
         self.assertEqual(captured["job_id"], payload["job_id"])
         self.assertEqual(captured["source_audio_dir"], main.SOURCE_AUDIO_DIR)
+
+    def test_meeting_semantic_review_enqueues_advisory_job_without_rewriting_transcript(self):
+        import backend.main as main
+
+        record = {
+            "id": 74,
+            "full_content": (
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n"
+                "[00:00] **[發言者 A]**：需要檢查語意。"
+            ),
+        }
+        captured = {}
+
+        def enqueue(job_id, *, meeting_id, model=None, fallback_model=None):
+            captured.update({
+                "job_id": job_id,
+                "meeting_id": meeting_id,
+                "model": model,
+                "fallback_model": fallback_model,
+            })
+
+        with mock.patch.object(main, "get_meeting", return_value=record), \
+             mock.patch.object(
+                 main,
+                 "enqueue_meeting_semantic_review_job",
+                 side_effect=enqueue,
+             ):
+            response = asgi_request(main.app, "POST", "/meetings/74/quality/semantic-review")
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "pending")
+        self.assertIn("不會改寫逐字稿", payload["message"])
+        self.assertEqual(captured["job_id"], payload["job_id"])
+        self.assertEqual(captured["meeting_id"], 74)
+        self.assertIsNone(captured["model"])
+        self.assertIsNone(captured["fallback_model"])
 
     def test_webm_source_audio_endpoint_uses_recording_profile_media_type(self):
         import backend.main as main
@@ -9567,6 +13213,312 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(enqueue.call_args.kwargs["transcript_reuse_source_path"], meeting_path)
         self.assertEqual(enqueue.call_args.kwargs["custom_vocabulary"], ["佳世達", "Qisda"])
         self.assertIn("第 1、2 段", response.json()["message"])
+
+    def test_meeting_rerun_api_can_fully_retranscribe_selected_segments(self):
+        import backend.main as main
+
+        record = {
+            "id": 19,
+            "title": "完整分段重跑測試",
+            "quality_report": {"segments": [{"index": 0}, {"index": 1}]},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            meeting_path = Path(tmpdir) / "meeting.md"
+            meeting_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n[00:00] **[發言者 A]**：第一段。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n[10:00] **[發言者 B]**：第二段。",
+                encoding="utf-8",
+            )
+            record["output_path"] = str(meeting_path)
+            with mock.patch.object(main, "get_meeting", return_value=record), \
+                 mock.patch.object(main, "_resolve_meeting_source_audio", return_value=audio_path), \
+                 mock.patch.object(main, "enqueue_audio_job") as enqueue:
+                response = asgi_request(
+                    main.app,
+                    "POST",
+                    "/meetings/19/rerun",
+                    json={"segments": [1], "full_segment_rerun": True},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(enqueue.call_args.kwargs["force_segment_indices"], [1])
+        self.assertEqual(enqueue.call_args.kwargs["force_full_segment_indices"], [1])
+        self.assertEqual(enqueue.call_args.kwargs["transcript_reuse_source_path"], meeting_path)
+        self.assertIn("完整重跑", response.json()["message"])
+
+    def test_meeting_rerun_auto_escalates_saved_critical_quality_segments(self):
+        import backend.main as main
+
+        record = {
+            "id": 20,
+            "title": "音訊證實嚴重漏字",
+            "quality_report": {
+                "segments": [
+                    {
+                        "index": 0,
+                        "issues": [
+                            "音訊局部語音密度高但逐字稿文字量偏低（問題時間：01:00-01:30，3 字／40 秒有效語音，0.1 字/秒）",
+                        ],
+                    },
+                    {"index": 1, "issues": ["音訊含持續語音但時間戳在 12:00 至 12:59 間隔 59 秒"]},
+                    {
+                        "index": 2,
+                        "issues": [
+                            "音訊含持續語音但時間戳在 20:00 至 21:05 間隔 65 秒",
+                            "音訊含持續語音但時間戳在 22:00 至 23:05 間隔 65 秒",
+                            "音訊含持續語音但時間戳在 24:00 至 25:05 間隔 65 秒",
+                        ],
+                    },
+                ],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            meeting_path = Path(tmpdir) / "meeting.md"
+            meeting_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n[00:00] **[發言者 A]**：第一段。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n[10:00] **[發言者 A]**：第二段。\n"
+                "### 【第 3 段｜20:00 – 30:00】\n[20:00] **[發言者 A]**：第三段。",
+                encoding="utf-8",
+            )
+            record["output_path"] = str(meeting_path)
+            with mock.patch.object(main, "get_meeting", return_value=record), \
+                 mock.patch.object(main, "_resolve_meeting_source_audio", return_value=audio_path), \
+                 mock.patch.object(main, "enqueue_audio_job") as enqueue:
+                response = asgi_request(
+                    main.app,
+                    "POST",
+                    "/meetings/20/rerun",
+                    json={"segments": [2, 1, 0]},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(enqueue.call_args.kwargs["force_segment_indices"], [0, 1, 2])
+        self.assertEqual(enqueue.call_args.kwargs["force_full_segment_indices"], [0, 2])
+        self.assertIn("第 1、3 段", response.json()["message"])
+        self.assertIn("自動完整重跑", response.json()["message"])
+
+    def test_full_meeting_rerun_auto_escalates_saved_critical_quality_segments(self):
+        import backend.main as main
+
+        record = {
+            "id": 21,
+            "title": "完整重跑沿用品質證據",
+            "quality_report": {
+                "segments": [
+                    {"index": 0, "start_seconds": 0, "end_seconds": 600, "issues": []},
+                    {
+                        "index": 1,
+                        "start_seconds": 600,
+                        "end_seconds": 1200,
+                        "issues": [
+                            "音訊局部語音密度高但逐字稿文字量偏低（問題時間：10:20-11:00，3 字／40 秒有效語音，0.1 字/秒）",
+                        ],
+                    },
+                    {"index": 2, "start_seconds": 1200, "end_seconds": 1800, "issues": []},
+                ],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            with mock.patch.object(main, "get_meeting", return_value=record), \
+                 mock.patch.object(main, "_resolve_meeting_source_audio", return_value=audio_path), \
+                 mock.patch.object(main, "enqueue_audio_job") as enqueue:
+                response = asgi_request(main.app, "POST", "/meetings/21/rerun")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(enqueue.call_args.kwargs["force_segment_indices"], [0, 1, 2])
+        self.assertEqual(enqueue.call_args.kwargs["force_full_segment_indices"], [])
+        self.assertEqual(enqueue.call_args.kwargs["force_full_segment_ranges"], [{
+            "source_segment_index": 1,
+            "start_seconds": 620,
+            "end_seconds": 660,
+            "issues": [
+                "音訊局部語音密度高但逐字稿文字量偏低（問題時間：10:20-11:00，3 字／40 秒有效語音，0.1 字/秒）",
+            ],
+        }])
+        self.assertTrue(enqueue.call_args.kwargs["force_full_meeting_rerun"])
+        self.assertFalse(enqueue.call_args.kwargs["force_all_segments_full_rerun"])
+        self.assertIsNone(enqueue.call_args.kwargs["transcript_reuse_source_path"])
+        self.assertIn("第 2 段", response.json()["message"])
+        self.assertIn("完整小段重跑", response.json()["message"])
+
+    def test_critical_rerun_ranges_map_to_new_dense_segment_layout(self):
+        from backend import tasks
+
+        old_report = {
+            "segments": [{
+                "index": 3,
+                "start_seconds": 1800,
+                "end_seconds": 2400,
+                "issues": [
+                    "音訊局部語音密度高但逐字稿文字量偏低（問題時間：38:52-39:53，3 字／39 秒有效語音，0.1 字/秒）",
+                ],
+            }],
+        }
+        rerun_ranges = tasks._critical_quality_report_segment_ranges(old_report, [3])
+        dense_layout = [
+            tasks.AudioSlice(Path(f"segment-{index}.mp3"), index * 300, (index + 1) * 300)
+            for index in range(10)
+        ]
+
+        self.assertEqual(rerun_ranges, [{
+            "source_segment_index": 3,
+            "start_seconds": 2332,
+            "end_seconds": 2393,
+            "issues": [
+                "音訊局部語音密度高但逐字稿文字量偏低（問題時間：38:52-39:53，3 字／39 秒有效語音，0.1 字/秒）",
+            ],
+        }])
+        self.assertEqual(
+            tasks._audio_slice_indices_overlapping_rerun_ranges(dense_layout, rerun_ranges),
+            {7},
+        )
+
+    def test_full_meeting_rerun_uses_all_full_strategy_when_legacy_bounds_are_missing(self):
+        import backend.main as main
+
+        record = {
+            "id": 22,
+            "title": "缺少舊切點的重大異常",
+            "quality_report": {
+                "segments": [{
+                    "index": 1,
+                    "issues": [
+                        "音訊局部語音密度高但逐字稿文字量偏低（問題時間：10:20-11:00，3 字／40 秒有效語音，0.1 字/秒）",
+                    ],
+                }],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            with mock.patch.object(main, "get_meeting", return_value=record), \
+                 mock.patch.object(main, "_resolve_meeting_source_audio", return_value=audio_path), \
+                 mock.patch.object(main, "enqueue_audio_job") as enqueue:
+                response = asgi_request(main.app, "POST", "/meetings/22/rerun")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(enqueue.call_args.kwargs["force_full_segment_ranges"], [])
+        self.assertTrue(enqueue.call_args.kwargs["force_full_meeting_rerun"])
+        self.assertTrue(enqueue.call_args.kwargs["force_all_segments_full_rerun"])
+
+    def test_full_meeting_rerun_avoids_cache_and_maps_critical_range_after_resplit(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{
+                "topic": "完整重跑",
+                "summary": "完成",
+                "evidence_timecodes": ["00:00"],
+            }],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                return type("Response", (), {
+                    "text": json.dumps(summary_payload, ensure_ascii=False),
+                })()
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            slices = []
+            for index in range(3):
+                path = root / f"_seg_meeting_{index:03d}.mp3"
+                path.write_bytes(b"segment")
+                slices.append(tasks.AudioSlice(path, index * 300, (index + 1) * 300))
+
+            transcripts = {
+                0: "[00:00] **[發言者 A]**：第一個新切段。",
+                1: "[05:00] **[發言者 B]**：命中品質問題時間範圍的新切段。",
+                2: "[10:00] **[發言者 C]**：第三個新切段。",
+            }
+
+            def transcribe(_client, _path, segment_index, *_args, **_kwargs):
+                return transcripts[segment_index]
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "TRANSCRIPTION_FULL_RERUN_MODEL", "gemini-full-rerun"), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=slices), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache") as load_cache, \
+                 mock.patch.object(tasks, "_load_segment_recovery_plan") as load_recovery_plan, \
+                 mock.patch.object(tasks, "_load_segment_recovery_draft") as load_recovery_draft, \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", side_effect=transcribe) as rerun, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting") as save_meeting:
+                output_path = tasks.process_audio_task(
+                    job_id="full-meeting-range-rerun-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                    force_full_meeting_rerun=True,
+                    force_full_segment_ranges=[{
+                        "source_segment_index": 3,
+                        "start_seconds": 300,
+                        "end_seconds": 600,
+                        "issues": [
+                            "音訊局部語音密度高但逐字稿文字量偏低（問題時間：05:00-10:00，3 字／40 秒有效語音，0.1 字/秒）",
+                        ],
+                    }],
+                )
+
+            self.assertIsNotNone(output_path)
+            load_cache.assert_not_called()
+            load_recovery_plan.assert_not_called()
+            load_recovery_draft.assert_not_called()
+            self.assertEqual([call.args[2] for call in rerun.call_args_list], [0, 1, 2])
+            self.assertEqual(rerun.call_args_list[0].args[5], tasks.GEMINI_MODEL)
+            self.assertEqual(rerun.call_args_list[1].args[5], "gemini-full-rerun")
+            self.assertEqual(rerun.call_args_list[2].args[5], tasks.GEMINI_MODEL)
+            self.assertEqual(
+                rerun.call_args_list[1].kwargs["preferred_recovery_chunk_seconds"],
+                tasks.TRANSCRIPT_SEVERE_LOCAL_DENSITY_RECOVERY_SECONDS,
+            )
+            self.assertIn(
+                "完整轉寫",
+                rerun.call_args_list[1].kwargs["repair_focus"],
+            )
+            quality_report = save_meeting.call_args.kwargs["quality_report"]
+            self.assertEqual(quality_report["segments"][1]["status"], "full_rerun")
+            self.assertTrue(any(
+                "自動升級完整重跑" in note
+                for note in quality_report["segments"][1]["recovery_notes"]
+            ))
+
+    def test_critical_rerun_escalation_accepts_fullwidth_density_separator(self):
+        from backend import tasks
+
+        quality_report = {
+            "review_segments": [{
+                "index": 4,
+                "issues": [
+                    "音訊局部語音密度高但逐字稿文字量偏低（問題時間：40:00-40:30，"
+                    "1 字／30 秒有效語音，0.0 字／秒）",
+                ],
+            }],
+        }
+
+        self.assertEqual(
+            tasks._critical_quality_report_segment_indices(quality_report, [4]),
+            [4],
+        )
 
     def test_meeting_rerun_api_accepts_sparse_legacy_segment_indices(self):
         import backend.main as main
@@ -9744,7 +13696,12 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
                  mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
                  mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
-                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=slices), \
+                 mock.patch.object(
+                     tasks,
+                     "_split_audio_to_recorded_segment_bounds",
+                     return_value=slices,
+                 ) as recorded_split, \
+                 mock.patch.object(tasks, "_split_audio_to_segments") as fallback_split, \
                  mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
                  mock.patch.object(tasks, "_transcribe_segment_with_recovery", return_value="[10:00] **[發言者 B]**：新第二段。") as transcribe, \
                  mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
@@ -9765,6 +13722,924 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             self.assertIn("新第二段", output_text)
             self.assertIn("保留第三段", output_text)
             self.assertNotIn("舊第二段", output_text)
+            self.assertEqual(
+                recorded_split.call_args.args[1],
+                [[0, 600], [600, 1200], [1200, 1800]],
+            )
+            fallback_split.assert_not_called()
+
+    def test_segment_quality_failure_uses_distinct_recovery_model_and_cache_profile(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{
+                "topic": "模型品質補救",
+                "summary": "完成",
+                "evidence_timecodes": ["00:00"],
+            }],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                return type("Response", (), {
+                    "text": json.dumps(summary_payload, ensure_ascii=False),
+                })()
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            first_segment_path = root / "_seg_meeting_000.mp3"
+            first_segment_path.write_bytes(b"segment")
+            second_segment_path = root / "_seg_meeting_001.mp3"
+            second_segment_path.write_bytes(b"segment")
+            source_path = root / "existing.md"
+            source_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n"
+                "[00:00] **[發言者 A]**：保留第一段。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n"
+                "[10:00] **[發言者 B]**：舊第二段。\n",
+                encoding="utf-8",
+            )
+
+            def current_issues(transcript, *_args, **_kwargs):
+                if "第一模型仍缺字" in transcript:
+                    return [tasks.TRANSCRIPT_LOCAL_DENSITY_ISSUE_MARKER]
+                return []
+
+            def transcribe(*args, **kwargs):
+                model = args[5]
+                if model == "gemini-primary":
+                    return "[10:00] **[發言者 B]**：第一模型仍缺字。"
+                self.assertEqual(model, "gemini-recovery")
+                return "[10:00] **[發言者 B]**：備援模型已完整轉錄。"
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_RECOVERY_MODEL", "gemini-recovery"))
+                stack.enter_context(mock.patch.object(tasks.genai, "Client", side_effect=FakeClient))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_prepare_audio_for_transcription",
+                    return_value=(audio_path, {}),
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_split_audio_to_segments",
+                    return_value=[
+                        tasks.AudioSlice(first_segment_path, 0, 600),
+                        tasks.AudioSlice(second_segment_path, 600, 1200),
+                    ],
+                ))
+                stack.enter_context(mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None))
+                stack.enter_context(mock.patch.object(tasks, "_record_segment_reuse_blocking_issues", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_issues", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_transcript_density_quality_issues", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_transcript_local_density_quality_issues", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_speech_backed_transcript_local_density_quality_ranges", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]))
+                stack.enter_context(mock.patch.object(tasks, "_repair_existing_segment_timestamp_gaps", return_value=(None, [])))
+                stack.enter_context(mock.patch.object(tasks, "_segment_transcript_current_quality_issues", side_effect=current_issues))
+                transcribe_mock = stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_transcribe_segment_with_recovery",
+                    side_effect=transcribe,
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_prefer_existing_segment_transcript_after_rerun",
+                    return_value=(False, [], [], ""),
+                ))
+                save_cache = stack.enter_context(mock.patch.object(tasks, "_save_segment_transcript_cache"))
+                stack.enter_context(mock.patch.object(tasks, "is_job_cancel_requested", return_value=False))
+                stack.enter_context(mock.patch.object(tasks, "update_job_status"))
+                save_meeting_mock = stack.enter_context(mock.patch.object(tasks, "save_meeting"))
+                output_path = tasks.process_audio_task(
+                    job_id="recovery-model-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                    model="gemini-primary",
+                    force_segment_indices=[1],
+                    transcript_reuse_source_path=source_path,
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertEqual(
+                [call.args[5] for call in transcribe_mock.call_args_list],
+                ["gemini-primary", "gemini-recovery"],
+            )
+            self.assertEqual(
+                save_cache.call_args_list[-1].kwargs["context"]["model"],
+                "gemini-recovery",
+            )
+            report = save_meeting_mock.call_args.kwargs["quality_report"]
+            self.assertIn(
+                "品質補救已改用 gemini-recovery 並通過音訊比對",
+                report["segments"][1]["recovery_notes"],
+            )
+
+    def test_major_repetition_uses_distinct_recovery_model_after_initial_transcription(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{
+                "topic": "重複迴圈補救",
+                "summary": "完成",
+                "evidence_timecodes": ["00:00"],
+            }],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                return type("Response", (), {
+                    "text": json.dumps(summary_payload, ensure_ascii=False),
+                })()
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            primary = "[00:00] **[發言者 A]**：主模型重複迴圈候選稿。"
+            recovery = "[00:00] **[發言者 A]**：第二模型已重新核聽並完成逐字稿。"
+            loop_issue = "分段疑似短句重複轉錄幻覺（「相同句子」連續重複 31 次）"
+
+            def current_issues(transcript, *_args, **_kwargs):
+                return [loop_issue] if transcript == primary else []
+
+            def transcribe(*args, **_kwargs):
+                return primary if args[5] == "gemini-primary" else recovery
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_RECOVERY_MODEL", "gemini-recovery"))
+                stack.enter_context(mock.patch.object(tasks.genai, "Client", side_effect=FakeClient))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_prepare_audio_for_transcription",
+                    return_value=(audio_path, {}),
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_split_audio_to_segments",
+                    return_value=[tasks.AudioSlice(audio_path, 0, 300)],
+                ))
+                stack.enter_context(mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_segment_transcript_current_quality_issues",
+                    side_effect=current_issues,
+                ))
+                transcribe_mock = stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_transcribe_segment_with_recovery",
+                    side_effect=transcribe,
+                ))
+                save_cache = stack.enter_context(mock.patch.object(tasks, "_save_segment_transcript_cache"))
+                stack.enter_context(mock.patch.object(tasks, "is_job_cancel_requested", return_value=False))
+                stack.enter_context(mock.patch.object(tasks, "update_job_status"))
+                save_meeting_mock = stack.enter_context(mock.patch.object(tasks, "save_meeting"))
+                output_path = tasks.process_audio_task(
+                    job_id="initial-repetition-recovery-model-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                    model="gemini-primary",
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertEqual(
+                [call.args[5] for call in transcribe_mock.call_args_list],
+                ["gemini-primary", "gemini-recovery"],
+            )
+            self.assertEqual(save_cache.call_args.kwargs["context"]["model"], "gemini-recovery")
+            self.assertIn("第二模型已重新核聽", output_path.read_text(encoding="utf-8"))
+            report = save_meeting_mock.call_args.kwargs["quality_report"]
+            self.assertIn(
+                "品質補救已改用 gemini-recovery 並通過音訊比對",
+                report["segments"][0]["recovery_notes"],
+            )
+
+    def test_partial_rerun_uses_shorter_chunks_for_audio_proven_sparse_existing_segment(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{
+                "topic": "稀疏逐字稿重跑",
+                "summary": "完成",
+                "evidence_timecodes": ["00:00"],
+            }],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                return type("Response", (), {
+                    "text": json.dumps(summary_payload, ensure_ascii=False),
+                })()
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            first_segment_path = root / "_seg_meeting_000.mp3"
+            first_segment_path.write_bytes(b"segment")
+            second_segment_path = root / "_seg_meeting_001.mp3"
+            second_segment_path.write_bytes(b"segment")
+            source_path = root / "existing.md"
+            source_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n"
+                "[00:00] **[發言者 A]**：保留第一段。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n"
+                "[10:00] **[發言者 B]**：稀疏舊稿。\n",
+                encoding="utf-8",
+            )
+
+            def current_issues(transcript, *_args, **_kwargs):
+                if "稀疏舊稿" in transcript:
+                    return [tasks.TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER]
+                return []
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(
+                     tasks,
+                     "_split_audio_to_segments",
+                     return_value=[
+                         tasks.AudioSlice(first_segment_path, 0, 600),
+                         tasks.AudioSlice(second_segment_path, 600, 1200),
+                     ],
+                 ), \
+                 mock.patch.object(tasks, "_record_segment_reuse_blocking_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_speech_backed_transcript_density_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", side_effect=current_issues), \
+                 mock.patch.object(
+                     tasks,
+                     "_transcribe_segment_with_recovery",
+                     return_value="[10:00] **[發言者 A]**：較完整的新逐字稿。",
+                 ) as transcribe, \
+                 mock.patch.object(
+                     tasks,
+                     "_prefer_existing_segment_transcript_after_rerun",
+                     return_value=(False, [], [], ""),
+                 ), \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting") as save_meeting_mock:
+                output_path = tasks.process_audio_task(
+                    job_id="sparse-existing-rerun-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                    force_segment_indices=[1],
+                    transcript_reuse_source_path=source_path,
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertTrue(transcribe.call_args.kwargs["direct_recovery"])
+            self.assertEqual(
+                transcribe.call_args.kwargs["preferred_recovery_chunk_seconds"],
+                tasks.TRANSCRIPT_MULTI_GAP_RECOVERY_SECONDS,
+            )
+            report = save_meeting_mock.call_args.kwargs["quality_report"]
+            self.assertTrue(any(
+                "文字量偏低" in note
+                for note in report["segments"][1]["recovery_notes"]
+            ))
+
+    def test_partial_rerun_stably_recovers_unselected_audio_proven_sparse_record(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{
+                "topic": "自動補救未選取分段",
+                "summary": "完成",
+                "evidence_timecodes": ["00:00"],
+            }],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                return type("Response", (), {
+                    "text": json.dumps(summary_payload, ensure_ascii=False),
+                })()
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            first_segment_path = root / "_seg_meeting_000.mp3"
+            first_segment_path.write_bytes(b"segment")
+            second_segment_path = root / "_seg_meeting_001.mp3"
+            second_segment_path.write_bytes(b"segment")
+            source_path = root / "existing.md"
+            source_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n"
+                "[00:00] **[發言者 A]**：指定重跑的舊稿。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n"
+                "[10:00] **[發言者 B]**：稀疏舊稿。\n",
+                encoding="utf-8",
+            )
+            calls = []
+
+            def current_issues(transcript, *_args, **_kwargs):
+                if "稀疏舊稿" in transcript:
+                    return [tasks.TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER]
+                return []
+
+            def density_issues(_path, transcript, **_kwargs):
+                if "稀疏舊稿" in transcript:
+                    return [tasks.TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER]
+                return []
+
+            def transcribe(*_args, **kwargs):
+                calls.append(kwargs)
+                return (
+                    "[00:00] **[發言者 A]**：指定重跑後的第一段。"
+                    if len(calls) == 1
+                    else "[10:00] **[發言者 B]**：自動補救後的第二段。"
+                )
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(
+                     tasks,
+                     "_split_audio_to_segments",
+                     return_value=[
+                         tasks.AudioSlice(first_segment_path, 0, 600),
+                         tasks.AudioSlice(second_segment_path, 600, 1200),
+                     ],
+                 ), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
+                 mock.patch.object(tasks, "_record_segment_reuse_blocking_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_speech_backed_transcript_density_quality_issues", side_effect=density_issues), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", side_effect=current_issues), \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", side_effect=transcribe), \
+                 mock.patch.object(
+                     tasks,
+                     "_prefer_existing_segment_transcript_after_rerun",
+                     return_value=(False, [], [], ""),
+                 ), \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting"):
+                output_path = tasks.process_audio_task(
+                    job_id="unselected-sparse-record-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                    force_segment_indices=[0],
+                    transcript_reuse_source_path=source_path,
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(calls[1]["direct_recovery"])
+            self.assertEqual(
+                calls[1]["preferred_recovery_chunk_seconds"],
+                tasks.TRANSCRIPT_MULTI_GAP_RECOVERY_SECONDS,
+            )
+            output_text = output_path.read_text(encoding="utf-8")
+            self.assertIn("自動補救後的第二段", output_text)
+            self.assertNotIn("稀疏舊稿", output_text)
+
+    def test_dense_audio_initial_split_only_shortens_continuous_speech(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -22.0
+            max_dBFS = -2.0
+
+            def __len__(self):
+                return 600_000
+
+        with mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 370_000)]):
+            dense_minutes = tasks._dense_audio_initial_segment_minutes(
+                FakeAudio(),
+                10,
+                allow_dense_audio_initial_split=True,
+            )
+
+        with mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 200_000)]):
+            regular_minutes = tasks._dense_audio_initial_segment_minutes(
+                FakeAudio(),
+                10,
+                allow_dense_audio_initial_split=True,
+            )
+
+        with mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 420_000)]):
+            very_dense_minutes = tasks._dense_audio_initial_segment_minutes(
+                FakeAudio(),
+                10,
+                allow_dense_audio_initial_split=True,
+            )
+
+        self.assertEqual(dense_minutes, 5)
+        self.assertEqual(regular_minutes, 10)
+        self.assertEqual(very_dense_minutes, 3)
+
+    def test_clipped_dense_audio_uses_shortest_initial_split_without_affecting_normal_dense_audio(self):
+        from backend import tasks
+
+        class ClippedDenseAudio:
+            dBFS = -22.0
+            max_dBFS = 0.0
+
+            def __len__(self):
+                return 600_000
+
+        class NormalPeakDenseAudio:
+            dBFS = -22.0
+            max_dBFS = -0.2
+
+            def __len__(self):
+                return 600_000
+
+        with mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 370_000)]):
+            clipped_minutes = tasks._dense_audio_initial_segment_minutes(
+                ClippedDenseAudio(),
+                10,
+                allow_dense_audio_initial_split=True,
+            )
+        with mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 370_000)]), \
+             mock.patch.object(tasks, "INITIAL_CLIPPED_DENSE_AUDIO_SPLIT_ENABLED", False):
+            disabled_minutes = tasks._dense_audio_initial_segment_minutes(
+                ClippedDenseAudio(),
+                10,
+                allow_dense_audio_initial_split=True,
+            )
+        with mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 370_000)]):
+            normal_peak_minutes = tasks._dense_audio_initial_segment_minutes(
+                NormalPeakDenseAudio(),
+                10,
+                allow_dense_audio_initial_split=True,
+            )
+
+        self.assertEqual(clipped_minutes, tasks.INITIAL_CLIPPED_DENSE_AUDIO_SPLIT_MINUTES)
+        self.assertEqual(disabled_minutes, tasks.INITIAL_DENSE_AUDIO_SPLIT_MINUTES)
+        self.assertEqual(normal_peak_minutes, tasks.INITIAL_DENSE_AUDIO_SPLIT_MINUTES)
+
+    def test_dense_audio_initial_split_uses_balanced_shorter_boundaries(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -22.0
+
+            def __len__(self):
+                return 600_000
+
+            def __getitem__(self, _slice):
+                return self
+
+            def export(self, *_args, **_kwargs):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "meeting.webm"
+            fake_audio = FakeAudio()
+            with mock.patch("pydub.AudioSegment.from_file", return_value=fake_audio), \
+                 mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 370_000)]), \
+                 mock.patch.object(
+                     tasks,
+                     "_recovery_subsegment_boundaries",
+                     return_value=[0, 300_000, 600_000],
+                 ) as recovery_boundaries:
+                slices = tasks._split_audio_to_segments(audio_path)
+
+        self.assertEqual(
+            [(item.start_seconds, item.end_seconds) for item in slices],
+            [(0, 300), (295, 600)],
+        )
+        recovery_boundaries.assert_called_once_with(fake_audio, 300_000)
+
+    def test_dense_audio_initial_split_uses_extra_overlap_only_after_shortening(self):
+        from backend import tasks
+
+        with mock.patch.object(tasks, "SEGMENT_OVERLAP_SECONDS", 2), \
+             mock.patch.object(tasks, "INITIAL_DENSE_AUDIO_SEGMENT_OVERLAP_SECONDS", 5):
+            dense_overlap = tasks._initial_dense_audio_overlap_seconds(10, 3)
+            normal_overlap = tasks._initial_dense_audio_overlap_seconds(10, 10)
+
+        self.assertEqual(dense_overlap, 5)
+        self.assertEqual(normal_overlap, 2)
+
+    def test_mixed_audio_extends_only_dense_discussion_boundaries(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -22.0
+            max_dBFS = -2.0
+
+            def __len__(self):
+                return 300_000
+
+            def __getitem__(self, _slice):
+                return self
+
+        with mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 200_000)]), \
+             mock.patch.object(tasks, "SEGMENT_OVERLAP_SECONDS", 2), \
+             mock.patch.object(tasks, "INITIAL_DENSE_AUDIO_SEGMENT_OVERLAP_SECONDS", 5):
+            dense_overlap = tasks._initial_dense_audio_boundary_overlap_seconds(
+                FakeAudio(),
+                previous_start_ms=0,
+                boundary_ms=300_000,
+                current_end_ms=600_000,
+                requested_segment_minutes=10,
+                baseline_overlap_seconds=2,
+            )
+
+        with mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 120_000)]), \
+             mock.patch.object(tasks, "SEGMENT_OVERLAP_SECONDS", 2), \
+             mock.patch.object(tasks, "INITIAL_DENSE_AUDIO_SEGMENT_OVERLAP_SECONDS", 5):
+            normal_overlap = tasks._initial_dense_audio_boundary_overlap_seconds(
+                FakeAudio(),
+                previous_start_ms=0,
+                boundary_ms=300_000,
+                current_end_ms=600_000,
+                requested_segment_minutes=10,
+                baseline_overlap_seconds=2,
+            )
+
+        self.assertEqual(dense_overlap, 5)
+        self.assertEqual(normal_overlap, 2)
+
+    def test_mixed_audio_shortens_only_dense_parent_segment_on_first_pass(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -22.0
+
+            def __init__(self, length_ms=1_200_000, offset_ms=0):
+                self.length_ms = length_ms
+                self.offset_ms = offset_ms
+
+            def __len__(self):
+                return self.length_ms
+
+            def __getitem__(self, audio_slice):
+                start = max(0, int(audio_slice.start or 0))
+                end = min(
+                    self.length_ms,
+                    int(audio_slice.stop if audio_slice.stop is not None else self.length_ms),
+                )
+                return FakeAudio(max(0, end - start), self.offset_ms + start)
+
+            def export(self, *_args, **_kwargs):
+                return None
+
+        def non_silent_ranges(audio, **_kwargs):
+            if len(audio) == 1_200_000:
+                return [(0, 400_000)]  # Entire meeting is not dense.
+            if audio.offset_ms == 0 and len(audio) == 600_000:
+                return [(0, 360_000)]  # First parent segment is dense, not extreme.
+            return [(0, 120_000)]  # The other parent segment remains sparse.
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "mixed.webm"
+            fake_audio = FakeAudio()
+            with mock.patch("pydub.AudioSegment.from_file", return_value=fake_audio), \
+                 mock.patch("pydub.silence.detect_nonsilent", side_effect=non_silent_ranges), \
+                 mock.patch("pydub.silence.detect_silence", return_value=[]), \
+                 mock.patch.object(
+                     tasks,
+                     "_smart_segment_boundaries",
+                     return_value=[0, 600_000, 1_200_000],
+                 ), \
+                 mock.patch.object(
+                     tasks,
+                     "_recovery_subsegment_boundaries",
+                     return_value=[0, 300_000, 600_000],
+                 ) as recovery_boundaries:
+                slices = tasks._split_audio_to_segments(audio_path)
+
+        self.assertEqual(
+            [(item.start_seconds, item.end_seconds) for item in slices],
+            [(0, 300), (298, 600), (598, 1200)],
+        )
+        self.assertEqual(recovery_boundaries.call_count, 1)
+        self.assertEqual(recovery_boundaries.call_args.args[1], 300_000)
+
+    def test_mixed_audio_shortens_only_very_dense_parent_to_three_minutes(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -22.0
+
+            def __init__(self, length_ms=1_200_000, offset_ms=0):
+                self.length_ms = length_ms
+                self.offset_ms = offset_ms
+
+            def __len__(self):
+                return self.length_ms
+
+            def __getitem__(self, audio_slice):
+                start = max(0, int(audio_slice.start or 0))
+                end = min(
+                    self.length_ms,
+                    int(audio_slice.stop if audio_slice.stop is not None else self.length_ms),
+                )
+                return FakeAudio(max(0, end - start), self.offset_ms + start)
+
+            def export(self, *_args, **_kwargs):
+                return None
+
+        def non_silent_ranges(audio, **_kwargs):
+            if len(audio) == 1_200_000:
+                return [(0, 540_000)]  # Whole meeting remains below the dense ratio.
+            if audio.offset_ms == 0 and len(audio) == 600_000:
+                return [(0, 420_000)]  # 70% active: use the very-dense plan.
+            return [(0, 120_000)]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "mixed-very-dense.webm"
+            fake_audio = FakeAudio()
+            with mock.patch("pydub.AudioSegment.from_file", return_value=fake_audio), \
+                 mock.patch("pydub.silence.detect_nonsilent", side_effect=non_silent_ranges), \
+                 mock.patch("pydub.silence.detect_silence", return_value=[]), \
+                 mock.patch.object(
+                     tasks,
+                     "_smart_segment_boundaries",
+                     return_value=[0, 600_000, 1_200_000],
+                 ), \
+                 mock.patch.object(
+                     tasks,
+                     "_recovery_subsegment_boundaries",
+                     return_value=[0, 150_000, 300_000, 450_000, 600_000],
+                 ) as recovery_boundaries:
+                slices = tasks._split_audio_to_segments(audio_path)
+
+        self.assertEqual(
+            [(item.start_seconds, item.end_seconds) for item in slices],
+            [(0, 150), (148, 300), (298, 450), (448, 600), (598, 1200)],
+        )
+        self.assertEqual(recovery_boundaries.call_count, 1)
+        self.assertEqual(recovery_boundaries.call_args.args[1], 180_000)
+
+    def test_mixed_audio_refines_only_very_dense_five_minute_child(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -22.0
+
+            def __init__(self, length_ms=1_200_000, offset_ms=0):
+                self.length_ms = length_ms
+                self.offset_ms = offset_ms
+
+            def __len__(self):
+                return self.length_ms
+
+            def __getitem__(self, audio_slice):
+                start = max(0, int(audio_slice.start or 0))
+                end = min(
+                    self.length_ms,
+                    int(audio_slice.stop if audio_slice.stop is not None else self.length_ms),
+                )
+                return FakeAudio(max(0, end - start), self.offset_ms + start)
+
+            def export(self, *_args, **_kwargs):
+                return None
+
+        def non_silent_ranges(audio, **_kwargs):
+            if len(audio) == 1_200_000:
+                return [(0, 400_000)]  # Whole meeting stays below the dense ratio.
+            if audio.offset_ms == 0 and len(audio) == 600_000:
+                return [(0, 360_000)]  # Parent needs the normal five-minute split.
+            if audio.offset_ms == 300_000 and len(audio) == 300_000:
+                return [(0, 220_000)]  # Only the latter child is extremely dense.
+            return [(0, 120_000)]
+
+        def recovery_boundaries(audio, chunk_ms):
+            if len(audio) == 600_000 and chunk_ms == 300_000:
+                return [0, 300_000, 600_000]
+            self.assertEqual((len(audio), chunk_ms), (300_000, 180_000))
+            return [0, 150_000, 300_000]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "mixed-child-density.webm"
+            fake_audio = FakeAudio()
+            with mock.patch("pydub.AudioSegment.from_file", return_value=fake_audio), \
+                 mock.patch("pydub.silence.detect_nonsilent", side_effect=non_silent_ranges), \
+                 mock.patch("pydub.silence.detect_silence", return_value=[]), \
+                 mock.patch.object(
+                     tasks,
+                     "_smart_segment_boundaries",
+                     return_value=[0, 600_000, 1_200_000],
+                 ), \
+                 mock.patch.object(
+                     tasks,
+                     "_recovery_subsegment_boundaries",
+                     side_effect=recovery_boundaries,
+                 ) as recovery_mock:
+                slices = tasks._split_audio_to_segments(audio_path)
+
+        self.assertEqual(
+            [(item.start_seconds, item.end_seconds) for item in slices],
+            [(0, 300), (298, 450), (448, 600), (598, 1200)],
+        )
+        self.assertEqual(
+            [call.args[1] for call in recovery_mock.call_args_list],
+            [300_000, 180_000],
+        )
+
+    def test_recorded_segment_bounds_export_exact_historic_windows(self):
+        from backend import tasks
+
+        class FakeClip:
+            def __init__(self, owner, start, end):
+                self.owner = owner
+                self.start = start
+                self.end = end
+
+            def export(self, path, **_kwargs):
+                self.owner.exports.append((self.start, self.end, Path(path).name))
+
+        class FakeAudio:
+            def __init__(self):
+                self.exports = []
+
+            def __len__(self):
+                return 1_200_400
+
+            def __getitem__(self, audio_slice):
+                return FakeClip(self, audio_slice.start, audio_slice.stop)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "meeting.webm"
+            fake_audio = FakeAudio()
+            with mock.patch("pydub.AudioSegment.from_file", return_value=fake_audio):
+                slices = tasks._split_audio_to_recorded_segment_bounds(
+                    audio_path,
+                    [[0, 598], [596, 1201]],
+                )
+
+        self.assertEqual(
+            [(item.start_seconds, item.end_seconds) for item in slices],
+            [(0, 598), (596, 1201)],
+        )
+        self.assertEqual(
+            fake_audio.exports,
+            [
+                (0, 598_000, "_seg_meeting_000.mp3"),
+                (596_000, 1_201_000, "_seg_meeting_001.mp3"),
+            ],
+        )
+
+    def test_speech_focus_segments_keep_lossless_flac_without_enlarging_normal_audio(self):
+        from backend import tasks
+
+        initial_focus = Path("_prepared_speech_focus_v4_meeting_job.flac")
+        initial_normalized = Path("_prepared_normalize_meeting_job.flac")
+        recovery_focus = Path("_speech_focus_v4_meeting_job.flac")
+        initial_child = Path("_seg__prepared_speech_focus_v4_meeting_job_000.flac")
+        normalized_child = Path("_seg__prepared_normalize_meeting_job_000.flac")
+        recovery_grandchild = Path("_sub__seg__speech_focus_v4_meeting_job_60s_000.flac")
+        user_flac = Path("user_upload.flac")
+        normal_audio = Path("meeting.webm")
+
+        self.assertEqual(
+            tasks._transcription_segment_export_spec(initial_focus),
+            ("flac", ["-compression_level", "5"]),
+        )
+        self.assertEqual(
+            tasks._transcription_segment_export_spec(initial_normalized),
+            ("flac", ["-compression_level", "5"]),
+        )
+        self.assertEqual(
+            tasks._transcription_segment_export_spec(recovery_focus),
+            ("flac", ["-compression_level", "5"]),
+        )
+        self.assertEqual(
+            tasks._transcription_segment_export_spec(initial_child),
+            ("flac", ["-compression_level", "5"]),
+        )
+        self.assertEqual(
+            tasks._transcription_segment_export_spec(normalized_child),
+            ("flac", ["-compression_level", "5"]),
+        )
+        self.assertEqual(
+            tasks._transcription_segment_export_spec(recovery_grandchild),
+            ("flac", ["-compression_level", "5"]),
+        )
+        self.assertEqual(
+            tasks._transcription_segment_export_spec(user_flac),
+            ("mp3", ["-q:a", "3"]),
+        )
+        self.assertEqual(
+            tasks._transcription_segment_export_spec(normal_audio),
+            ("mp3", ["-q:a", "3"]),
+        )
+        with mock.patch.object(tasks, "SPEECH_FOCUS_LOSSLESS_UPLOAD_ENABLED", False):
+            self.assertEqual(
+                tasks._transcription_segment_export_spec(initial_focus),
+                ("mp3", ["-q:a", "3"]),
+            )
+
+    def test_speech_focus_gap_export_keeps_lossless_lineage(self):
+        from backend import tasks
+
+        class FakeAudio:
+            def __init__(self):
+                self.exports = []
+
+            def __len__(self):
+                return 120_000
+
+            def __getitem__(self, value):
+                self.slice = value
+                return self
+
+            def export(self, path, *, format, parameters):
+                self.exports.append((Path(path), format, parameters))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "_seg__prepared_speech_focus_v4_meeting_000.flac"
+            source.write_bytes(b"focused")
+            audio = FakeAudio()
+            with mock.patch("pydub.AudioSegment.from_file", return_value=audio):
+                exported = tasks._export_audio_gap_segment(
+                    source,
+                    segment_start_seconds=0,
+                    gap_start_seconds=10,
+                    gap_end_seconds=20,
+                )
+
+        self.assertIsNotNone(exported)
+        self.assertEqual(exported.suffix, ".flac")
+        self.assertEqual(audio.slice.start, 10_000)
+        self.assertEqual(audio.slice.stop, 20_000)
+        self.assertEqual(
+            [(path.suffix, export_format, parameters) for path, export_format, parameters in audio.exports],
+            [(".flac", "flac", ["-compression_level", "5"])],
+        )
+
+    def test_lossless_recovery_change_does_not_resume_legacy_recovery_plan(self):
+        from backend import tasks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "output"
+            current_context = tasks._segment_recovery_plan_context(
+                model="gemini-primary",
+                source_audio_sha256="a" * 64,
+                segment_index=2,
+                total_segments=7,
+                start_seconds=1200,
+                end_seconds=1800,
+            )
+            legacy_context = {
+                **current_context,
+                "plan_version": tasks.SEGMENT_RECOVERY_PLAN_VERSION - 1,
+            }
+            legacy_file = tasks._segment_recovery_plan_file(output_dir, legacy_context)
+            legacy_file.parent.mkdir(parents=True, exist_ok=True)
+            legacy_file.write_text(
+                json.dumps({
+                    **legacy_context,
+                    "chunk_seconds": 60,
+                    "candidate": {
+                        "transcript": "舊的有損補救候選稿",
+                        "issues": [],
+                        "model": "gemini-primary",
+                    },
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(
+                tasks._load_segment_recovery_draft(output_dir, current_context)
+            )
 
     def test_partial_rerun_uses_targeted_gap_repair_before_full_segment_rerun(self):
         from backend import tasks
@@ -9883,6 +14758,367 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                 quality_report["segments"][1]["recovery_notes"],
             )
 
+    def test_full_segment_rerun_skips_local_repair_and_replaces_selected_segment(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{"topic": "完整重跑", "summary": "完成", "evidence_timecodes": ["10:00"]}],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                return type("Response", (), {"text": json.dumps(summary_payload, ensure_ascii=False)})()
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            first_segment = root / "_seg_meeting_000.mp3"
+            second_segment = root / "_seg_meeting_001.mp3"
+            first_segment.write_bytes(b"segment")
+            second_segment.write_bytes(b"segment")
+            source_path = root / "existing.md"
+            source_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n"
+                "[00:00] **[發言者 A]**：保留第一段。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n"
+                "[10:00] **[發言者 B]**：舊稿雖有時間戳但語意失真。",
+                encoding="utf-8",
+            )
+            full_rerun_second = (
+                "[10:00] **[發言者 B]**：完整重轉後的第二段內容。\n"
+                "[19:40] **[發言者 B]**：確認收尾。"
+            )
+            problem_range = [{
+                "start_seconds": 660,
+                "end_seconds": 780,
+                "issue": "疑似連續重複轉錄（已定位）",
+            }]
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks, "TRANSCRIPTION_FULL_RERUN_MODEL", "gemini-full-rerun"), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(
+                     tasks,
+                     "_split_audio_to_segments",
+                     return_value=[
+                         tasks.AudioSlice(first_segment, 0, 600),
+                         tasks.AudioSlice(second_segment, 600, 1200),
+                     ],
+                 ), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_speech_backed_transcript_density_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_speech_backed_transcript_local_density_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", return_value=problem_range), \
+                 mock.patch.object(tasks, "_speech_backed_transcript_local_density_quality_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=problem_range), \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_repair_existing_segment_timestamp_gaps") as repair_mock, \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", return_value=full_rerun_second) as rerun_mock, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting") as save_meeting_mock:
+                output_path = tasks.process_audio_task(
+                    job_id="full-segment-rerun-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                    force_segment_indices=[1],
+                    force_full_segment_indices=[1],
+                    transcript_reuse_source_path=source_path,
+                )
+
+            self.assertIsNotNone(output_path)
+            repair_mock.assert_not_called()
+            rerun_mock.assert_called_once()
+            self.assertTrue(rerun_mock.call_args.kwargs["direct_recovery"])
+            self.assertEqual(rerun_mock.call_args.args[5], "gemini-full-rerun")
+            self.assertEqual(
+                rerun_mock.call_args.kwargs["preferred_recovery_chunk_seconds"],
+                tasks.TRANSCRIPT_LOCAL_REPAIR_RECOVERY_SECONDS,
+            )
+            output_text = output_path.read_text(encoding="utf-8")
+            self.assertIn("保留第一段", output_text)
+            self.assertIn("完整重轉後的第二段內容", output_text)
+            self.assertNotIn("語意失真", output_text)
+            quality_report = save_meeting_mock.call_args.kwargs["quality_report"]
+            self.assertEqual(quality_report["segments"][1]["status"], "full_rerun")
+            self.assertTrue(any(
+                "使用者指定完整重跑" in note
+                for note in quality_report["segments"][1]["recovery_notes"]
+            ))
+            self.assertTrue(any(
+                "gemini-full-rerun" in note
+                for note in quality_report["segments"][1]["recovery_notes"]
+            ))
+
+    def test_critical_selected_rerun_auto_escalates_to_full_replacement(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{"topic": "嚴重缺字重跑", "summary": "完成", "evidence_timecodes": ["10:00"]}],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                return type("Response", (), {"text": json.dumps(summary_payload, ensure_ascii=False)})()
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = FakeModels()
+
+        severe_issue = (
+            "音訊局部語音密度高但逐字稿文字量偏低（問題時間：10:35-12:50，"
+            "5 字／44 秒有效語音，0.1 字/秒）"
+        )
+        severe_range = {
+            "start_seconds": 635,
+            "end_seconds": 770,
+            "issue": severe_issue,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            first_segment = root / "_seg_meeting_000.mp3"
+            second_segment = root / "_seg_meeting_001.mp3"
+            first_segment.write_bytes(b"segment")
+            second_segment.write_bytes(b"segment")
+            source_path = root / "existing.md"
+            source_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 10:00】\n"
+                "[00:00] **[發言者 A]**：保留第一段。\n"
+                "### 【第 2 段｜10:00 – 20:00】\n"
+                "[10:00] **[發言者 B]**：嚴重缺字的舊稿。",
+                encoding="utf-8",
+            )
+            replacement = (
+                "[10:00] **[發言者 B]**：完整替換後的第二段內容。\n"
+                "[19:40] **[發言者 B]**：確認收尾。"
+            )
+
+            def quality_issues(transcript, *_args, **_kwargs):
+                return [severe_issue] if "嚴重缺字" in transcript else []
+
+            def local_density_ranges(_path, transcript, **_kwargs):
+                return [severe_range] if "嚴重缺字" in transcript else []
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks, "TRANSCRIPTION_FULL_RERUN_MODEL", "gemini-critical-rerun"), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(
+                     tasks,
+                     "_split_audio_to_segments",
+                     return_value=[
+                         tasks.AudioSlice(first_segment, 0, 600),
+                         tasks.AudioSlice(second_segment, 600, 1200),
+                     ],
+                 ), \
+                 mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_speech_backed_transcript_density_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_speech_backed_transcript_local_density_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", return_value=[]), \
+                 mock.patch.object(
+                     tasks,
+                     "_speech_backed_transcript_local_density_quality_ranges",
+                     side_effect=local_density_ranges,
+                 ), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(
+                     tasks,
+                     "_segment_transcript_current_quality_issues",
+                     side_effect=quality_issues,
+                 ), \
+                 mock.patch.object(tasks, "_repair_existing_segment_timestamp_gaps") as repair_mock, \
+                 mock.patch.object(
+                     tasks,
+                     "_transcribe_segment_with_recovery",
+                     return_value=replacement,
+                 ) as rerun_mock, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting") as save_meeting_mock:
+                output_path = tasks.process_audio_task(
+                    job_id="critical-segment-rerun-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                    force_segment_indices=[1],
+                    transcript_reuse_source_path=source_path,
+                )
+
+            self.assertIsNotNone(output_path)
+            repair_mock.assert_not_called()
+            rerun_mock.assert_called_once()
+            self.assertTrue(rerun_mock.call_args.kwargs["direct_recovery"])
+            self.assertEqual(rerun_mock.call_args.args[5], "gemini-critical-rerun")
+            self.assertEqual(
+                rerun_mock.call_args.kwargs["preferred_recovery_chunk_seconds"],
+                tasks.TRANSCRIPT_SEVERE_LOCAL_DENSITY_RECOVERY_SECONDS,
+            )
+            quality_report = save_meeting_mock.call_args.kwargs["quality_report"]
+            self.assertEqual(quality_report["segments"][1]["status"], "full_rerun")
+            self.assertTrue(any(
+                "品質檢核發現重大轉錄異常，自動升級完整重跑" in note
+                for note in quality_report["segments"][1]["recovery_notes"]
+            ))
+
+    def test_critical_rerun_escalation_handles_long_single_gap_and_can_disable(self):
+        from backend import tasks
+
+        severe_density = (
+            "音訊局部語音密度高但逐字稿文字量偏低（問題時間：10:35-12:50，"
+            "5 字／44 秒有效語音，0.1 字/秒）"
+        )
+        ordinary_gap = "音訊含持續語音但時間戳在 11:00 至 11:59 間隔 59 秒"
+        critical_gap = "音訊含持續語音但時間戳在 11:00 至 12:00 間隔 60 秒"
+
+        self.assertTrue(tasks._requires_critical_segment_rerun_escalation([severe_density]))
+        self.assertTrue(tasks._requires_critical_segment_rerun_escalation([critical_gap]))
+        self.assertEqual(
+            tasks._critical_quality_report_segment_indices(
+                {"review_segments": [{"index": 4, "issues": [critical_gap]}]},
+                [4],
+            ),
+            [4],
+        )
+        self.assertTrue(tasks._requires_critical_segment_rerun_escalation([
+            ordinary_gap,
+            ordinary_gap.replace("11:00", "13:00").replace("11:59", "13:59"),
+            ordinary_gap.replace("11:00", "15:00").replace("11:59", "15:59"),
+        ]))
+        self.assertFalse(tasks._requires_critical_segment_rerun_escalation([ordinary_gap]))
+        with mock.patch.object(tasks, "TRANSCRIPT_CRITICAL_RERUN_ESCALATION_ENABLED", False):
+            self.assertFalse(tasks._requires_critical_segment_rerun_escalation([severe_density]))
+
+    def test_critical_rerun_escalation_replaces_major_repetition_but_keeps_small_repeat_local(self):
+        from backend import tasks
+
+        numeric_loop = (
+            "分段疑似數列延伸轉錄幻覺"
+            "（相同句型僅替換數字且時間戳密集，共 14 次）"
+        )
+        major_repeat = "疑似連續重複轉錄；同一句連續重複 31 次：相同句子"
+        small_repeat = "疑似連續重複轉錄；同一句連續重複 4 次：短暫重複"
+        repeated_turns = "分段疑似重複轉錄幻覺（連續重複 8 句，重複比例 50%）"
+
+        self.assertTrue(tasks._requires_critical_segment_rerun_escalation([numeric_loop]))
+        self.assertTrue(tasks._requires_critical_segment_rerun_escalation([major_repeat]))
+        self.assertTrue(tasks._requires_critical_segment_rerun_escalation([repeated_turns]))
+        self.assertFalse(tasks._requires_critical_segment_rerun_escalation([small_repeat]))
+
+    def test_major_repetition_uses_independent_recovery_model_but_small_repeat_does_not(self):
+        from backend import tasks
+
+        major_repeat = "疑似連續重複轉錄；同一句連續重複 31 次：相同句子"
+        small_repeat = "疑似連續重複轉錄；同一句連續重複 4 次：短暫重複"
+
+        self.assertTrue(tasks._requires_independent_transcription_recovery([major_repeat]))
+        self.assertFalse(tasks._requires_independent_transcription_recovery([small_repeat]))
+
+    def test_full_segment_rerun_model_defaults_to_configured_recovery_model(self):
+        from backend import tasks
+
+        with mock.patch.object(tasks, "TRANSCRIPTION_FULL_RERUN_MODEL", "gemini-quality"):
+            self.assertEqual(
+                tasks._resolve_full_segment_rerun_model("gemini-primary"),
+                "gemini-quality",
+            )
+        with mock.patch.object(tasks, "TRANSCRIPTION_FULL_RERUN_MODEL", ""):
+            self.assertEqual(
+                tasks._resolve_full_segment_rerun_model("gemini-primary"),
+                "gemini-primary",
+            )
+
+    def test_single_segment_full_rerun_uses_configured_full_rerun_model(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{"topic": "單段完整重跑", "summary": "完成", "evidence_timecodes": ["00:00"]}],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                return type("Response", (), {"text": json.dumps(summary_payload, ensure_ascii=False)})()
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "meeting.webm"
+            audio_path.write_bytes(b"audio")
+            transcript = "[00:00] **[發言者 A]**：完整重轉後的單段內容。"
+            source_path = root / "existing.md"
+            source_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "### 【第 1 段｜00:00 – 01:00】\n"
+                "[00:00] **[發言者 A]**：舊稿只留下極少文字。",
+                encoding="utf-8",
+            )
+            severe_local_range = [{
+                "start_seconds": 0,
+                "end_seconds": 60,
+                "issue": (
+                    f"{tasks.TRANSCRIPT_LOCAL_DENSITY_ISSUE_MARKER}"
+                    "（問題時間：00:00-01:00，2 字／53 秒有效語音，0.0 字/秒）"
+                ),
+            }]
+
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks, "TRANSCRIPTION_FULL_RERUN_MODEL", "gemini-full-single"), \
+                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
+                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
+                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=[tasks.AudioSlice(audio_path, 0, 60)]), \
+                 mock.patch.object(
+                     tasks,
+                     "_speech_backed_transcript_local_density_quality_ranges",
+                     return_value=severe_local_range,
+                 ), \
+                 mock.patch.object(tasks, "_segment_transcript_current_quality_issues", return_value=[]), \
+                 mock.patch.object(tasks, "_transcribe_segment_with_recovery", return_value=transcript) as rerun_mock, \
+                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
+                 mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(tasks, "save_meeting") as save_meeting_mock:
+                output_path = tasks.process_audio_task(
+                    job_id="single-full-segment-rerun-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                    force_segment_indices=[0],
+                    force_full_segment_indices=[0],
+                    transcript_reuse_source_path=source_path,
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertTrue(rerun_mock.call_args.kwargs["direct_recovery"])
+            self.assertEqual(rerun_mock.call_args.args[5], "gemini-full-single")
+            self.assertEqual(
+                rerun_mock.call_args.kwargs["preferred_recovery_chunk_seconds"],
+                tasks.TRANSCRIPT_SEVERE_LOCAL_DENSITY_RECOVERY_SECONDS,
+            )
+            quality_report = save_meeting_mock.call_args.kwargs["quality_report"]
+            self.assertEqual(quality_report["segments"][0]["status"], "full_rerun")
+            self.assertTrue(any(
+                "gemini-full-single" in note
+                for note in quality_report["segments"][0]["recovery_notes"]
+            ))
+
     def test_partial_rerun_with_many_faults_skips_local_repairs_for_stable_rerun(self):
         from backend import tasks
 
@@ -9963,7 +15199,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             self.assertTrue(rerun_mock.call_args.kwargs["direct_recovery"])
             self.assertEqual(
                 rerun_mock.call_args.kwargs["preferred_recovery_chunk_seconds"],
-                tasks.TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS,
+                min(
+                    tasks.TRANSCRIPT_MULTI_GAP_RECOVERY_SECONDS,
+                    tasks.TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS,
+                ),
             )
             output_text = output_path.read_text(encoding="utf-8")
             self.assertIn("更短小段重跑後的完整內容", output_text)
@@ -10265,7 +15504,10 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         split_mock.assert_called_once()
         self.assertEqual(
             split_mock.call_args.args[1],
-            tasks.TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS,
+            min(
+                tasks.TRANSCRIPT_MULTI_GAP_RECOVERY_SECONDS,
+                tasks.TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS,
+            ),
         )
         self.assertEqual(transcribe_mock.call_count, 3)
         self.assertIn("穩定重跑前半段", transcript)
@@ -10326,6 +15568,75 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                     duration_seconds=360,
                     is_last_segment=True,
                     direct_recovery=True,
+                    quality_events=quality_events,
+                )
+
+        self.assertEqual(transcript, repaired)
+        repair_mock.assert_called_once()
+        self.assertEqual(repair_mock.call_args.kwargs["gap_ranges"][0]["start_seconds"], 120)
+        self.assertTrue(any(
+            str(event.get("issue") or "").startswith("合併後局部補救：")
+            for event in quality_events
+        ))
+
+    def test_automatic_recovery_repairs_gap_detected_only_after_child_transcripts_merge(self):
+        from backend import tasks
+
+        initial = "[00:00] **[發言者 A]**：初次轉錄只保留段首。"
+        child_one = "[00:00] **[發言者 A]**：第一個補救小段的內容。"
+        child_two = "[01:50] **[發言者 B]**：第二個補救小段的內容。"
+        child_two_merged = "[04:50] **[發言者 B]**：第二個補救小段的內容。"
+        repaired = (
+            "[00:00] **[發言者 A]**：第一個補救小段的內容。\n"
+            "[02:30] **[發言者 A]**：自動補回跨小段缺口。\n"
+            "[04:50] **[發言者 B]**：第二個補救小段的內容。"
+        )
+
+        def reject_initial_and_merged_gap(transcript, **_kwargs):
+            if transcript == initial:
+                raise RuntimeError("第 1/1 段首次轉錄不完整")
+            if child_one in transcript and child_two_merged in transcript:
+                raise RuntimeError("第 1/1 段轉錄不完整：音訊含持續語音但時間戳有缺口")
+
+        def merged_gap_ranges(_path, transcript, **_kwargs):
+            if child_one in transcript and child_two_merged in transcript:
+                return [{
+                    "start_seconds": 120,
+                    "end_seconds": 290,
+                    "issue": "音訊含持續語音但時間戳在 02:00 至 04:50 間隔 170 秒",
+                }]
+            return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            segment = Path(tmpdir) / "segment.mp3"
+            segment.write_bytes(b"segment")
+            with mock.patch.object(
+                tasks,
+                "_split_audio_to_subsegments",
+                return_value=[(segment, 0, 180), (segment, 180, 360)],
+            ), \
+                 mock.patch.object(tasks, "_transcribe_segment", side_effect=[initial, child_one, child_two]), \
+                 mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete", side_effect=reject_initial_and_merged_gap), \
+                 mock.patch.object(tasks, "_speech_backed_timestamp_gap_quality_ranges", side_effect=merged_gap_ranges), \
+                 mock.patch.object(tasks, "_speech_backed_transcript_local_density_quality_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(
+                     tasks,
+                     "_repair_existing_segment_timestamp_gaps",
+                     return_value=(repaired, ["已局部補救時間缺口：02:00-04:50"]),
+                 ) as repair_mock, \
+                 mock.patch.object(tasks, "update_job_status"):
+                quality_events = []
+                transcript = tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    0,
+                    1,
+                    "automatic-merged-gap-repair-job",
+                    "gemini-test",
+                    offset_seconds=0,
+                    duration_seconds=360,
+                    is_last_segment=True,
                     quality_events=quality_events,
                 )
 
@@ -10427,6 +15738,210 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
 
         self.assertEqual(transcript, expected_second_pass)
         self.assertEqual([call.args[1] for call in split_mock.call_args_list], [180, 120])
+        repair_mock.assert_not_called()
+        self.assertTrue(any(
+            "第 2 次穩定重跑" in str(event.get("issue") or "")
+            for event in quality_events
+        ))
+
+    def test_direct_recovery_retries_smaller_chunks_after_failed_single_merged_repair(self):
+        from backend import tasks
+
+        first_pass_one = "[00:00] **[發言者 A]**：第一輪前半段。"
+        first_pass_two = "[00:00] **[發言者 B]**：第一輪後半段。"
+        first_pass_two_merged = "[01:00] **[發言者 B]**：第一輪後半段。"
+        second_pass = [
+            "[00:00] **[發言者 A]**：第二輪第一小段。",
+            "[00:00] **[發言者 B]**：第二輪第二小段。",
+            "[00:00] **[發言者 A]**：第二輪第三小段。",
+            "[00:00] **[發言者 B]**：第二輪第四小段。",
+        ]
+        expected_second_pass = "\n\n".join([
+            second_pass[0],
+            "[00:30] **[發言者 B]**：第二輪第二小段。",
+            "[01:00] **[發言者 A]**：第二輪第三小段。",
+            "[01:30] **[發言者 B]**：第二輪第四小段。",
+        ])
+
+        def reject_first_merged_pass(transcript, **_kwargs):
+            if first_pass_one in transcript and first_pass_two_merged in transcript:
+                raise RuntimeError("第 1/1 段轉錄不完整：合併後仍有時間缺口")
+
+        def first_pass_gap_ranges(_path, transcript, **_kwargs):
+            if first_pass_one in transcript and first_pass_two_merged in transcript:
+                return [{
+                    "start_seconds": 30,
+                    "end_seconds": 90,
+                    "issue": "音訊含持續語音但時間戳在 00:30 至 01:30 間隔 60 秒",
+                }]
+            return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segment = root / "segment.mp3"
+            segment.write_bytes(b"segment")
+            first_chunks = [
+                (root / "first_0.mp3", 0, 60),
+                (root / "first_1.mp3", 60, 120),
+            ]
+            second_chunks = [
+                (root / "second_0.mp3", 0, 30),
+                (root / "second_1.mp3", 30, 60),
+                (root / "second_2.mp3", 60, 90),
+                (root / "second_3.mp3", 90, 120),
+            ]
+            for path, *_bounds in [*first_chunks, *second_chunks]:
+                path.write_bytes(b"segment")
+
+            with mock.patch.object(
+                tasks,
+                "_split_audio_to_subsegments",
+                side_effect=[first_chunks, second_chunks],
+            ) as split_mock, \
+                 mock.patch.object(
+                     tasks,
+                     "_transcribe_segment",
+                     side_effect=[first_pass_one, first_pass_two, *second_pass],
+                 ), \
+                 mock.patch.object(
+                     tasks,
+                     "_raise_if_segment_transcript_incomplete",
+                     side_effect=reject_first_merged_pass,
+                 ), \
+                 mock.patch.object(
+                     tasks,
+                     "_speech_backed_timestamp_gap_quality_ranges",
+                     side_effect=first_pass_gap_ranges,
+                 ), \
+                 mock.patch.object(
+                     tasks,
+                     "_speech_backed_transcript_local_density_quality_ranges",
+                     return_value=[],
+                 ), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(
+                     tasks,
+                     "_repair_existing_segment_timestamp_gaps",
+                     return_value=(None, []),
+                 ) as repair_mock, \
+                 mock.patch.object(tasks, "update_job_status"):
+                quality_events = []
+                transcript = tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    0,
+                    1,
+                    "single-merged-gap-job",
+                    "gemini-test",
+                    offset_seconds=0,
+                    duration_seconds=120,
+                    is_last_segment=True,
+                    direct_recovery=True,
+                    preferred_recovery_chunk_seconds=60,
+                    quality_events=quality_events,
+                )
+
+        self.assertEqual(transcript, expected_second_pass)
+        self.assertEqual([call.args[1] for call in split_mock.call_args_list], [60, 30])
+        repair_mock.assert_called_once()
+        self.assertTrue(any(
+            "局部補救仍未通過品質檢查" in str(event.get("issue") or "")
+            and "第 2 次穩定重跑" in str(event.get("issue") or "")
+            for event in quality_events
+        ))
+
+    def test_automatic_recovery_retries_with_smaller_chunks_for_many_merged_gaps(self):
+        from backend import tasks
+
+        initial = "[00:00] **[發言者 A]**：初次轉錄只保留開頭。"
+        first_pass_one = "[00:00] **[發言者 A]**：自動第一輪前半段。"
+        first_pass_two = "[00:00] **[發言者 B]**：自動第一輪後半段。"
+        first_pass_two_merged = "[03:00] **[發言者 B]**：自動第一輪後半段。"
+        second_pass = [
+            "[00:00] **[發言者 A]**：自動第二輪第一小段。",
+            "[00:00] **[發言者 B]**：自動第二輪第二小段。",
+            "[00:00] **[發言者 A]**：自動第二輪第三小段。",
+        ]
+        expected_second_pass = "\n\n".join([
+            second_pass[0],
+            "[02:00] **[發言者 B]**：自動第二輪第二小段。",
+            "[04:00] **[發言者 A]**：自動第二輪第三小段。",
+        ])
+
+        def reject_initial_and_first_merged_pass(transcript, **_kwargs):
+            if transcript == initial:
+                raise RuntimeError("第 1/1 段首次轉錄不完整")
+            if first_pass_one in transcript and first_pass_two_merged in transcript:
+                raise RuntimeError("第 1/1 段轉錄不完整：合併後有多個時間缺口")
+
+        def first_pass_gap_ranges(_path, transcript, **_kwargs):
+            if first_pass_one in transcript and first_pass_two_merged in transcript:
+                return [
+                    {
+                        "start_seconds": index * 60,
+                        "end_seconds": index * 60 + 30,
+                        "issue": f"音訊含持續語音但時間戳有缺口 {index + 1}",
+                    }
+                    for index in range(tasks.TRANSCRIPT_AUTO_REPAIR_MAX_RANGES + 1)
+                ]
+            return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            segment = root / "segment.mp3"
+            segment.write_bytes(b"segment")
+            first_chunks = [
+                (root / "first_0.mp3", 0, 180),
+                (root / "first_1.mp3", 180, 360),
+            ]
+            second_chunks = [
+                (root / "second_0.mp3", 0, 120),
+                (root / "second_1.mp3", 120, 240),
+                (root / "second_2.mp3", 240, 360),
+            ]
+            for path, *_bounds in [*first_chunks, *second_chunks]:
+                path.write_bytes(b"segment")
+
+            with mock.patch.object(
+                tasks,
+                "_split_audio_to_subsegments",
+                side_effect=[first_chunks, second_chunks],
+            ) as split_mock, \
+                 mock.patch.object(
+                     tasks,
+                     "_transcribe_segment",
+                     side_effect=[initial, first_pass_one, first_pass_two, *second_pass],
+                 ), \
+                 mock.patch.object(
+                     tasks,
+                     "_raise_if_segment_transcript_incomplete",
+                     side_effect=reject_initial_and_first_merged_pass,
+                 ), \
+                 mock.patch.object(
+                     tasks,
+                     "_speech_backed_timestamp_gap_quality_ranges",
+                     side_effect=first_pass_gap_ranges,
+                 ), \
+                 mock.patch.object(tasks, "_speech_backed_transcript_local_density_quality_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_transcript_repetition_repair_ranges", return_value=[]), \
+                 mock.patch.object(tasks, "_repair_existing_segment_timestamp_gaps") as repair_mock, \
+                 mock.patch.object(tasks, "update_job_status"):
+                quality_events = []
+                transcript = tasks._transcribe_segment_with_recovery(
+                    None,
+                    segment,
+                    0,
+                    1,
+                    "automatic-many-merged-gaps-job",
+                    "gemini-test",
+                    offset_seconds=0,
+                    duration_seconds=360,
+                    is_last_segment=True,
+                    quality_events=quality_events,
+                )
+
+        self.assertEqual(transcript, expected_second_pass)
+        self.assertEqual([call.args[1] for call in split_mock.call_args_list], [300, 180])
         repair_mock.assert_not_called()
         self.assertTrue(any(
             "第 2 次穩定重跑" in str(event.get("issue") or "")
@@ -10542,7 +16057,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "暫不產出會議結論"):
             tasks._raise_if_delivery_blocked_by_segment_quality(unsafe)
 
-    def test_single_cached_transcript_with_confirmed_gap_is_retranscribed(self):
+    def test_single_cached_transcript_with_confirmed_gap_uses_distinct_recovery_model(self):
         from backend import tasks
 
         summary_payload = {
@@ -10564,33 +16079,403 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             audio_path = root / "short.webm"
             audio_path.write_bytes(b"audio")
             old_transcript = "[00:00] **[發言者 A]**：快取遺漏後半段。"
-            fresh_transcript = "[00:00] **[發言者 A]**：重新轉錄的完整內容。"
-            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
-                 mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
-                 mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
-                 mock.patch.object(tasks, "_split_audio_to_segments", return_value=[tasks.AudioSlice(audio_path, 0, 300)]), \
-                 mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=old_transcript), \
-                 mock.patch.object(
-                     tasks,
-                     "_segment_transcript_current_quality_issues",
-                     return_value=["音訊含持續語音但時間戳在 00:00 至 05:00 間隔 300 秒"],
-                 ), \
-                 mock.patch.object(tasks, "_transcribe_segment", return_value=fresh_transcript) as transcribe_mock, \
-                 mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete"), \
-                 mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
-                 mock.patch.object(tasks, "update_job_status"), \
-                 mock.patch.object(tasks, "save_meeting"):
+            primary_transcript = "[00:00] **[發言者 A]**：主模型仍遺漏後半段。"
+            recovered_transcript = "[00:00] **[發言者 A]**：第二模型補回完整內容。"
+            gap_issue = "音訊含持續語音但時間戳在 00:00 至 05:00 間隔 300 秒"
+
+            def current_issues(transcript, *_args, **_kwargs):
+                return [gap_issue] if transcript in {old_transcript, primary_transcript} else []
+
+            def transcribe(*args, **_kwargs):
+                return primary_transcript if args[5] == "gemini-primary" else recovered_transcript
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}))
+                stack.enter_context(mock.patch.object(tasks.genai, "Client", side_effect=FakeClient))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_RECOVERY_MODEL", "gemini-recovery"))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_prepare_audio_for_transcription",
+                    return_value=(audio_path, {}),
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_split_audio_to_segments",
+                    return_value=[tasks.AudioSlice(audio_path, 0, 300)],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_load_segment_transcript_cache",
+                    return_value=old_transcript,
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_speech_backed_timestamp_gap_quality_ranges",
+                    return_value=[],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_speech_backed_transcript_local_density_quality_ranges",
+                    return_value=[],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_transcript_repetition_repair_ranges",
+                    return_value=[],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_segment_transcript_current_quality_issues",
+                    side_effect=current_issues,
+                ))
+                transcribe_mock = stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_transcribe_segment_with_recovery",
+                    side_effect=transcribe,
+                ))
+                save_cache = stack.enter_context(mock.patch.object(tasks, "_save_segment_transcript_cache"))
+                stack.enter_context(mock.patch.object(tasks, "is_job_cancel_requested", return_value=False))
+                stack.enter_context(mock.patch.object(tasks, "update_job_status"))
+                save_meeting_mock = stack.enter_context(mock.patch.object(tasks, "save_meeting"))
                 output_path = tasks.process_audio_task(
                     job_id="single-cache-gap-job",
                     audio_path=audio_path,
                     output_dir=root / "output",
+                    model="gemini-primary",
                 )
 
             self.assertIsNotNone(output_path)
-            transcribe_mock.assert_called_once()
+            self.assertEqual(
+                [call.args[5] for call in transcribe_mock.call_args_list],
+                ["gemini-primary", "gemini-recovery"],
+            )
+            self.assertEqual(save_cache.call_args.kwargs["context"]["model"], "gemini-recovery")
             output_text = output_path.read_text(encoding="utf-8")
-            self.assertIn("重新轉錄的完整內容", output_text)
+            self.assertIn("第二模型補回完整內容", output_text)
             self.assertNotIn("快取遺漏後半段", output_text)
+            report = save_meeting_mock.call_args.kwargs["quality_report"]
+            self.assertIn(
+                "品質補救已改用 gemini-recovery 並通過音訊比對",
+                report["segments"][0]["recovery_notes"],
+            )
+
+    def test_single_primary_candidate_is_saved_before_second_model_failure(self):
+        from backend import tasks
+
+        class FakeClient:
+            pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "short.webm"
+            audio_path.write_bytes(b"audio")
+            primary = "[00:00] **[發言者 A]**：主模型已完成大部分內容。"
+            issue = "音訊含持續語音但時間戳在 02:00 至 03:05 間隔 65 秒"
+
+            def current_issues(transcript, *_args, **_kwargs):
+                return [issue] if transcript == primary else []
+
+            def transcribe(*args, **_kwargs):
+                if args[5] == "gemini-primary":
+                    return primary
+                raise RuntimeError("503 Service Unavailable")
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}))
+                stack.enter_context(mock.patch.object(tasks.genai, "Client", return_value=FakeClient()))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_RECOVERY_MODEL", "gemini-recovery"))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_prepare_audio_for_transcription",
+                    return_value=(audio_path, {}),
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_split_audio_to_segments",
+                    return_value=[tasks.AudioSlice(audio_path, 0, 300)],
+                ))
+                stack.enter_context(mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_speech_backed_timestamp_gap_quality_ranges",
+                    return_value=[],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_speech_backed_transcript_local_density_quality_ranges",
+                    return_value=[],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_transcript_repetition_repair_ranges",
+                    return_value=[],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_segment_transcript_current_quality_issues",
+                    side_effect=current_issues,
+                ))
+                transcribe_mock = stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_transcribe_segment_with_recovery",
+                    side_effect=transcribe,
+                ))
+                summary_mock = stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_generate_meeting_content_from_transcript",
+                ))
+                stack.enter_context(mock.patch.object(tasks, "is_job_cancel_requested", return_value=False))
+                stack.enter_context(mock.patch.object(tasks, "update_job_status"))
+                save_meeting_mock = stack.enter_context(mock.patch.object(tasks, "save_meeting"))
+                output_path = tasks.process_audio_task(
+                    job_id="single-primary-candidate-before-fallback-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                    model="gemini-primary",
+                )
+
+            context = tasks._segment_recovery_plan_context(
+                model="gemini-primary",
+                source_audio_sha256=tasks._sha256_file(audio_path),
+                segment_index=0,
+                total_segments=1,
+                start_seconds=0,
+                end_seconds=300,
+            )
+            saved_draft = tasks._load_segment_recovery_draft(root / "output", context)
+
+            self.assertIsNone(output_path)
+            self.assertEqual([call.args[5] for call in transcribe_mock.call_args_list], [
+                "gemini-primary",
+                "gemini-recovery",
+            ])
+            self.assertEqual(saved_draft["transcript"], primary)
+            self.assertEqual(saved_draft["issues"], [issue])
+            self.assertEqual(saved_draft["model"], "gemini-primary")
+            summary_mock.assert_not_called()
+            save_meeting_mock.assert_not_called()
+
+    def test_single_segment_unresolved_candidate_is_saved_before_delivery_gate(self):
+        from backend import tasks
+
+        class FakeClient:
+            pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audio_path = root / "short.webm"
+            audio_path.write_bytes(b"audio")
+            primary = "[00:00] **[發言者 A]**：主模型仍有大範圍漏字。"
+            recovery = "[00:00] **[發言者 A]**：補救模型只剩短缺口。"
+            primary_issues = [
+                "音訊含持續語音但時間戳在 00:00 至 04:00 間隔 240 秒",
+                "音訊語音密度高但逐字稿文字量偏低（10 字／120 秒有效語音，0.1 字/秒）",
+            ]
+            recovery_issues = [
+                "音訊含持續語音但時間戳在 02:00 至 03:05 間隔 65 秒",
+            ]
+
+            def current_issues(transcript, *_args, **_kwargs):
+                if transcript == primary:
+                    return primary_issues
+                if transcript == recovery:
+                    return recovery_issues
+                return []
+
+            def transcribe(*args, **_kwargs):
+                return primary if args[5] == "gemini-primary" else recovery
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}))
+                stack.enter_context(mock.patch.object(tasks.genai, "Client", return_value=FakeClient()))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_RECOVERY_MODEL", "gemini-recovery"))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_prepare_audio_for_transcription",
+                    return_value=(audio_path, {}),
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_split_audio_to_segments",
+                    return_value=[tasks.AudioSlice(audio_path, 0, 300)],
+                ))
+                stack.enter_context(mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_speech_backed_timestamp_gap_quality_ranges",
+                    return_value=[],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_speech_backed_transcript_local_density_quality_ranges",
+                    return_value=[],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_transcript_repetition_repair_ranges",
+                    return_value=[],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_segment_transcript_current_quality_issues",
+                    side_effect=current_issues,
+                ))
+                transcribe_mock = stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_transcribe_segment_with_recovery",
+                    side_effect=transcribe,
+                ))
+                stack.enter_context(mock.patch.object(tasks, "_generate_meeting_content_from_transcript"))
+                stack.enter_context(mock.patch.object(tasks, "is_job_cancel_requested", return_value=False))
+                stack.enter_context(mock.patch.object(tasks, "update_job_status"))
+                save_meeting_mock = stack.enter_context(mock.patch.object(tasks, "save_meeting"))
+                output_path = tasks.process_audio_task(
+                    job_id="single-partial-recovery-draft-job",
+                    audio_path=audio_path,
+                    output_dir=root / "output",
+                    model="gemini-primary",
+                )
+
+            context = tasks._segment_recovery_plan_context(
+                model="gemini-primary",
+                source_audio_sha256=tasks._sha256_file(audio_path),
+                segment_index=0,
+                total_segments=1,
+                start_seconds=0,
+                end_seconds=300,
+            )
+            saved_draft = tasks._load_segment_recovery_draft(root / "output", context)
+
+            self.assertIsNone(output_path)
+            self.assertEqual(
+                [call.args[5] for call in transcribe_mock.call_args_list],
+                ["gemini-primary", "gemini-recovery"],
+            )
+            self.assertEqual(saved_draft["transcript"], recovery)
+            self.assertEqual(saved_draft["issues"], recovery_issues)
+            self.assertEqual(saved_draft["model"], "gemini-recovery")
+            save_meeting_mock.assert_not_called()
+
+    def test_single_segment_rerun_repairs_saved_candidate_before_full_retranscription(self):
+        from backend import tasks
+
+        summary_payload = {
+            "discussion_summary": [{
+                "topic": "單段接續補救",
+                "summary": "已完成最後短缺口修補",
+                "evidence_timecodes": ["00:00"],
+            }],
+            "final_decisions": [],
+            "action_items": [],
+        }
+
+        class FakeModels:
+            def generate_content(self, **_kwargs):
+                return type("Response", (), {
+                    "text": json.dumps(summary_payload, ensure_ascii=False),
+                })()
+
+        class FakeClient:
+            def __init__(self, *_args, **_kwargs):
+                self.models = FakeModels()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "output"
+            audio_path = root / "short.webm"
+            audio_path.write_bytes(b"audio")
+            candidate = "[00:00] **[發言者 A]**：已補救大部分內容，仍有短缺口。"
+            repaired = "[00:00] **[發言者 A]**：已補救大部分內容與最後短缺口。"
+            issue = "音訊含持續語音但時間戳在 02:00 至 03:05 間隔 65 秒"
+            context = tasks._segment_recovery_plan_context(
+                model="gemini-primary",
+                source_audio_sha256=tasks._sha256_file(audio_path),
+                segment_index=0,
+                total_segments=1,
+                start_seconds=0,
+                end_seconds=300,
+            )
+            tasks._save_segment_recovery_plan(
+                output_dir,
+                context,
+                chunk_seconds=60,
+                reason="previous single partial candidate",
+                candidate_transcript=candidate,
+                candidate_issues=[issue],
+                candidate_model="gemini-recovery",
+            )
+
+            def current_issues(transcript, *_args, **_kwargs):
+                return [issue] if transcript == candidate else []
+
+            def gap_ranges(_path, transcript, **_kwargs):
+                if transcript == candidate:
+                    return [{"start_seconds": 120, "end_seconds": 185, "issue": issue}]
+                return []
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}))
+                stack.enter_context(mock.patch.object(tasks.genai, "Client", side_effect=FakeClient))
+                stack.enter_context(mock.patch.object(tasks, "TRANSCRIPTION_MODEL", "gemini-primary"))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_prepare_audio_for_transcription",
+                    return_value=(audio_path, {}),
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_split_audio_to_segments",
+                    return_value=[tasks.AudioSlice(audio_path, 0, 300)],
+                ))
+                stack.enter_context(mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_speech_backed_timestamp_gap_quality_ranges",
+                    side_effect=gap_ranges,
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_speech_backed_transcript_local_density_quality_ranges",
+                    return_value=[],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_transcript_repetition_repair_ranges",
+                    return_value=[],
+                ))
+                stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_segment_transcript_current_quality_issues",
+                    side_effect=current_issues,
+                ))
+                repair_mock = stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_repair_existing_segment_timestamp_gaps",
+                    return_value=(repaired, ["局部修補完成"]),
+                ))
+                transcribe_mock = stack.enter_context(mock.patch.object(
+                    tasks,
+                    "_transcribe_segment_with_recovery",
+                ))
+                stack.enter_context(mock.patch.object(tasks, "is_job_cancel_requested", return_value=False))
+                stack.enter_context(mock.patch.object(tasks, "update_job_status"))
+                stack.enter_context(mock.patch.object(tasks, "save_meeting"))
+                output_path = tasks.process_audio_task(
+                    job_id="single-resume-partial-draft-job",
+                    audio_path=audio_path,
+                    output_dir=output_dir,
+                    model="gemini-primary",
+                    force_segment_indices=[0],
+                )
+
+            self.assertIsNotNone(output_path)
+            self.assertIn(repaired, output_path.read_text(encoding="utf-8"))
+            self.assertEqual(repair_mock.call_args.args[2], candidate)
+            transcribe_mock.assert_not_called()
+            self.assertIsNone(tasks._load_segment_recovery_draft(output_dir, context))
 
     def test_confirmed_segment_gap_blocks_summary_and_database_write(self):
         from backend import tasks
@@ -10613,6 +16498,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                 "[10:00] **[發言者 B]**：第二段仍有漏轉。",
             ])
             with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                 mock.patch.object(tasks, "TRANSCRIPTION_RECOVERY_MODEL", tasks.GEMINI_MODEL), \
                  mock.patch.object(tasks.genai, "Client", side_effect=FakeClient), \
                  mock.patch.object(tasks, "_prepare_audio_for_transcription", return_value=(audio_path, {})), \
                  mock.patch.object(tasks, "_split_audio_to_segments", return_value=slices), \
@@ -10666,6 +16552,50 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(ranges[0]["start_seconds"], 1860)
         self.assertEqual(ranges[0]["end_seconds"], 1890)
         self.assertTrue(any("重複轉錄" in issue for issue in ranges[0]["issues"]))
+
+    def test_short_cycle_duplicate_detects_interrupted_repeated_statement(self):
+        from backend import tasks
+
+        transcript = "\n".join([
+            "[20:00] **[發言者 A]**：那如果我們在緊縮一級的情況下，它是不合格的，那分數就歸零。",
+            "[20:07] **[發言者 A]**：那如果我們在緊縮一級的情況下，它還是允收，那分數就加二。",
+            "[20:13] **[發言者 A]**：那如果我們在緊縮一級的情況下，它是不合格的，那分數就歸零。",
+            "[20:18] **[發言者 A]**：那如果我們在緊縮一級的情況下，它是不合格的，那分數就歸零。",
+            "[20:28] **[發言者 B]**：接著討論下一項。",
+        ])
+
+        issue = tasks._segment_repetition_quality_issue(transcript)
+        ranges = tasks._transcript_repetition_repair_ranges(
+            transcript,
+            expected_start_seconds=1200,
+            expected_end_seconds=1800,
+        )
+
+        self.assertIn("短週期近似重複轉錄幻覺", issue)
+        self.assertEqual(len(ranges), 1)
+        self.assertEqual(ranges[0]["start_seconds"], 1200)
+        self.assertEqual(ranges[0]["end_seconds"], 1228)
+        self.assertTrue(any(
+            "短週期近似重複轉錄幻覺" in item
+            for item in ranges[0]["issues"]
+        ))
+
+    def test_short_cycle_duplicate_ignores_cross_speaker_or_numeric_discussion(self):
+        from backend import tasks
+
+        cross_speaker = "\n".join([
+            "[20:00] **[發言者 A]**：請在本週完成佳世達規格確認並回覆結果。",
+            "[20:07] **[發言者 B]**：請在本週完成佳世達規格確認並回覆結果。",
+            "[20:13] **[發言者 C]**：請在本週完成佳世達規格確認並回覆結果。",
+        ])
+        numeric_discussion = "\n".join([
+            "[20:00] **[發言者 A]**：第一項的上限是 120，下限是 90。",
+            "[20:07] **[發言者 A]**：第二項的上限是 130，下限是 95。",
+            "[20:13] **[發言者 A]**：第三項的上限是 140，下限是 100。",
+        ])
+
+        self.assertIsNone(tasks._short_cycle_duplicate_quality_issue(cross_speaker))
+        self.assertIsNone(tasks._short_cycle_duplicate_quality_issue(numeric_discussion))
 
     def test_repetition_repair_ranges_pinpoint_contiguous_numeric_loop(self):
         from backend import tasks
@@ -10764,6 +16694,42 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertNotIn("音訊重疊會出現在下一段", deduplicated)
         self.assertIn("這是下一段的新內容", deduplicated)
         self.assertEqual(note, "已移除與前段重疊的 1 個重複發言區塊（邊界 10:00）")
+
+    def test_overlap_deduplication_removes_same_speaker_leading_filler_variant(self):
+        from backend import tasks
+
+        previous = (
+            "[09:59] **[發言者 A]**：好那如果沒有的話待會就先到這裡。"
+        )
+        current = (
+            "[10:00] **[發言者 A]**：那如果沒有的話待會就先到這裡。\n\n"
+            "[10:06] **[發言者 B]**：下一段的新內容。"
+        )
+
+        deduplicated, note = tasks._deduplicate_adjacent_segment_overlap(
+            previous,
+            current,
+            boundary_seconds=600,
+        )
+
+        self.assertNotIn("那如果沒有的話待會就先到這裡", deduplicated)
+        self.assertIn("下一段的新內容", deduplicated)
+        self.assertIn("僅差開頭口語詞", note)
+
+    def test_overlap_deduplication_keeps_leading_filler_variant_from_another_speaker(self):
+        from backend import tasks
+
+        previous = "[09:59] **[發言者 A]**：那如果沒有的話待會就先到這裡。"
+        current = "[10:00] **[發言者 B]**：好那如果沒有的話待會就先到這裡。"
+
+        deduplicated, note = tasks._deduplicate_adjacent_segment_overlap(
+            previous,
+            current,
+            boundary_seconds=600,
+        )
+
+        self.assertEqual(deduplicated, current)
+        self.assertIsNone(note)
 
     def test_overlap_deduplication_keeps_nonidentical_continuation(self):
         from backend import tasks
@@ -11526,6 +17492,12 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(revisions[0]["source"], "manual_transcript_edit")
         self.assertEqual(revisions[0]["content"], original)
 
+    def test_revision_history_labels_system_term_normalization(self):
+        html = Path("static/index.html").read_text(encoding="utf-8")
+
+        self.assertIn("revision.source === 'transcript_normalization'", html)
+        self.assertIn("術語正規化前版本", html)
+
     def test_summary_only_processing_never_calls_transcription_model(self):
         from backend import tasks
 
@@ -11556,7 +17528,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             source_path = root / "existing.md"
             source_path.write_text(
                 "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
-                "[00:00] **[發言者 A]**：保留這份完整逐字稿。\n",
+                "[00:00] **[發言者 A]**：保留這份氣械與政府正 20% 的完整逐字稿。\n",
                 encoding="utf-8",
             )
             output_dir = root / "output"
@@ -11581,7 +17553,8 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             transcribe.assert_not_called()
             output_text = output_path.read_text(encoding="utf-8")
             self.assertIn("已沿用逐字稿", output_text)
-            self.assertIn("保留這份完整逐字稿", output_text)
+            self.assertIn("保留這份器械與振幅正 20% 的完整逐字稿", output_text)
+            self.assertNotIn("氣械與政府正 20%", output_text)
 
     def test_summary_only_processing_blocks_audio_confirmed_transcript_gap(self):
         from backend import tasks
@@ -11799,9 +17772,12 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("定位第 ${target.index + 1} 段", html)
         self.assertIn("quality-rerun-summary-button", html)
         self.assertIn("quality-rerun-summary-high-quality-button", html)
+        self.assertIn("quality-rerun-review-segments-button", html)
+        self.assertIn("quality-rerun-review-segments-action-button", html)
         self.assertIn("quality-rerun-full-button", html)
         self.assertIn('id="quality-rerun-summary-button" class="quality-action" aria-describedby="detail-status" aria-busy="false"', html)
         self.assertIn('id="quality-rerun-summary-high-quality-button" class="quality-action" aria-describedby="detail-status" aria-busy="false"', html)
+        self.assertIn('id="quality-rerun-review-segments-action-button" class="quality-action" aria-describedby="detail-status" aria-busy="false"', html)
         self.assertIn('id="quality-rerun-full-button" class="quality-action" aria-describedby="detail-status" aria-busy="false"', html)
         self.assertIn("function renderCardQuality", html)
         self.assertIn("function cardWarningTypeLabel", html)
@@ -11988,7 +17964,14 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn('id="rerun-segment-${index}" type="button" aria-describedby="detail-status" aria-busy="false"', html)
         self.assertIn('title="優先局部補救第 ${index + 1} 段已偵測的時間缺口或重複轉錄異常；無法安全合併才重跑整段"', html)
         self.assertIn("const segmentIndices = normalizeSegmentIndices(segmentIndex);", html)
-        self.assertIn("JSON.stringify({ segments: segmentIndices, custom_vocabulary: customVocabulary })", html)
+        self.assertIn("full_segment_rerun: fullSegmentRerun", html)
+        self.assertIn("完整穩定重跑${segmentTextLabel}", html)
+        self.assertIn("id=\"full-rerun-segment-${index}\"", html)
+        self.assertIn("full-rerun-segment-${index}', true", html)
+        self.assertIn("id=\"${fullRerunButtonId}\"", html)
+        self.assertIn("完整重跑第 ${index + 1} 段", html)
+        self.assertIn("segment.status === 'full_rerun'", html)
+        self.assertIn("完整重跑", html)
         self.assertIn('id="rerun-summary-button"', html)
         self.assertIn("summary_only: true, high_quality: highQuality", html)
         self.assertIn('id="rerun-summary-high-quality-button"', html)
@@ -13764,6 +19747,10 @@ const sandbox = {{}};
 vm.runInNewContext(code + `
 result = renderQualityActions({{ id: 44 }}, ['偵測到可能的爆音；原始媒體檔已保留，重要內容請抽查。']);
 legacyTranscript = renderQualityActions({{ id: 45 }}, ['需複核分段：第 2 段 10:00-20:00：疑似連續重複轉錄']);
+problemSegments = renderQualityActions({{
+  id: 46,
+  quality_review_rerunnable_segments: [6, 3, 6]
+}}, ['逐字稿品質警示：問題位置：第 4 段 30:00-40:00、第 7 段 60:00-70:00。']);
 `, sandbox);
 if (!sandbox.result.includes('quality-check-source-media-button')) {{
   console.error(sandbox.result);
@@ -13780,6 +19767,14 @@ if (sandbox.result.includes('rerunMeeting')) {{
 if (!sandbox.legacyTranscript.includes('quality-rerun-full-button')) {{
   console.error(sandbox.legacyTranscript);
   process.exit(7);
+}}
+if (!sandbox.problemSegments.includes('quality-rerun-review-segments-action-button')) {{
+  console.error(sandbox.problemSegments);
+  process.exit(8);
+}}
+if (!sandbox.problemSegments.includes("rerunMeeting(46, [3,6], false, false, 'quality-rerun-review-segments-action-button')")) {{
+  console.error(sandbox.problemSegments);
+  process.exit(9);
 }}
 console.log('recording_quality_action_ok');
 """

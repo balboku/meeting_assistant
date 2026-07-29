@@ -61,6 +61,8 @@ cp .env.example .env
 ```
 GEMINI_API_KEY=your_gemini_api_key_here
 TRANSCRIPTION_MODEL=gemini-3.1-flash-lite
+TRANSCRIPTION_RECOVERY_MODEL=gemini-3.5-flash
+GENAI_HTTP_TIMEOUT_SECONDS=180
 SUMMARY_MODEL=gemma-4-31b-it
 SUMMARY_FALLBACK_MODEL=gemini-3.1-flash-lite
 SUMMARY_VERIFIER_MODEL=gemini-3.5-flash
@@ -94,19 +96,63 @@ DB_BACKUP_KEEP=5
 JOB_RETENTION_DAYS=30
 JOB_QUEUE_MAX_ATTEMPTS=5
 JOB_QUEUE_TRANSIENT_RETRY_DELAY_SECONDS=30
+JOB_QUEUE_TRANSIENT_RETRY_BACKOFF_MULTIPLIER=2
+JOB_QUEUE_TRANSIENT_RETRY_MAX_DELAY_SECONDS=300
 AUDIO_PREPROCESSING=1
 AUDIO_MIN_DBFS=-55
 AUDIO_NORMALIZE_BELOW_DBFS=-28
+AUDIO_INITIAL_SPEECH_FOCUS=1
+AUDIO_INITIAL_SPEECH_FOCUS_MIN_ACTIVE_RATIO=0.55
+AUDIO_INITIAL_SPEECH_FOCUS_CLIP_DBFS=-0.1
+SPEECH_FOCUS_LOSSLESS_UPLOAD=1
 SEGMENT_SILENCE_WINDOW_SECONDS=45
 SEGMENT_OVERLAP_SECONDS=2
+TRANSCRIPT_INTRA_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS=15
+INITIAL_DENSE_AUDIO_SPLIT=1
+INITIAL_DENSE_AUDIO_SPLIT_MINUTES=5
+INITIAL_CLIPPED_DENSE_AUDIO_SPLIT=1
+INITIAL_CLIPPED_DENSE_AUDIO_SPLIT_MINUTES=3
+INITIAL_CLIPPED_DENSE_AUDIO_CLIP_DBFS=-0.1
+INITIAL_DENSE_AUDIO_MIN_ACTIVE_SECONDS=180
+INITIAL_DENSE_AUDIO_MIN_ACTIVE_RATIO=0.55
+INITIAL_DENSE_AUDIO_SEGMENT_OVERLAP_SECONDS=5
+SEGMENT_OVERLAP_LEADING_FILLER_DEDUPLICATION=1
+RECOVERY_SUBSEGMENT_OVERLAP_SECONDS=2
+RECOVERY_SHORT_SUBSEGMENT_MAX_SECONDS=30
+RECOVERY_SHORT_SUBSEGMENT_OVERLAP_SECONDS=4
 TRANSCRIPT_SPEECH_GAP_VALIDATION=1
-TRANSCRIPT_SPEECH_GAP_SECONDS=75
+TRANSCRIPT_SPEECH_GAP_SECONDS=60
 TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_SECONDS=12
 TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO=0.25
+TRANSCRIPT_SPEECH_DENSITY_VALIDATION=1
+TRANSCRIPT_SPEECH_DENSITY_MIN_ACTIVE_SECONDS=90
+TRANSCRIPT_SPEECH_DENSITY_SHORT_SEGMENT_MIN_ACTIVE_SECONDS=15
+TRANSCRIPT_SPEECH_DENSITY_MIN_ACTIVE_RATIO=0.45
+TRANSCRIPT_SPEECH_DENSITY_MIN_CHARS_PER_ACTIVE_SECOND=2.5
+TRANSCRIPT_LOCAL_DENSITY_VALIDATION=1
+TRANSCRIPT_LOCAL_DENSITY_WINDOW_SECONDS=90
+TRANSCRIPT_LOCAL_DENSITY_STEP_SECONDS=45
+TRANSCRIPT_LOCAL_DENSITY_MIN_ACTIVE_SECONDS=35
+TRANSCRIPT_LOCAL_DENSITY_MIN_ACTIVE_RATIO=0.45
+TRANSCRIPT_LOCAL_DENSITY_MIN_CHARS_PER_ACTIVE_SECOND=1.5
+TRANSCRIPT_LOCAL_DENSITY_MAX_RANGES=4
 TRANSCRIPT_SPEECH_GAP_MAX_RANGES=6
 TRANSCRIPT_REPAIR_CONTEXT_SECONDS=6
 TRANSCRIPT_REPAIR_DIRECT_SPLIT_SECONDS=180
 TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS=180
+TRANSCRIPT_MULTI_GAP_RECOVERY_SECONDS=120
+TRANSCRIPT_LOCAL_REPAIR_RECOVERY_SECONDS=60
+TRANSCRIPT_SEVERE_LOCAL_DENSITY_MAX_CHARS_PER_ACTIVE_SECOND=0.5
+TRANSCRIPT_SEVERE_LOCAL_DENSITY_RECOVERY_SECONDS=30
+TRANSCRIPT_CRITICAL_RERUN_ESCALATION=1
+TRANSCRIPT_CRITICAL_SUSTAINED_GAP_SECONDS=60
+TRANSCRIPT_CRITICAL_REPETITION_MIN_TURNS=8
+TRANSCRIPT_SHORT_CYCLE_DUPLICATE_VALIDATION=1
+TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MIN_CHARS=20
+TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MIN_SIMILARITY=0.88
+TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MIN_TURNS=3
+TRANSCRIPT_SHORT_CYCLE_DUPLICATE_WINDOW_TURNS=4
+TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MAX_SPAN_SECONDS=30
 ```
 
 安全預設：`/line-webhook` 可公開給 LINE 呼叫；Web 介面與管理 API 允許本機與信任本機網段存取。若要透過 ngrok 或其他公開網路管理，請使用 `APP_API_KEY`。
@@ -181,6 +227,11 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | 變數 | 預設值 | 用途 |
 |------|--------|------|
 | `TRANSCRIPTION_MODEL` | `gemini-3.1-flash-lite` | 音訊轉逐字稿使用的模型。若未設定，會沿用舊的 `GEMINI_MODEL` 或預設值。 |
+| `TRANSCRIPTION_RECOVERY_MODEL` | `gemini-3.5-flash` | 第一轉錄模型完成局部/小段補救後仍有時間缺口、文字密度偏低、數列延伸或長重複迴圈等可驗證異常時，或遇到 `429`、`5xx`、逾時等暫時性上游錯誤時使用的備援轉錄模型。若此模型留下較佳但未完成的候選稿，後續佇列重試會以目前設定的同一補救模型接續剩餘區間，不會重做已證實較弱的主模型嘗試。設為與 `TRANSCRIPTION_MODEL` 相同即可停用。 |
+| `TRANSCRIPTION_FULL_RERUN_MODEL` | `gemini-3.5-flash` | 手動「完整重跑」指定分段時使用的模型；按整份「重跑」時，也只會套用到既有品質報告已用音訊證實有重大異常的時間區間。即使新版依語音密度重新切段，系統也會按原始媒體時間重新定位，不會誤用舊分段編號；原本的音訊品質證據會隨佇列保留。預設沿用補救模型，通常以約 60 秒小段轉錄；若本機已確認文字量極端偏低，會直接縮為 30 秒，避免先進行一次已知較不穩定的嘗試。設為與 `TRANSCRIPTION_MODEL` 相同可維持原模型。 |
+| `TRANSCRIPT_SEMANTIC_REVIEW_MODEL` | `gemma-4-31b-it` | 手動「語意檢核」使用的文字模型；只標示高度明確的語句失真時間位置，不會改寫逐字稿、摘要或待辦事項。 |
+| `TRANSCRIPT_SEMANTIC_REVIEW_FALLBACK_MODEL` | `gemini-3.5-flash` | 語意檢核主模型暫時失敗時使用的備援模型；只在主模型失敗時呼叫。 |
+| `GENAI_HTTP_TIMEOUT_SECONDS` | `180` | Gemini 單次 HTTP 請求的逾時秒數，涵蓋上傳、轉錄與摘要；逾時後交由既有任務佇列重試，避免工作永久停在處理中。 |
 | `SUMMARY_MODEL` | `gemma-4-31b-it` | 根據完整逐字稿產生討論摘要、最終決議與待辦事項的文字模型。 |
 | `SUMMARY_FALLBACK_MODEL` | `gemini-3.1-flash-lite` | 摘要模型失敗時自動改用的備援模型，避免整體任務直接失敗。 |
 | `SUMMARY_VERIFIER_MODEL` | `gemini-3.5-flash` | 使用「高品質重整」時，第二階段的證據查核模型。 |
@@ -202,21 +253,84 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS` | `90` | 手動移除原始錄音/錄影後，`backups/source_media_deleted/` 備份保留天數；設為 `0` 可停用自動清理。 |
 | `JOB_RETENTION_DAYS` | `30` | 已完成、失敗或取消任務的保留天數。 |
 | `JOB_QUEUE_MAX_ATTEMPTS` | `5` | 自動處理任務最多嘗試次數；用於降低 503/暫時性服務忙碌造成的失敗。 |
-| `JOB_QUEUE_TRANSIENT_RETRY_DELAY_SECONDS` | `30` | 偵測到 503、429、UNAVAILABLE、timeout 等暫時性錯誤時，下一次重試前等待秒數。 |
-| `AUDIO_PREPROCESSING` | `1` | 啟用免費本機音訊預檢；音量過低時建立正規化暫存副本，原始媒體檔不變。 |
+| `JOB_QUEUE_TRANSIENT_RETRY_DELAY_SECONDS` | `30` | 偵測到 503、429、UNAVAILABLE、timeout 等暫時性錯誤時，第一次重試前等待秒數。 |
+| `JOB_QUEUE_TRANSIENT_RETRY_BACKOFF_MULTIPLIER` | `2` | 暫時性錯誤每次重試的等待倍數；預設依序為 30、60、120 秒。 |
+| `JOB_QUEUE_TRANSIENT_RETRY_MAX_DELAY_SECONDS` | `300` | 暫時性錯誤單次等待的上限秒數，避免等待時間無限增加。 |
+| `AUDIO_PREPROCESSING` | `1` | 啟用免費本機音訊預檢；音量過低時建立正規化暫存副本，爆音高密度來源可建立語音聚焦暫存副本，原始媒體檔不變。 |
 | `AUDIO_MIN_DBFS` | `-55` | 低於此平均音量時視為幾乎沒有可辨識聲音，避免浪費模型額度。 |
 | `AUDIO_NORMALIZE_BELOW_DBFS` | `-28` | 平均音量低於此值才進行本機音量正規化。 |
+| `AUDIO_INITIAL_SPEECH_FOCUS` | `1` | 首次轉錄若同時有爆音、高語音密度與大動態範圍，建立本機 24 kHz 無損 FLAC 語音聚焦副本；一般錄音與原始媒體檔不受影響。 |
+| `AUDIO_INITIAL_SPEECH_FOCUS_MIN_ACTIVE_RATIO` | `0.55` | 首次語音聚焦所需的最小有效語音比例；可避免在大多安靜或間歇性錄音上做不必要的有損暫存處理。 |
+| `AUDIO_INITIAL_SPEECH_FOCUS_CLIP_DBFS` | `-0.1` | 首次轉錄只有峰值接近 `0 dBFS` 的實際爆音才建立語音聚焦副本，避免峰值正常的錄音被不必要地重編碼；已確認異常後的補救仍採用較寬的 `RECOVERY_SPEECH_FOCUS_CLIP_DBFS`。 |
+| `SPEECH_FOCUS_LOSSLESS_UPLOAD` | `1` | 將系統建立的語音聚焦 FLAC 分段及其後續重跑／局部補救子段直接無損上傳，避免在品質補救前再次壓成 MP3；僅影響已判定高風險的爆音或品質異常分段，一般錄音維持較小 MP3。 |
+| `SPEECH_FOCUS_TIMEOUT_SECONDS` | `180` | 本機 `ffmpeg` 建立語音聚焦 FLAC 的最長處理秒數（90-600）；較長錄音不會因舊版 90 秒時限而過早回退原音。 |
+| `RECOVERY_SPEECH_FOCUS` | `1` | 僅在已被品質檢核標示、需要重跑的分段中建立 24 kHz 無損 FLAC 語音聚焦暫存副本；避免重複 MP3 壓縮與 `loudnorm` 的過度升頻，原始媒體檔不變。 |
+| `RECOVERY_SPEECH_FOCUS_CLIP_DBFS` | `-0.5` | 補救時偵測到接近滿刻度峰值才考慮語音聚焦處理。 |
+| `RECOVERY_SPEECH_FOCUS_MIN_DYNAMIC_RANGE_DB` | `14` | 峰值與平均音量至少相差此值才套用動態壓縮，避免不必要處理正常錄音。 |
+| `RECOVERY_SPEECH_FOCUS_TARGET_LUFS` | `-19` | 語音聚焦副本的目標響度；搭配壓縮後拉回安靜發言，僅影響問題分段的暫存副本。 |
+| `RECOVERY_SPEECH_FOCUS_TRUE_PEAK_DB` | `-1.5` | 語音聚焦副本的真實峰值上限，避免壓縮後再度爆音。 |
 | `SEGMENT_SILENCE_WINDOW_SECONDS` | `45` | 在目標切點前後搜尋靜音位置的秒數。 |
-| `SEGMENT_OVERLAP_SECONDS` | `2` | 相鄰分段保留的短暫重疊秒數；切點優先位於靜音處。 |
-| `SEGMENT_OVERLAP_DEDUPLICATION_WINDOW_SECONDS` | `15` | 輸出組裝時，在切點前後檢查精確重複發言的秒數；只移除下一段開頭、完全相同且有時間戳的重疊內容。 |
+| `SEGMENT_OVERLAP_SECONDS` | `2` | 相鄰分段保留的短暫重疊秒數（0-10 秒）；切點優先位於靜音處。 |
+| `TRANSCRIPT_CROSS_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS` | `10` | 跨分段時間戳允許的最大倒退秒數；超過時會阻擋摘要，避免時間軸錯序的逐字稿產出會議結論。 |
+| `TRANSCRIPT_INTRA_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS` | `15` | 單一分段內時間碼可容許的小幅倒退秒數；超過時會完整重轉該段，避免段內發言順序錯置。 |
+| `SPEAKER_BOUNDARY_ANCHOR` | `1` | 將相鄰分段的重疊音訊與上一段交界的匿名標籤對齊，避免每段重新從發言者 A 編號；不會傳送先前逐字稿內容。 |
+| `SPEAKER_BOUNDARY_ANCHOR_MAX_AGE_SECONDS` | `45` | 尋找交界前最近可用發言者標籤的最大秒數；找不到時不強行指定。 |
+| `INITIAL_DENSE_AUDIO_SPLIT` | `1` | 新上傳的長音檔若有效語音非常密集，首次轉錄即改用較短切段；指定分段重跑及僅重整摘要不套用，避免既有分段編號錯位。 |
+| `INITIAL_DENSE_AUDIO_SPLIT_MINUTES` | `5` | 高語音密度來源首次轉錄的目標切段分鐘數。 |
+| `INITIAL_VERY_DENSE_AUDIO_SPLIT_MINUTES` | `3` | 只有有效語音比例達極高門檻的區塊，首次轉錄會再縮短至此目標；可降低長時間連續討論時提早停寫的風險。 |
+| `INITIAL_CLIPPED_DENSE_AUDIO_SPLIT` | `1` | 高語音密度且接近滿刻度峰值的來源，首次轉錄即採較短分段；不影響一般錄音或指定分段重跑。 |
+| `INITIAL_CLIPPED_DENSE_AUDIO_SPLIT_MINUTES` | `3` | 爆音高密度來源首次轉錄的目標切段分鐘數。 |
+| `INITIAL_CLIPPED_DENSE_AUDIO_CLIP_DBFS` | `-0.1` | 視為接近滿刻度實際爆音的峰值門檻；必須同時達到高語音密度才會觸發較短切段。峰值正常的高密度錄音維持較平衡的切段，減少不必要的交界。 |
+| `INITIAL_DENSE_AUDIO_MIN_ACTIVE_SECONDS` | `180` | 觸發首次較短切段前，來源至少要有的有效語音秒數。 |
+| `INITIAL_DENSE_AUDIO_MIN_ACTIVE_RATIO` | `0.55` | 觸發首次較短切段前，有效語音佔整段來源的最小比例。 |
+| `INITIAL_VERY_DENSE_AUDIO_MIN_ACTIVE_RATIO` | `0.65` | 觸發極高密度短切段前，有效語音佔區塊的最小比例；不可低於一般高密度門檻。 |
+| `INITIAL_DENSE_AUDIO_PER_SEGMENT_SPLIT` | `1` | 整場未達密集門檻時，仍逐一檢查各標準分段；只縮短連續發言的區塊，避免混合型會議的少數高密度討論段首次漏轉。 |
+| `INITIAL_DENSE_AUDIO_SEGMENT_OVERLAP_SECONDS` | `5` | 僅對首次轉錄已因高密度而縮短的來源或局部討論段，額外保留交界語音上下文（0-10 秒）；一般錄音仍使用 `SEGMENT_OVERLAP_SECONDS`，降低連續句子切點的漏字風險。 |
+| `RECOVERY_SUBSEGMENT_OVERLAP_SECONDS` | `2` | 補救小段在交界前後保留的上下文秒數；合併時僅移除完全相同的重疊發言。 |
+| `RECOVERY_SHORT_SUBSEGMENT_MAX_SECONDS` | `30` | 小於或等於此秒數的補救小段，改用較長的交界語境；只作用於極端缺字等短小段重跑。 |
+| `RECOVERY_SHORT_SUBSEGMENT_OVERLAP_SECONDS` | `4` | 短補救小段在交界前後保留的語音上下文秒數，降低連續發言剛好落在切點時的漏字風險。 |
+| `SEGMENT_OVERLAP_DEDUPLICATION_WINDOW_SECONDS` | `15` | 輸出組裝時，在切點前後檢查下一段開頭是否與前段重疊；只移除有時間戳且可安全判定為重複的內容。 |
+| `SEGMENT_OVERLAP_LEADING_FILLER_DEDUPLICATION` | `1` | 同一發言者若交界內容只差「好／那／對」等開頭口語詞，仍可安全去重；不同發言者或有新增內容的延續句會保留。 |
 | `TRANSCRIPT_SPEECH_GAP_VALIDATION` | `1` | 啟用本機語音活動比對；只有長時間未標時間戳的區間仍有說話聲時，才觸發小段補救。 |
-| `TRANSCRIPT_SPEECH_GAP_SECONDS` | `75` | 兩個時間戳相隔超過此秒數時，才進行本機語音活動確認。 |
+| `TRANSCRIPT_SPEECH_GAP_SECONDS` | `60` | 兩個時間戳相隔超過此秒數時，才進行本機語音活動確認；保留 15 秒容差，以符合逐字稿每 20-45 秒應標示時間戳的規則。 |
 | `TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_SECONDS` | `12` | 缺口內至少需有多少秒非靜音音訊，才視為可能漏字。 |
 | `TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO` | `0.25` | 缺口內非靜音音訊比例門檻；避免把真正的會議靜默誤判成漏字。 |
+| `TRANSCRIPT_SPEECH_DENSITY_VALIDATION` | `1` | 啟用音訊與逐字稿文字量交叉檢查；僅在高語音活動段落的文字量異常偏低時觸發重跑。 |
+| `TRANSCRIPT_SPEECH_DENSITY_MIN_ACTIVE_SECONDS` | `90` | 至少需有此秒數的有效語音，才進行文字密度判定。 |
+| `TRANSCRIPT_SPEECH_DENSITY_SHORT_SEGMENT_MIN_ACTIVE_SECONDS` | `15` | 補救用短分段依長度下修文字密度的有效語音門檻時，仍保留的最小秒數；系統同時以分段長度上限約束門檻，避免 30 秒小段因不可能達到 45 秒語音而漏檢。 |
+| `TRANSCRIPT_SPEECH_DENSITY_MIN_ACTIVE_RATIO` | `0.45` | 有效語音需佔分段的最小比例，避免背景雜訊造成誤判。 |
+| `TRANSCRIPT_SPEECH_DENSITY_MIN_CHARS_PER_ACTIVE_SECOND` | `2.5` | 低於此每秒有效語音文字量時，視為逐字稿可能被過度省略。 |
+| `TRANSCRIPT_LOCAL_DENSITY_VALIDATION` | `1` | 啟用滑動視窗檢查，找出整段總字數正常、但局部持續有聲卻被漏掉的內容。 |
+| `TRANSCRIPT_LOCAL_DENSITY_WINDOW_SECONDS` | `90` | 局部文字密度的檢查視窗秒數。 |
+| `TRANSCRIPT_LOCAL_DENSITY_STEP_SECONDS` | `45` | 相鄰檢查視窗的起點間距；較小可更精準定位，但會增加本機運算。 |
+| `TRANSCRIPT_LOCAL_DENSITY_MIN_ACTIVE_SECONDS` | `35` | 視窗內至少需有此秒數有效語音，才進行局部文字量比對。 |
+| `TRANSCRIPT_LOCAL_DENSITY_MIN_ACTIVE_RATIO` | `0.45` | 視窗內有效語音的最低比例，避免把正常靜默誤判為漏字。 |
+| `TRANSCRIPT_LOCAL_DENSITY_MIN_CHARS_PER_ACTIVE_SECOND` | `1.5` | 低於此每秒有效語音文字量時，標出精確問題時間並交由局部補救。 |
+| `TRANSCRIPT_LOCAL_DENSITY_MAX_RANGES` | `4` | 單一分段最多保留多少個局部漏字區間；過多時改採穩定小段重跑。 |
 | `TRANSCRIPT_SPEECH_GAP_MAX_RANGES` | `6` | 每個分段最多保留幾個已由本機音訊活動確認的漏字位置；超過局部補救上限時改用穩定小段重跑。 |
 | `TRANSCRIPT_REPAIR_CONTEXT_SECONDS` | `6` | 局部補救時額外提供缺口前後語境，改善句子與發言者承接；系統只合併缺口附近的時間戳內容。 |
+| `TRANSCRIPT_REPAIR_COALESCE_GAP_SECONDS` | `20` | 已確認的漏字窗口若相隔不超過此秒數，視為同一個討論承接來合併補救，保留其他已驗證的逐字稿。設為 `0` 可關閉。 |
 | `TRANSCRIPT_REPAIR_DIRECT_SPLIT_SECONDS` | `180` | 局部補救音檔達此秒數時，略過整段嘗試並直接切成小段轉錄，降低長缺口再次截斷或重複轉錄的機率。 |
 | `TRANSCRIPT_CONFIRMED_GAP_RECOVERY_SECONDS` | `180` | 已確認有語音卻漏字或有多個可定位異常時，穩定重跑使用的目標切段秒數。 |
+| `TRANSCRIPT_MULTI_GAP_RECOVERY_SECONDS` | `120` | 多個已確認的時間缺口超過局部補救上限，或指定重跑時音訊已證實逐字稿文字量偏低時，直接使用的更短重跑切段秒數；若已精確定位局部漏字、重複或數列異常，系統會優先採用 60 秒局部補救粒度。 |
+| `TRANSCRIPT_LOCAL_REPAIR_RECOVERY_SECONDS` | `60` | 已定位的局部漏字、重複或數列異常，在局部補救時優先採用的較短切段秒數；可降低再次省略或按規律續寫的機率。 |
+| `TRANSCRIPT_SEVERE_LOCAL_DENSITY_MAX_CHARS_PER_ACTIVE_SECOND` | `0.5` | 僅在本機已確認局部有效語音充足時，判定「文字量極端偏低」的文字密度上限（字/有效語音秒）。 |
+| `TRANSCRIPT_SEVERE_LOCAL_DENSITY_RECOVERY_SECONDS` | `30` | 觸發極端局部缺字時的重跑小段秒數；只作用於已被音訊驗證的問題段，正常轉錄與一般局部漏字不受影響。 |
+| `TRANSCRIPT_CRITICAL_RERUN_ESCALATION` | `1` | 首次轉錄或使用者選擇重跑時，若品質檢核或本機音訊已證實該段有極端缺字、多個持續語音缺口、數列延伸或長重複迴圈，系統會略過局部拼接，直接改用較短小段完整轉錄；指定分段重跑與整份重跑都會改用完整重跑模型。一般單點缺口與短暫重複仍沿用局部補救。 |
+| `TRANSCRIPT_CRITICAL_SUSTAINED_GAP_SECONDS` | `60` | 本機已確認缺口內持續有語音時，單一缺口達此秒數便直接完整替換該分段，避免把近一分鐘漏轉的舊文字拼接回新稿；低於門檻的單點缺口仍優先局部補救。 |
+| `TRANSCRIPT_CRITICAL_REPETITION_MIN_TURNS` | `8` | 同一句或同型句連續重複達此數量時，使用者選擇重跑會完整替換整段；低於門檻者保留已驗證文字，僅補救異常時間範圍。最小值為 `5`。 |
+| `TRANSCRIPT_FRAGMENTATION_VALIDATION` | `1` | 偵測同一發言者長時間輸出大量短而懸空的片段。命中時會以 60 秒小段交由獨立轉錄模型補救一次；若仍無改善則保留精確警示，不會無限重跑或阻斷交付。 |
+| `TRANSCRIPT_FRAGMENTATION_MAX_TURN_CHARS` | `12` | 納入語句碎裂偵測的最長發言字數。 |
+| `TRANSCRIPT_FRAGMENTATION_MIN_SHORT_TURNS` | `10` | 同一檢視窗內至少需要多少短發言才會標示。 |
+| `TRANSCRIPT_FRAGMENTATION_MIN_DOMINANT_SPEAKER_RATIO` | `0.80` | 短發言需由同一位發言者占的最低比例，可排除多人快速問答。 |
+| `TRANSCRIPT_FRAGMENTATION_MIN_DANGLING_SHORT_RATIO` | `0.40` | 短發言中以「都、因為、是」等疑似未完成語句結尾的最低比例，可排除內容完整的短答。 |
+| `TRANSCRIPT_FRAGMENTATION_WINDOW_SECONDS` | `120` | 進行語句碎裂偵測的時間視窗；另需跨越至少 `60` 秒。 |
+| `TRANSCRIPT_SHORT_CYCLE_DUPLICATE_VALIDATION` | `1` | 偵測短時間內的近似長句重複；命中時僅補救可定位時間範圍。 |
+| `TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MIN_CHARS` | `20` | 納入短週期近似重複比對的最短發言長度。 |
+| `TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MIN_SIMILARITY` | `0.88` | 兩句文字需達到的相似度門檻。 |
+| `TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MIN_TURNS` | `3` | 至少幾句高度相似才視為異常。 |
+| `TRANSCRIPT_SHORT_CYCLE_DUPLICATE_WINDOW_TURNS` | `4` | 搜尋異常時採用的相鄰發言視窗大小。 |
+| `TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MAX_SPAN_SECONDS` | `30` | 同一近似重複視窗允許的最大時間跨度。 |
 | `MEETING_ASSISTANT_TRUST_LOCAL_NETWORK` | `1` | 是否允許同 Wi-Fi / 信任本機網段直接開 Web 介面；設為 `0` 時手機網址會改用 `api_key`。 |
 | `MEETING_AUTH_ENABLED` | `0` | 未來帳號/角色權限開關。預設停用；停用時不會要求登入，也不會改變現有 API key / 同網段行為。 |
 | `MEETING_AUTH_USER_HEADER` | `X-Meeting-User` | 未來啟用帳號權限時讀取使用者身分的 HTTP header；角色必須先寫在 `app_users`。 |
@@ -436,7 +550,10 @@ LINE Bot 完成處理時只會推送前三個區塊與完整檔案位置，避�
 
 ### Web 品質修訂工具
 
-- 每個逐字稿分段都有「重跑」按鈕。若品質檢查已定位到原始媒體仍有聲音的時間缺口，或可由連續時間戳安全界定的重複轉錄/數列延伸異常，會先只轉錄該異常區間並安全合併回既有逐字稿；局部補救無法通過檢查時才改用整段穩定重跑。其餘分段直接沿用原會議紀錄中的逐字稿；舊紀錄也會從分段標題自動重建按鈕。
+- 每個逐字稿分段都有「重跑本段」與「完整重跑」按鈕。「重跑本段」若品質檢查已定位到原始媒體仍有聲音的時間缺口，或可由連續時間戳安全界定的重複轉錄/數列延伸異常，會先只轉錄該異常區間並安全合併回既有逐字稿；局部補救無法通過檢查時才改用整段穩定重跑。「完整重跑」則明確略過舊稿與局部補救，以約 60 秒小段、設定的完整重跑模型重新轉錄指定段，適合時間戳完整但文字內容已失真的情況；它只做一輪轉錄，不會額外重複呼叫模型。按整份「重跑」也會從原始媒體重新轉錄所有新切段而不使用快取；若舊品質報告已有重大問題，會按問題的實際時間範圍對應新切段後自動改用完整重跑模型。舊紀錄缺少有效起訖時間時，系統會保守地將整份改用完整重跑策略，不會猜測舊索引。「完整逐字稿品質檢核」同時會套用不需模型的術語正規化；只會寫入確實有差異的紀錄，並保留「術語正規化前版本」以便復原。
+- 無論是單段短音檔或多段長音檔，若主模型與第二模型都尚未完全通過音訊品質檢查，系統只會保存可驗證問題較少的「補救候選稿」到受原始檔 SHA-256、分段範圍、模型與詞彙表綁定的續跑資料；它不會產生摘要或覆蓋既有會議。下次同一段重跑時，系統會以該候選稿為底，只補救剩餘問題範圍。
+- 轉錄遇到無法確認、且無法組成合理句子的字詞時，會保守標記為 `[聽不清]`，不會依前後文硬補。品質報告會列出含此標記的分段；摘要與第二階段查核不會把這些未確認內容推論為決議、負責人、期限或待辦事項。
+- 「語意檢核」是手動背景任務，使用文字模型只找出高度明確的語句失真，並把分段與時間位置標為需回聽。它不讀取或改寫音檔、不改寫逐字稿與摘要、不自動重跑；判定結果僅供選擇「完整重跑」前複核。主模型失敗時才會使用一次備援模型。
 - 「重新檢核」只用既有逐字稿與原始媒體檔重新計算問題分段，不呼叫 Gemini、不產生新會議。已成功補救的舊歷程會保留為註記，只有目前仍有音訊佐證的缺口或仍存在的轉錄異常會列為可重跑問題。
 - 搜尋列的「全部檢核」會以背景任務逐份更新所有會議的品質報告；同樣不呼叫 Gemini、不產生新會議。完成後可用「只看需複核」直接查看已定位的問題分段並指定重跑。
 - 「重整摘要」沿用完整逐字稿，只重新產生摘要、決議與待辦，不會再次轉錄音訊。

@@ -3832,7 +3832,7 @@ function segmentIndicesDisplayText(segmentIndex = null, limit = 5) {
     : `第 ${labels.join('、')} 段`;
 }
 
-async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQuality = false, triggerButtonId = null) {
+async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQuality = false, triggerButtonId = null, fullSegmentRerun = false) {
   if (!id) return;
   const segmentIndices = normalizeSegmentIndices(segmentIndex);
   const segmentTextLabel = segmentIndicesDisplayText(segmentIndices);
@@ -3840,6 +3840,8 @@ async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQu
     ? '以高品質模式重整摘要（會增加一次模型查核）'
     : summaryOnly
     ? '只重整摘要、決議與待辦（沿用既有逐字稿）'
+    : fullSegmentRerun && segmentIndices.length
+    ? `完整穩定重跑${segmentTextLabel}（略過局部補救，使用完整重跑模型與約 60 秒小段轉錄）`
     : segmentIndices.length > 1
     ? `優先局部補救 ${segmentIndices.length} 個問題分段（${segmentTextLabel}）`
     : segmentIndices.length === 1
@@ -3889,7 +3891,11 @@ async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQu
       options.body = JSON.stringify({ summary_only: true, high_quality: highQuality });
     } else if (segmentIndices.length) {
       options.headers = { 'Content-Type': 'application/json' };
-      options.body = JSON.stringify({ segments: segmentIndices, custom_vocabulary: customVocabulary });
+      options.body = JSON.stringify({
+        segments: segmentIndices,
+        full_segment_rerun: fullSegmentRerun,
+        custom_vocabulary: customVocabulary,
+      });
     } else if (customVocabulary !== null) {
       options.headers = { 'Content-Type': 'application/json' };
       options.body = JSON.stringify({ custom_vocabulary: customVocabulary });
@@ -3899,8 +3905,9 @@ async function rerunMeeting(id, segmentIndex = null, summaryOnly = false, highQu
     const data = await res.json();
     await loadJobs();
     await loadMetrics();
-    setDetailStatus(`已建立重跑任務：${data.job_id}`);
-    alert(`已建立重跑任務：${data.job_id}\n可在「任務狀態」查看進度。`);
+    const taskMessage = data.message || `已建立重跑任務：${data.job_id}`;
+    setDetailStatus(taskMessage);
+    alert(`${taskMessage}\n任務：${data.job_id}\n可在「任務狀態」查看進度。`);
   } catch (err) {
     setDetailStatus(`重跑失敗：${err.message}`);
     alert(`重跑失敗：${err.message}`);
@@ -3950,6 +3957,40 @@ async function recheckMeetingTranscriptQuality(id, triggerButtonId = 'quality-re
   }
 }
 
+async function reviewMeetingTranscriptSemantics(id, triggerButtonId = 'quality-semantic-review-button') {
+  if (!id) return;
+  if (!confirm('確定要進行逐字稿語意品質檢核嗎？\n這會使用 AI 標示高度明確的語句失真位置，方便回聽或完整重跑；不會改寫逐字稿、摘要或待辦事項。')) {
+    return;
+  }
+
+  const button = document.getElementById(triggerButtonId);
+  const originalButtonText = button?.innerHTML;
+  setDetailStatus('正在建立逐字稿語意品質檢核任務...');
+  if (button) {
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.innerHTML = '<span class="loading-spinner"></span> 檢核中';
+  }
+
+  try {
+    const res = await fetch(`${API}/meetings/${id}/quality/semantic-review`, { method: 'POST' });
+    if (!res.ok) throw new Error(await apiErrorMessage(res));
+    const data = await res.json();
+    await Promise.all([loadJobs(), loadMetrics()]);
+    setDetailStatus(data.message || `已建立語意品質檢核任務：${data.job_id}`);
+    alert(`已建立語意品質檢核任務：${data.job_id}\n完成後會標示需回聽的分段與時間位置，不會改寫原會議紀錄。`);
+  } catch (err) {
+    setDetailStatus(`語意品質檢核建立失敗：${err.message}`);
+    alert(`語意品質檢核建立失敗：${err.message}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.setAttribute('aria-busy', 'false');
+      button.innerHTML = originalButtonText;
+    }
+  }
+}
+
 async function recheckAllMeetingTranscriptQuality() {
   if (!confirm('確定要重新檢核全部會議逐字稿品質嗎？\n這會逐份檢查既有逐字稿與保留原始媒體檔的時間缺口、重複轉錄與數列延伸，不會呼叫 AI，也不會建立新會議。')) {
     return;
@@ -3990,8 +4031,20 @@ function renderQualityActions(meeting, warnings = []) {
   const hasSummaryWarning = warnings.some(warning => String(warning).startsWith('摘要品質警示'));
   const hasTranscriptWarning = warnings.some(isTranscriptQualityWarning);
   const hasRecordingWarning = warnings.some(isRecordingQualityWarning);
+  const rerunnableSegmentIndices = [...new Set(
+    (Array.isArray(meeting?.quality_review_rerunnable_segments)
+      ? meeting.quality_review_rerunnable_segments
+      : [])
+      .map(index => Number(index))
+      .filter(index => Number.isInteger(index) && index >= 0),
+  )].sort((left, right) => left - right);
+  const rerunnableLabels = rerunnableSegmentIndices.map(index => index + 1);
+  const rerunnableSegmentText = rerunnableLabels.length > 5
+    ? `第 ${rerunnableLabels.slice(0, 5).join('、')} 等 ${rerunnableLabels.length} 段`
+    : rerunnableLabels.length ? `第 ${rerunnableLabels.join('、')} 段` : '';
   const actions = [
     `<button id="quality-recheck-button" class="quality-action" aria-describedby="detail-status" aria-busy="false" title="用既有逐字稿與原始媒體檔重新檢核，不會呼叫 AI" onclick="recheckMeetingTranscriptQuality(${meetingId})">⌁ 重新檢核</button>`,
+    `<button id="quality-semantic-review-button" class="quality-action" aria-describedby="detail-status" aria-busy="false" title="使用 AI 標示高度明確的語句失真位置；不會改寫逐字稿" onclick="reviewMeetingTranscriptSemantics(${meetingId})">⌁ 語意檢核</button>`,
   ];
   if (hasSummaryWarning) {
     actions.push(
@@ -4002,6 +4055,11 @@ function renderQualityActions(meeting, warnings = []) {
     );
   }
   if (hasTranscriptWarning) {
+    if (rerunnableSegmentIndices.length) {
+      actions.push(
+        `<button id="quality-rerun-review-segments-action-button" class="quality-action" aria-describedby="detail-status" aria-busy="false" title="只重跑已被音訊品質檢核標示的${rerunnableSegmentText}；其餘分段沿用既有逐字稿" onclick="rerunMeeting(${meetingId}, [${rerunnableSegmentIndices.join(',')}], false, false, 'quality-rerun-review-segments-action-button')">↻ 重跑問題段</button>`
+      );
+    }
     actions.push(
       `<button id="quality-rerun-full-button" class="quality-action" aria-describedby="detail-status" aria-busy="false" title="重新轉錄並重新產生完整會議紀錄" onclick="rerunMeeting(${meetingId}, null, false, false, 'quality-rerun-full-button')">🔁 完整重跑</button>`
     );
@@ -4398,9 +4456,13 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
       const canCueSource = hasFocusSeconds;
       const focusArgs = hasFocusSeconds ? `${index}, ${focusSeconds}` : `${index}`;
       const rerunButtonId = `quality-rerun-review-segment-${index}`;
+      const fullRerunButtonId = `quality-full-rerun-review-segment-${index}`;
       const reviewSegmentTitle = `第 ${index + 1} 段${plainTimeText}：${allIssueText}`;
       const rerunControl = canRerunSegment
         ? `<button id="${rerunButtonId}" type="button" class="quality-review-segment-rerun" aria-describedby="detail-status" aria-busy="false" title="優先局部補救第 ${index + 1} 段已偵測的時間缺口或重複轉錄異常；無法安全合併才重跑整段" aria-label="重跑第 ${index + 1} 段" onclick="rerunMeeting(${Number(meetingId) || 0}, ${index}, false, false, '${rerunButtonId}')">↻ 重跑本段</button>`
+        : '';
+      const fullRerunControl = canRerunSegment
+        ? `<button id="${fullRerunButtonId}" type="button" class="quality-review-segment-rerun" aria-describedby="detail-status" aria-busy="false" title="完整重新轉錄第 ${index + 1} 段，略過局部補救並使用完整重跑模型與較短小段；其餘分段仍沿用既有逐字稿" aria-label="完整重跑第 ${index + 1} 段" onclick="rerunMeeting(${Number(meetingId) || 0}, ${index}, false, false, '${fullRerunButtonId}', true)">⟳ 完整重跑</button>`
         : '';
       if (!canFocusSegment) {
         if (canCueSource) {
@@ -4410,7 +4472,7 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
           return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment media-only" aria-describedby="detail-status" title="${escapeHtml(mediaOnlyTitle)}" onclick="focusQualitySegment(${focusArgs})">
             <span class="quality-review-segment-label">第 ${index + 1} 段</span>
             <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
-          </button>${rerunControl}</span>`;
+          </button>${rerunControl}${fullRerunControl}</span>`;
         }
         const unavailableTitle = canRerunSegment
           ? `此紀錄可局部補救本段，但缺少可定位的分段控制；${reviewSegmentTitle}`
@@ -4418,12 +4480,12 @@ function renderQualityReviewSegments(meetingId, reviewSegments = [], knownSegmen
         return `<span class="quality-review-segment-wrap"><span class="quality-review-segment unavailable" aria-disabled="true" title="${escapeHtml(unavailableTitle)}">
           <span class="quality-review-segment-label">第 ${index + 1} 段</span>
           <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
-        </span>${rerunControl}</span>`;
+        </span>${rerunControl}${fullRerunControl}</span>`;
       }
       return `<span class="quality-review-segment-wrap"><button type="button" class="quality-review-segment" aria-describedby="detail-status" title="${escapeHtml(`定位第 ${index + 1} 段問題逐字稿與原始檔時間；${reviewSegmentTitle}`)}" onclick="focusQualitySegment(${focusArgs})">
         <span class="quality-review-segment-label">第 ${index + 1} 段</span>
         <span class="quality-review-segment-issue">${escapeHtml(timeText + issueText)}</span>
-      </button>${rerunControl}</span>`;
+      </button>${rerunControl}${fullRerunControl}</span>`;
     })
     .filter(Boolean)
     .join('');
@@ -4767,6 +4829,8 @@ function renderQualityReport(meeting) {
       ? '沿用快取'
       : segment.status === 'rerun'
       ? '已重跑'
+      : segment.status === 'full_rerun'
+      ? '完整重跑'
       : segment.status === 'recovered'
       ? '已補救轉錄'
       : segment.status === 'kept_existing_after_rerun'
@@ -4791,11 +4855,26 @@ function renderQualityReport(meeting) {
       ${issueBadges}
       ${recoveryNote}
       <button id="rerun-segment-${index}" type="button" aria-describedby="detail-status" aria-busy="false" title="優先局部補救第 ${index + 1} 段已偵測的時間缺口或重複轉錄異常；無法安全合併才重跑整段" aria-label="重跑第 ${index + 1} 段" onclick="rerunMeeting(${meeting.id}, ${index})">↻ 重跑本段</button>
+      <button id="full-rerun-segment-${index}" type="button" aria-describedby="detail-status" aria-busy="false" title="完整重新轉錄第 ${index + 1} 段，略過局部補救並使用完整重跑模型與較短小段；其餘分段仍沿用既有逐字稿" aria-label="完整重跑第 ${index + 1} 段" onclick="rerunMeeting(${meeting.id}, ${index}, false, false, 'full-rerun-segment-${index}', true)">⟳ 完整重跑</button>
     </div>`;
   }).join('');
   const scoreText = report.score === null || report.score === undefined
     ? '品質未評分'
     : `品質 ${escapeHtml(report.score)} / 100`;
+  const semanticReview = report.semantic_review && typeof report.semantic_review === 'object'
+    ? report.semantic_review
+    : null;
+  const semanticFindingCount = Array.isArray(semanticReview?.findings)
+    ? semanticReview.findings.length
+    : 0;
+  const semanticReviewText = semanticReview?.status === 'completed'
+    ? `語意檢核 ${semanticFindingCount} 項`
+    : semanticReview?.status === 'stale'
+    ? '語意檢核待更新'
+    : '';
+  const semanticReviewTitle = semanticReviewText
+    ? `模型：${String(semanticReview?.model || '未記錄')}；${String(semanticReview?.reviewed_at || '')}`
+    : '';
   return `<div class="quality-strip">
     <div class="quality-summary">
       <span class="quality-score">${scoreText}</span>
@@ -4803,6 +4882,7 @@ function renderQualityReport(meeting) {
       <span class="meta-chip">${escapeHtml((report.speaker_labels || []).length)} 個發言者標籤</span>
       <span class="meta-chip">${escapeHtml(report.timestamp_count || 0)} 個時間戳</span>
       ${recheckText ? `<span class="meta-chip" title="${escapeHtml(recheckTitle)}">${escapeHtml(recheckText)}</span>` : ''}
+      ${semanticReviewText ? `<span class="meta-chip" title="${escapeHtml(semanticReviewTitle)}">${escapeHtml(semanticReviewText)}</span>` : ''}
     </div>
     ${reviewSegments}
     ${warnings}
@@ -5485,12 +5565,16 @@ async function openRevisionHistory() {
       return;
     }
     list.innerHTML = revisions.map((revision, index) => {
-      const label = revision.source === 'manual_transcript_edit'
+      const isTranscriptEdit = revision.source === 'manual_transcript_edit';
+      const isTranscriptNormalization = revision.source === 'transcript_normalization';
+      const label = isTranscriptEdit
         ? '修改逐字稿前版本'
+        : isTranscriptNormalization
+        ? '術語正規化前版本'
         : index === revisions.length - 1
         ? 'AI 原稿'
         : '修改前版本';
-      const preview = revision.source === 'manual_transcript_edit'
+      const preview = isTranscriptEdit || isTranscriptNormalization
         ? extractTranscriptMarkdown(revision.content)
         : extractEditableSummaryMarkdown(revision.content);
       return `<details class="revision-item" role="listitem">
@@ -6329,6 +6413,9 @@ let recPreviewQualityTimer = null;
 let recPreviewBlankSamples = 0;
 let recPreviewQualityWarning = false;
 let recPreviewQualityWarningSeen = false;
+let recAudioClipSamples = 0;
+let recAudioClippingWarningSeen = false;
+let recAudioTimeData = null;
 let audioCtx = null;
 let analyser = null;
 let activeRecordingJobId = null;
@@ -6421,6 +6508,7 @@ function resetRecorder() {
   recScreenMicCaptured = false;
   recMicAudioTracks = [];
   recMicMuted = false;
+  clearRecordingAudioQualityState();
   recSeconds = 0;
   recTimerEl.textContent = '00:00';
   recStatusEl.textContent = '準備就緒，按下開始錄製';
@@ -6516,9 +6604,19 @@ function stopStreamTracks(stream) {
 }
 
 function recordingLiveStatusText() {
-  return recMode === 'screen'
+  const clippingSuffix = recAudioClippingWarningSeen
+    ? '；音訊峰值接近飽和，建議降低麥克風輸入'
+    : '';
+  const baseStatus = recMode === 'screen'
     ? screenRecordingStatusText()
     : `🔴 ${recordingModeLabel()}中...`;
+  return `${baseStatus}${clippingSuffix}`;
+}
+
+function clearRecordingAudioQualityState() {
+  recAudioClipSamples = 0;
+  recAudioClippingWarningSeen = false;
+  recAudioTimeData = null;
 }
 
 function clearRecordingPreviewQualityMonitor(resetSeen = true) {
@@ -6565,6 +6663,36 @@ function recordingPreviewQualityWarningText(mode = activeRecordingMode || recMod
   if (!recPreviewQualityWarningSeen) return '';
   const sourceLabel = mode === 'screen' ? '螢幕、視窗或分頁' : '攝影機';
   return `錄影品質警示：錄製期間預覽畫面曾連續幾乎全黑，請確認是否選到正確${sourceLabel}；此原始錄影請人工抽查。`;
+}
+
+function recordingAudioClippingWarningText() {
+  if (!recAudioClippingWarningSeen) return '';
+  return '音訊品質警示：錄製期間偵測到音訊峰值持續接近飽和，可能影響語音辨識；此原始媒體檔請人工抽查。';
+}
+
+function recordingQualityWarningText(mode = activeRecordingMode || recMode) {
+  return [
+    recordingPreviewQualityWarningText(mode),
+    recordingAudioClippingWarningText(),
+  ].filter(Boolean).join('\n');
+}
+
+function checkRecordingAudioClipping() {
+  if (!mediaRecorder || mediaRecorder.state !== 'recording' || !analyser) return;
+  if (!recAudioTimeData || recAudioTimeData.length !== analyser.fftSize) {
+    recAudioTimeData = new Float32Array(analyser.fftSize);
+  }
+  analyser.getFloatTimeDomainData(recAudioTimeData);
+  const clipped = recAudioTimeData.some(sample => Math.abs(sample) >= 0.985);
+  recAudioClipSamples = clipped
+    ? Math.min(24, recAudioClipSamples + 1)
+    : Math.max(0, recAudioClipSamples - 2);
+  if (recAudioClipSamples >= 12 && !recAudioClippingWarningSeen) {
+    recAudioClippingWarningSeen = true;
+    if (!recPreviewQualityWarning) {
+      recStatusEl.textContent = recordingLiveStatusText();
+    }
+  }
 }
 
 function startRecordingPreviewQualityMonitor() {
@@ -6765,7 +6893,7 @@ function startAudioVisualizer(stream) {
 
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 256;
+  analyser.fftSize = 1024;
   const source = audioCtx.createMediaStreamSource(new MediaStream(audioTracks));
   source.connect(analyser);
   drawVisualizer();
@@ -6778,7 +6906,9 @@ async function createRecordingStream() {
     sampleRate: profile.audio_sample_rate,
     echoCancellation: true,
     noiseSuppression: true,
-    autoGainControl: true,
+    // Preserve the input's natural level. The backend can safely normalize a
+    // quiet recording, while browser AGC can permanently clip a loud speaker.
+    autoGainControl: false,
   };
   if (recMode === 'screen') {
     if (!navigator.mediaDevices.getDisplayMedia) {
@@ -6849,6 +6979,7 @@ async function createRecordingStream() {
 async function startRecording() {
   try {
     recordedChunks = [];
+    clearRecordingAudioQualityState();
     activeRecordingMode = recMode;
     activeRecordingProfileId = getRecordingProfileId();
     setRecordingConfigurationLocked(true);
@@ -6938,7 +7069,7 @@ async function onRecordingStopped() {
   const completedMode = activeRecordingMode || recMode;
   const completedProfileId = activeRecordingProfileId || getRecordingProfileId();
   const completedModeLabel = recordingModeLabel(completedMode);
-  const recordingWarning = recordingPreviewQualityWarningText(completedMode);
+  const recordingWarning = recordingQualityWarningText(completedMode);
   // 決定副檔名
   const ext = (completedMode === 'video' || completedMode === 'screen') ? 'webm' : 'webm';
   const title = document.getElementById('rec-title').value.trim()
@@ -7093,6 +7224,7 @@ function drawVisualizer() {
   function draw() {
     recAnimFrame = requestAnimationFrame(draw);
     analyser.getByteFrequencyData(dataArray);
+    checkRecordingAudioClipping();
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     const barWidth = (canvas.width / bufferLength) * 2.5;

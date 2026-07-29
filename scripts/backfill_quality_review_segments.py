@@ -97,6 +97,49 @@ def _merge_review_segments(
     return [merged[index] for index in sorted(merged)]
 
 
+def _has_current_structured_local_recheck(quality_report: dict[str, Any]) -> bool:
+    recheck = quality_report.get("recheck")
+    if not isinstance(recheck, dict):
+        return False
+    try:
+        version = int(recheck.get("version") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        version >= database.TRANSCRIPT_QUALITY_RECHECK_VERSION
+        and str(recheck.get("method") or "").strip()
+        in {"local_transcript_only", "local_transcript_and_audio"}
+    )
+
+
+def _canonical_review_segments_from_segments(quality_report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Use current local recheck segment issues as the only canonical source."""
+    canonical: list[dict[str, Any]] = []
+    for position, segment in enumerate(quality_report.get("segments") or []):
+        if not isinstance(segment, dict):
+            continue
+        index = _segment_index(segment)
+        if index is None:
+            index = position
+        issues = list(dict.fromkeys(
+            str(issue).strip()
+            for issue in segment.get("issues") or []
+            if str(issue or "").strip()
+        ))
+        if not issues:
+            continue
+        item: dict[str, Any] = {
+            "index": index,
+            "label": database.review_segment_label(index),
+            "issues": issues,
+        }
+        for key in ("start_seconds", "end_seconds", "status"):
+            if key in segment:
+                item[key] = segment[key]
+        canonical.append(item)
+    return canonical
+
+
 def _warning_lines(value: Any) -> list[str]:
     if isinstance(value, list):
         source = value
@@ -131,25 +174,38 @@ def _build_updated_report(row: sqlite3.Row) -> tuple[dict[str, Any] | None, dict
     record = dict(row)
     quality_report = _load_json(record.get("quality_report_json"))
     full_content = _read_markdown(record.get("output_path"))
+    current_recheck_segments = (
+        _canonical_review_segments_from_segments(quality_report)
+        if _has_current_structured_local_recheck(quality_report)
+        else []
+    )
+    preview_report = quality_report
+    if current_recheck_segments:
+        preview_report = deepcopy(quality_report)
+        preview_report["review_segments"] = current_recheck_segments
     derived = database.apply_quality_preview_fields(
         {
             **record,
-            "quality_report": quality_report if quality_report else None,
+            "quality_report": preview_report if preview_report else None,
             "full_content": full_content,
         },
-        quality_report=quality_report if quality_report else None,
+        quality_report=preview_report if preview_report else None,
     )
     derived_segments = [
         segment
         for segment in derived.get("quality_review_segment_details") or []
         if isinstance(segment, dict) and _segment_index(segment) is not None
     ]
-    if not derived_segments:
+    if not derived_segments and not current_recheck_segments:
         return None, derived
 
     updated_report = deepcopy(quality_report)
     existing_segments = updated_report.get("review_segments") if isinstance(updated_report, dict) else []
-    merged_segments = _merge_review_segments(existing_segments, derived_segments)
+    merged_segments = (
+        current_recheck_segments
+        if current_recheck_segments
+        else _merge_review_segments(existing_segments, derived_segments)
+    )
     if not merged_segments:
         return None, derived
 
@@ -158,7 +214,11 @@ def _build_updated_report(row: sqlite3.Row) -> tuple[dict[str, Any] | None, dict
 
     warnings = _warning_lines(updated_report.get("warnings"))
     derived_summary = str(derived.get("quality_review_segment_summary") or "").strip()
-    if derived_summary and not _has_located_review_warning(warnings):
+    if (
+        derived_summary
+        and not current_recheck_segments
+        and not _has_located_review_warning(warnings)
+    ):
         warnings.insert(0, _located_review_warning(derived_summary))
         changed = True
     if warnings != _warning_lines(updated_report.get("warnings")):

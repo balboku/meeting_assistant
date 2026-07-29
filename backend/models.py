@@ -340,6 +340,10 @@ class MeetingDetail(MeetingRecord):
 class MeetingRerunRequest(BaseModel):
     """Optionally rerun only selected zero-based transcript segments."""
     segments: Optional[list[int]] = Field(None, description="要強制重跑的零起算分段索引；省略代表全部重跑")
+    full_segment_rerun: bool = Field(
+        False,
+        description="指定分段時，略過局部補救並以較短小段完整重新轉錄該分段",
+    )
     custom_vocabulary: Optional[str] = Field(None, description="本次重跑優先辨識的專有詞彙，使用逗號或換行分隔")
     summary_only: bool = Field(False, description="沿用既有逐字稿，只重新產生摘要、決議與待辦")
     high_quality: bool = Field(False, description="摘要完成後，再用第二模型做一次證據查核")

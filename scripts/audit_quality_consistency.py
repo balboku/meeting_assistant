@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -230,8 +231,6 @@ def _review_location_labels(record: dict[str, Any]) -> list[str]:
 
 def _markdown_export_problems(record: dict[str, Any], markdown_text: str) -> list[ConsistencyProblem]:
     labels = _review_location_labels(record)
-    if not labels:
-        return []
     markdown = str(markdown_text or "")
     meeting_id = record.get("id")
     try:
@@ -240,6 +239,28 @@ def _markdown_export_problems(record: dict[str, Any], markdown_text: str) -> lis
         normalized_id = None
     meeting_title = str(record.get("title") or "").strip() or None
     problems: list[ConsistencyProblem] = []
+    for field in ("quality_score", "quality_label"):
+        expected = record.get(field)
+        if expected is None or expected == "":
+            continue
+        match = re.search(
+            rf"(?m)^\s*{re.escape(field)}\s*:\s*(?P<value>.*?)\s*$",
+            markdown[:2000],
+        )
+        actual = match.group("value").strip() if match else None
+        if actual != str(expected).strip():
+            problems.append(
+                ConsistencyProblem(
+                    meeting_id=normalized_id,
+                    meeting_title=meeting_title,
+                    surface="markdown-export",
+                    field=field,
+                    expected=expected,
+                    actual=actual,
+                )
+            )
+    if not labels:
+        return problems
     has_quality_note = (
         "逐字稿品質複核提示" in markdown
         or "逐字稿品質警示：問題位置" in markdown

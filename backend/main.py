@@ -108,6 +108,7 @@ from backend.job_queue import (
     enqueue_audio_job,
     enqueue_line_audio_job,
     enqueue_meeting_quality_recheck_job,
+    enqueue_meeting_semantic_review_job,
     job_worker,
 )
 from backend import auth as auth_module
@@ -134,12 +135,15 @@ from backend.tasks import (
     _extract_post_transcript_sections,
     _full_transcript_quality_issues,
     _extract_summary_preview,
+    _critical_quality_report_segment_indices,
+    _critical_quality_report_segment_ranges,
     _meeting_summary_linkage_quality_issues,
     _refresh_quality_report_summary_warnings,
     _meeting_content_quality_issues,
     normalize_client_recording_warning,
     normalize_custom_vocabulary,
     _replace_transcript_section,
+    _synchronize_meeting_markdown_quality,
     _transcript_integrity_issues,
     _transcript_segment_metadata,
     recheck_transcript_quality_report,
@@ -3102,6 +3106,7 @@ async def recheck_meeting_transcript_quality(meeting_id: int):
 
     if not update_meeting_quality_report(meeting_id, quality_report):
         raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
+    _synchronize_meeting_markdown_quality(record, quality_report)
 
     source_audio_checked = bool(recheck_metadata.get("source_audio_checked"))
     logger.info(
@@ -3120,6 +3125,36 @@ async def recheck_meeting_transcript_quality(meeting_id: int):
         ),
         source_audio_checked=source_audio_checked,
         quality_report=quality_report,
+    )
+
+
+@app.post(
+    "/meetings/{meeting_id}/quality/semantic-review",
+    response_model=JobResponse,
+    summary="排入逐字稿語意品質檢核",
+    tags=["會議記錄"],
+    status_code=202,
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
+async def enqueue_meeting_transcript_semantic_review(meeting_id: int):
+    """Queue an advisory model review without rewriting the saved transcript."""
+    record = get_meeting(meeting_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
+    transcript = _extract_transcript_section_body(record.get("full_content") or "") or ""
+    if not transcript.strip():
+        raise HTTPException(status_code=409, detail="此會議紀錄缺少完整逐字稿，無法進行語意品質檢核。")
+
+    job_id = str(uuid.uuid4())
+    try:
+        enqueue_meeting_semantic_review_job(job_id, meeting_id=meeting_id)
+    except Exception as exc:
+        logger.exception("無法建立逐字稿語意品質檢核任務")
+        raise HTTPException(status_code=500, detail=f"無法建立語意品質檢核任務：{exc}") from exc
+    return JobResponse(
+        job_id=job_id,
+        status=JobStatus.PENDING,
+        message="已排入逐字稿語意品質檢核；完成後只標示疑似失真分段，不會改寫逐字稿。",
     )
 
 
@@ -3476,11 +3511,18 @@ async def rerun_meeting_record(
             known_segment_indices.add(index)
     summary_only = bool(request_body and request_body.summary_only)
     high_quality = bool(request_body and request_body.high_quality)
+    full_segment_rerun = bool(request_body and request_body.full_segment_rerun)
     summary_source_path = None
     transcript_reuse_source_path = None
+    automatically_full_rerun_indices: list[int] = []
+    automatically_full_rerun_ranges: list[dict[str, int]] = []
+    force_full_meeting_rerun = False
+    force_all_segments_full_rerun = False
     if high_quality and not summary_only:
         raise HTTPException(status_code=400, detail="高品質模式只能用於重整摘要。")
-    if summary_only and request_body is not None and request_body.segments is not None:
+    if summary_only and request_body is not None and (
+        request_body.segments is not None or full_segment_rerun
+    ):
         raise HTTPException(status_code=400, detail="只重整摘要時不可同時指定重跑分段。")
     if summary_only:
         summary_source_path = Path(record.get("output_path") or "")
@@ -3499,8 +3541,50 @@ async def rerun_meeting_record(
         transcript_reuse_source_path = Path(record.get("output_path") or "")
         if not transcript_reuse_source_path.is_file():
             raise HTTPException(status_code=409, detail="原會議紀錄檔不存在，無法沿用其他分段逐字稿。")
+        if not full_segment_rerun:
+            automatically_full_rerun_indices = _critical_quality_report_segment_indices(
+                quality_report,
+                force_segment_indices,
+            )
     else:
+        if full_segment_rerun:
+            raise HTTPException(status_code=400, detail="完整重跑本段時，請至少指定一個分段。")
+        force_full_meeting_rerun = True
         force_segment_indices = sorted(known_segment_indices)
+        # A meeting-wide rerun deliberately starts from the retained source
+        # media instead of the old Markdown.  It should still retain the
+        # previous quality evidence: otherwise a segment already proven to
+        # contain a broad omission or hallucination is sent through the same
+        # long-window primary path that failed before.  Those few segments use
+        # the stable short-window full-rerun profile; ordinary segments remain
+        # on the normal full-rerun path.
+        automatically_full_rerun_indices = _critical_quality_report_segment_indices(
+            quality_report,
+            force_segment_indices,
+        )
+        automatically_full_rerun_ranges = _critical_quality_report_segment_ranges(
+            quality_report,
+            automatically_full_rerun_indices,
+        )
+        mapped_critical_indices = {
+            item["source_segment_index"]
+            for item in automatically_full_rerun_ranges
+        }
+        # A legacy report without usable time bounds must not apply its old
+        # ordinal index to a new dense-audio layout.  Full replacement of all
+        # recreated slices is the conservative, correctly-targeted fallback.
+        force_all_segments_full_rerun = bool(
+            set(automatically_full_rerun_indices) - mapped_critical_indices
+        )
+    force_full_segment_indices = (
+        force_segment_indices
+        if full_segment_rerun
+        else (
+            []
+            if force_full_meeting_rerun and automatically_full_rerun_ranges
+            else automatically_full_rerun_indices
+        )
+    )
 
     job_id = str(uuid.uuid4())
     try:
@@ -3518,6 +3602,10 @@ async def rerun_meeting_record(
                 else "meeting_rerun"
             ),
             force_segment_indices=force_segment_indices,
+            force_full_segment_indices=force_full_segment_indices,
+            force_full_segment_ranges=automatically_full_rerun_ranges,
+            force_full_meeting_rerun=force_full_meeting_rerun,
+            force_all_segments_full_rerun=force_all_segments_full_rerun,
             summary_source_path=summary_source_path,
             transcript_reuse_source_path=transcript_reuse_source_path,
             high_quality_summary=high_quality,
@@ -3532,20 +3620,41 @@ async def rerun_meeting_record(
         job_id,
         audio_path,
     )
+    if high_quality:
+        response_message = "已建立高品質摘要重整任務，會由第二模型再做一次證據查核。"
+    elif summary_only:
+        response_message = "已沿用既有逐字稿建立摘要重整任務，完成後會產生新的會議紀錄。"
+    elif full_segment_rerun:
+        response_message = (
+            "已建立指定分段完整重跑任務：第 "
+            f"{'、'.join(str(index + 1) for index in force_segment_indices)} 段將以較短小段重新轉錄。"
+        )
+    elif request_body is not None and request_body.segments is not None:
+        selected_text = "、".join(str(index + 1) for index in force_segment_indices)
+        if automatically_full_rerun_indices:
+            critical_text = "、".join(
+                str(index + 1) for index in automatically_full_rerun_indices
+            )
+            response_message = (
+                f"已建立指定分段重跑任務：第 {selected_text} 段；其中第 "
+                f"{critical_text} 段已有音訊證實的重大轉錄異常，將自動完整重跑。"
+            )
+        else:
+            response_message = f"已建立指定分段重跑任務：第 {selected_text} 段。"
+    elif automatically_full_rerun_indices:
+        critical_text = "、".join(
+            str(index + 1) for index in automatically_full_rerun_indices
+        )
+        response_message = (
+            "已用原始媒體檔建立完整重跑任務；第 "
+            f"{critical_text} 段已有重大轉錄異常，將自動使用完整小段重跑。"
+        )
+    else:
+        response_message = "已用原始媒體檔建立完整重跑任務，完成後會產生新的會議紀錄。"
     return JobResponse(
         job_id=job_id,
         status=JobStatus.PENDING,
-        message=(
-            "已建立高品質摘要重整任務，會由第二模型再做一次證據查核。"
-            if high_quality
-            else "已沿用既有逐字稿建立摘要重整任務，完成後會產生新的會議紀錄。"
-            if summary_only
-            else (
-                f"已建立指定分段重跑任務：第 {'、'.join(str(index + 1) for index in force_segment_indices)} 段。"
-                if request_body is not None and request_body.segments is not None
-                else "已用原始媒體檔建立完整重跑任務，完成後會產生新的會議紀錄。"
-            )
-        ),
+        message=response_message,
     )
 
 

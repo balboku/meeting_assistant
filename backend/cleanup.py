@@ -18,7 +18,7 @@ from typing import Iterable
 from backend.database import delete_terminal_jobs_completed_before, get_db
 
 logger = logging.getLogger("MeetingAssistant.Cleanup")
-SOURCE_AUDIO_TEMP_PREFIXES = ("_seg_", "_sub__")
+SOURCE_AUDIO_TEMP_PREFIXES = ("_seg_", "_sub__", "_gap_", "_speech_focus_")
 
 
 def _resolved_paths(paths: Iterable[Path]) -> set[Path]:
@@ -112,9 +112,9 @@ def cleanup_stale_source_audio_temp_segments(
     """Delete leaked transcription split files from the retained source folder.
 
     Retained source media names are generated from job ids or user filenames.
-    Files beginning with ``_seg_`` or ``_sub__`` are temporary transcription
-    chunks and should not remain mixed with original recordings after a job
-    exits.
+    Files beginning with ``_seg_``, ``_sub__``, ``_gap_`` or ``_speech_focus_`` are
+    temporary transcription artifacts and should not remain mixed with
+    original recordings after a job exits.
     """
     if not source_audio_dir.exists():
         return []

@@ -19,6 +19,12 @@
 .venv/bin/python scripts/run_quality_benchmark.py --scan-dir output --limit 20 --min-score 75 --format summary
 ```
 
+若要用較保守的文字密度門檻，找出長分段有時間戳但內容異常稀疏的紀錄，可加入：
+
+```bash
+.venv/bin/python scripts/run_quality_benchmark.py --scan-dir output --limit 20 --min-score 75 --min-segment-chars-per-second 1.5 --segment-density-min-duration-seconds 120 --format summary
+```
+
 ## 可檢查項目
 
 - 四大區塊是否存在：討論摘要、最終決議、待辦事項、完整逐字稿。
@@ -27,6 +33,7 @@
 - 逐字稿是否保留時間戳與分段標題。
 - 逐字稿是否出現「為節省篇幅」「已省略逐字稿」等省略提示。
 - 逐字稿是否有同一句話連續重複形成循環。
+- 可選擇檢查長分段的逐字稿文字量/時間比，抓出格式完整但內容被過度濃縮的輸出。
 - 必要術語是否存在，例如 `佳世達`, `IEC 62304`。
 - 禁用誤聽詞是否不存在，例如 `加斯達`, `IEC 6304`。
 

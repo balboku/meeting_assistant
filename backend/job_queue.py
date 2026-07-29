@@ -29,8 +29,11 @@ from backend.tasks import (
     SUMMARY_FALLBACK_MODEL,
     SUMMARY_MODEL,
     SUMMARY_VERIFIER_MODEL,
+    TRANSCRIPT_SEMANTIC_REVIEW_MODEL,
+    TRANSCRIPT_SEMANTIC_REVIEW_FALLBACK_MODEL,
     process_audio_task,
     recheck_all_saved_meeting_quality_reports,
+    review_saved_meeting_transcript_semantics,
 )
 
 logger = logging.getLogger("MeetingAssistant.JobQueue")
@@ -54,6 +57,10 @@ def enqueue_audio_job(
     client_recording_warning: Optional[str] = None,
     custom_vocabulary: Optional[list[str]] = None,
     force_segment_indices: Optional[list[int]] = None,
+    force_full_segment_indices: Optional[list[int]] = None,
+    force_full_segment_ranges: Optional[list[dict[str, Any]]] = None,
+    force_full_meeting_rerun: bool = False,
+    force_all_segments_full_rerun: bool = False,
     summary_source_path: Optional[Path] = None,
     transcript_reuse_source_path: Optional[Path] = None,
     high_quality_summary: bool = False,
@@ -78,6 +85,10 @@ def enqueue_audio_job(
             "custom_vocabulary": list(custom_vocabulary or []),
             "meeting_title": meeting_title,
             "force_segment_indices": sorted(set(force_segment_indices or [])),
+            "force_full_segment_indices": sorted(set(force_full_segment_indices or [])),
+            "force_full_segment_ranges": list(force_full_segment_ranges or []),
+            "force_full_meeting_rerun": bool(force_full_meeting_rerun),
+            "force_all_segments_full_rerun": bool(force_all_segments_full_rerun),
             "summary_source_path": str(summary_source_path) if summary_source_path else None,
             "transcript_reuse_source_path": str(transcript_reuse_source_path) if transcript_reuse_source_path else None,
             "high_quality_summary": bool(high_quality_summary),
@@ -136,6 +147,32 @@ def enqueue_meeting_quality_recheck_job(
         payload={"source_audio_dir": str(source_audio_dir)},
         max_attempts=1,
         message="已排入完整逐字稿品質檢核；僅使用本機音訊分析。",
+    )
+
+
+def enqueue_meeting_semantic_review_job(
+    job_id: str,
+    *,
+    meeting_id: int,
+    model: Optional[str] = None,
+    fallback_model: Optional[str] = None,
+) -> None:
+    """Queue a manual text-only semantic review for one meeting transcript."""
+    selected_model = str(model or TRANSCRIPT_SEMANTIC_REVIEW_MODEL).strip()
+    selected_fallback = str(
+        fallback_model or TRANSCRIPT_SEMANTIC_REVIEW_FALLBACK_MODEL
+    ).strip()
+    create_job(
+        job_id,
+        task_type="meeting_semantic_review",
+        source="semantic_review",
+        payload={
+            "meeting_id": int(meeting_id),
+            "model": selected_model,
+            "fallback_model": selected_fallback,
+        },
+        max_attempts=2,
+        message="已排入逐字稿語意品質檢核；只標示疑似失真位置，不會改寫逐字稿。",
     )
 
 
@@ -212,6 +249,10 @@ class JobQueueWorker:
                 self._process_meeting_quality_recheck_job(job)
                 return
 
+            if task_type == "meeting_semantic_review":
+                self._process_meeting_semantic_review_job(job)
+                return
+
             raise RuntimeError(f"未知任務類型：{task_type}")
         except Exception as exc:
             resulting_status = retry_or_fail_job(job_id, str(exc))
@@ -232,6 +273,10 @@ class JobQueueWorker:
         custom_vocabulary = payload.get("custom_vocabulary") or []
         meeting_title = payload.get("meeting_title")
         force_segment_indices = payload.get("force_segment_indices") or []
+        force_full_segment_indices = payload.get("force_full_segment_indices") or []
+        force_full_segment_ranges = payload.get("force_full_segment_ranges") or []
+        force_full_meeting_rerun = bool(payload.get("force_full_meeting_rerun"))
+        force_all_segments_full_rerun = bool(payload.get("force_all_segments_full_rerun"))
         summary_source_path = payload.get("summary_source_path")
         transcript_reuse_source_path = payload.get("transcript_reuse_source_path")
         high_quality_summary = bool(payload.get("high_quality_summary"))
@@ -250,6 +295,10 @@ class JobQueueWorker:
             client_recording_warning=client_recording_warning,
             custom_vocabulary=custom_vocabulary,
             force_segment_indices=force_segment_indices,
+            force_full_segment_indices=force_full_segment_indices,
+            force_full_segment_ranges=force_full_segment_ranges,
+            force_full_meeting_rerun=force_full_meeting_rerun,
+            force_all_segments_full_rerun=force_all_segments_full_rerun,
             summary_source_path=Path(summary_source_path) if summary_source_path else None,
             transcript_reuse_source_path=(
                 Path(transcript_reuse_source_path) if transcript_reuse_source_path else None
@@ -303,6 +352,22 @@ class JobQueueWorker:
         recheck_all_saved_meeting_quality_reports(
             job["job_id"],
             source_audio_dir=source_audio_dir,
+        )
+
+    def _process_meeting_semantic_review_job(self, job: dict[str, Any]) -> None:
+        payload = job.get("payload") or {}
+        try:
+            meeting_id = int(payload.get("meeting_id"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("語意品質檢核任務缺少有效會議記錄 ID") from exc
+        review_saved_meeting_transcript_semantics(
+            job["job_id"],
+            meeting_id=meeting_id,
+            model=payload.get("model") or TRANSCRIPT_SEMANTIC_REVIEW_MODEL,
+            fallback_model=(
+                payload.get("fallback_model")
+                or TRANSCRIPT_SEMANTIC_REVIEW_FALLBACK_MODEL
+            ),
         )
 
     def _log_source_audio_retention(self, job: dict[str, Any], status: str) -> None:

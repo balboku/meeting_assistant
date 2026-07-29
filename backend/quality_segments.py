@@ -17,6 +17,12 @@ _SEGMENT_DETAIL_PATTERN = re.compile(
     r"(?P<trailing>[^,，、;；)\]\n]{0,40})",
     flags=re.IGNORECASE,
 )
+_SEGMENT_SCOPED_ISSUE_PATTERN = re.compile(
+    r"(?:第\s*(?P<chinese>\d+)\s*段|\bSegment\s*#?\s*(?P<english>\d+)\b)"
+    r"[^,，、;；\r\n（）()]{0,120}?"
+    r"[（(](?P<issue>[^（）()\r\n]{1,240})[）)]",
+    flags=re.IGNORECASE,
+)
 _TIME_RANGE_PATTERN = re.compile(
     r"(?P<start_minutes>\d{1,3}):(?P<start_seconds>[0-5]\d)"
     r"\s*(?:-|–|—|~|至|到)\s*"
@@ -107,6 +113,28 @@ def review_segment_details_from_text(text: str) -> list[dict]:
     """Extract zero-based segment indices and nearby time ranges from warning text."""
     details_by_index: dict[int, dict] = {}
     issue_text = _warning_issue_text(text)
+    scoped_issues_by_index: dict[int, list[str]] = {}
+
+    # Recovery summaries can list several segments, each with its own issue in
+    # parentheses.  Do not apply a later repeated-phrase warning to every
+    # segment named in that specific summary format.  Other legacy warnings
+    # intentionally retain their existing normalized issue wording.
+    if "以下分段曾觸發轉錄品質補救或需複核" in str(text or ""):
+        for match in _SEGMENT_SCOPED_ISSUE_PATTERN.finditer(str(text or "")):
+            raw_index = match.group("chinese") or match.group("english")
+            try:
+                index = int(raw_index) - 1
+            except (TypeError, ValueError):
+                continue
+            if index < 0:
+                continue
+            raw_issue = re.sub(r"\s+", " ", match.group("issue") or "").strip()
+            scoped_issue = _warning_issue_text(raw_issue) or raw_issue
+            if not scoped_issue:
+                continue
+            issues = scoped_issues_by_index.setdefault(index, [])
+            if scoped_issue not in issues:
+                issues.append(scoped_issue)
 
     def add_issue(detail: dict) -> None:
         if not issue_text:
@@ -135,7 +163,19 @@ def review_segment_details_from_text(text: str) -> list[dict]:
                 "label": review_segment_label(index),
             },
         )
-        add_issue(detail)
+        scoped_issues = scoped_issues_by_index.get(index) or []
+        if scoped_issues:
+            for scoped_issue in scoped_issues:
+                existing_issues = [
+                    str(issue).strip()
+                    for issue in detail.get("issues") or []
+                    if str(issue).strip()
+                ]
+                if scoped_issue not in existing_issues:
+                    existing_issues.append(scoped_issue)
+                detail["issues"] = existing_issues
+        else:
+            add_issue(detail)
         time_match = _TIME_RANGE_PATTERN.search(match.group("trailing") or "")
         if time_match:
             detail["start_seconds"] = _clock_seconds(
