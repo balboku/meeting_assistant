@@ -1245,7 +1245,7 @@ database.save_meeting(
         workflow = ci.read_text(encoding="utf-8")
         self.assertIn("python scripts/security_scan.py", workflow)
         self.assertIn("python scripts/audit_quality_consistency.py", workflow)
-        self.assertIn("python -m unittest discover -v", workflow)
+        self.assertIn("python scripts/run_ci_tests.py", workflow)
         self.assertIn("python -m pip check", workflow)
 
     def test_docs_describe_operational_knobs_events_and_fts(self):
