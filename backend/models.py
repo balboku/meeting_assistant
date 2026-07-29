@@ -326,6 +326,11 @@ class MeetingRecord(BaseModel):
     source_media_sha256: Optional[str] = Field(None, description="原始媒體 SHA256")
     source_media_restored_at: Optional[str] = Field(None, description="原始媒體檔補回時間")
     source_media_restored_name: Optional[str] = Field(None, description="補回時使用的原始媒體檔名")
+    review_status: str = Field("generated", description="會議人工審查狀態")
+    reviewed_at: Optional[datetime] = Field(None, description="最後複核或核准時間")
+    reviewed_by: Optional[str] = Field(None, description="最後複核或核准者")
+    review_note: Optional[str] = Field(None, description="審查備註")
+    approved_content_sha256: Optional[str] = Field(None, description="核准當下 Markdown 的 SHA-256")
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -335,6 +340,25 @@ class MeetingDetail(MeetingRecord):
     """會議記錄完整內容（用於單筆查詢）"""
     full_content: str = Field(..., description="完整 Markdown 會議記錄")
     quality_report: Optional[dict] = Field(None, description="音訊與逐段品質報告")
+    structured_summary: Optional[dict] = Field(None, description="摘要、決議與待辦的結構化資料")
+    structured_items: list[dict[str, Any]] = Field(default_factory=list, description="可逐項審查的 D/R/A 索引")
+    evidence_records: list[dict[str, Any]] = Field(default_factory=list, description="補充佐證檔案與版本記錄")
+
+
+class MeetingReviewRequest(BaseModel):
+    status: str = Field(..., description="generated、needs_review、reviewed 或 approved")
+    reviewer: Optional[str] = Field(None, max_length=200, description="複核者顯示名稱；啟用權限時以登入者為準")
+    note: Optional[str] = Field(None, max_length=2000, description="審查備註")
+
+
+class MeetingReviewResponse(BaseModel):
+    status: str
+    meeting_id: int
+    review_status: str
+    reviewed_at: Optional[datetime] = None
+    reviewed_by: Optional[str] = None
+    review_note: Optional[str] = None
+    approved_content_sha256: Optional[str] = None
 
 
 class MeetingRerunRequest(BaseModel):
@@ -403,6 +427,9 @@ class MeetingEvidenceResponse(BaseModel):
     meeting_id: int
     file_name: str
     attachment_path: str
+    attachment_sha256: Optional[str] = None
+    revision_id: Optional[int] = None
+    evidence_id: Optional[int] = None
     evidence_markdown: str
     full_content: str
 
@@ -414,7 +441,7 @@ class MeetingEvidenceResponse(BaseModel):
 class HealthResponse(BaseModel):
     """GET /health 的回應格式"""
     status: str = "ok"
-    version: str = "1.0.0"
+    version: str = "2.1.0"
     model: str
     transcription_model: str
     summary_model: str
@@ -422,6 +449,8 @@ class HealthResponse(BaseModel):
     summary_verifier_model: str
     auth: dict[str, Any] = Field(default_factory=dict)
     recording_profiles: dict[str, dict[str, Any]]
+    build: dict[str, Any] = Field(default_factory=dict)
+    runtime: dict[str, Any] = Field(default_factory=dict)
     checks: list[dict[str, str]] = Field(default_factory=list)
 
 

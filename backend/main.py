@@ -40,9 +40,11 @@ load_dotenv()
 
 from backend.exporter import content_with_quality_review_note, export_meeting_to_docx
 from backend.evidence import SUPPORTED_EVIDENCE_EXTENSIONS, analyze_and_append_evidence
+from backend.build_info import APP_VERSION, build_info_payload
 
 from backend.database import (
     DB_PATH,
+    SCHEMA_VERSION,
     TRANSCRIPT_QUALITY_RECHECK_VERSION,
     init_db,
     get_job,
@@ -64,6 +66,8 @@ from backend.database import (
     delete_meeting,
     update_meeting_quality_report,
     update_meeting_content_with_revision,
+    update_meeting_review_status,
+    get_schema_version,
     list_meeting_revisions,
     upsert_app_user,
     list_app_users,
@@ -86,6 +90,8 @@ from backend.models import (
     MeetingRevisionRecord,
     MeetingListResponse,
     MeetingEvidenceResponse,
+    MeetingReviewRequest,
+    MeetingReviewResponse,
     HealthResponse,
     AppUserUpsertRequest,
     AppUserRecord,
@@ -126,6 +132,7 @@ from backend.quality_segments import review_segment_details_from_text, review_se
 from backend.source_audio import finalize_source_audio_upload, sha256_file
 from backend.tasks import (
     GEMINI_MODEL,
+    SEGMENT_CACHE_VERSION,
     SEGMENT_TARGET_SECONDS,
     SUMMARY_FALLBACK_MODEL,
     SUMMARY_MODEL,
@@ -292,7 +299,7 @@ app = FastAPI(
 ### 支援格式
 `.mp3` `.wav` `.m4a` `.aac` `.ogg` `.flac` `.webm` `.mp4` `.mov` `.avi` `.mkv` `.mpeg` `.mpg` `.wmv`
     """,
-    version="1.0.0",
+    version=APP_VERSION,
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -454,10 +461,33 @@ async def health_check():
         static_vendor_dir=STATIC_DIR / "vendor",
         db_path=DB_PATH,
     )
+    build = build_info_payload()
+    schema_version = get_schema_version()
+    checks.extend([
+        {
+            "name": "runtime_build",
+            "status": "ok" if build["matches_workspace"] else "error",
+            "detail": (
+                "載入中的程式碼與目前工作區一致"
+                if build["matches_workspace"]
+                else "服務仍載入舊程式碼；請在確認無執行中任務後重新啟動"
+            ),
+        },
+        {
+            "name": "job_worker",
+            "status": "ok" if job_worker.is_running() else "error",
+            "detail": "任務 worker 執行中" if job_worker.is_running() else "任務 worker 未執行",
+        },
+        {
+            "name": "database_schema",
+            "status": "ok" if schema_version == SCHEMA_VERSION else "error",
+            "detail": f"schema={schema_version}；expected={SCHEMA_VERSION}",
+        },
+    ])
     status = "ok" if all(check["status"] == "ok" for check in checks) else "degraded"
     return HealthResponse(
         status=status,
-        version="1.0.0",
+        version=APP_VERSION,
         model=GEMINI_MODEL,
         transcription_model=GEMINI_MODEL,
         summary_model=SUMMARY_MODEL,
@@ -465,6 +495,12 @@ async def health_check():
         summary_verifier_model=SUMMARY_VERIFIER_MODEL,
         auth=auth_config_payload(),
         recording_profiles=RECORDING_PROFILES,
+        build=build,
+        runtime={
+            "worker_running": job_worker.is_running(),
+            "schema_version": schema_version,
+            "segment_cache_version": SEGMENT_CACHE_VERSION,
+        },
         checks=checks,
     )
 
@@ -3068,6 +3104,79 @@ async def get_meeting_detail(meeting_id: int):
         source_media_sha256=source_media_metadata["source_media_sha256"],
         source_media_restored_at=source_media_metadata["source_media_restored_at"],
         source_media_restored_name=source_media_metadata["source_media_restored_name"],
+        review_status=record.get("review_status") or "generated",
+        reviewed_at=record.get("reviewed_at"),
+        reviewed_by=record.get("reviewed_by"),
+        review_note=record.get("review_note"),
+        approved_content_sha256=record.get("approved_content_sha256"),
+        structured_summary=record.get("structured_summary"),
+        structured_items=record.get("structured_items") or [],
+        evidence_records=record.get("evidence_records") or [],
+    )
+
+
+@app.put(
+    "/meetings/{meeting_id}/review",
+    response_model=MeetingReviewResponse,
+    summary="更新會議人工審查狀態",
+    tags=["會議記錄"],
+    responses={
+        400: {"model": ErrorResponse},
+        404: {"model": ErrorResponse},
+        409: {"model": ErrorResponse},
+    },
+)
+async def update_meeting_review(
+    meeting_id: int,
+    request: Request,
+    request_body: MeetingReviewRequest,
+):
+    """Mark generated notes as reviewed or approved without hiding quality blockers."""
+    actor = actor_from_request(request)
+    require_permission(actor, "meeting:write")
+    reviewer = (
+        actor.email
+        if actor.enabled
+        else (request_body.reviewer or "").strip() or "local-user"
+    )
+    try:
+        record = update_meeting_review_status(
+            meeting_id,
+            request_body.status,
+            reviewed_by=reviewer,
+            note=request_body.note,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        status_code = 409 if "不能核准" in str(exc) else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    record_audit_log(
+        action="meeting.review.update",
+        actor_user_id=actor.user_id,
+        actor_email=reviewer,
+        resource_type="meeting",
+        resource_id=str(meeting_id),
+        request_method=request.method,
+        request_path=request.url.path,
+        client_host=_request_client_host(request),
+        detail={
+            "review_status": record.get("review_status"),
+            "review_note": record.get("review_note"),
+            "approved_content_sha256": record.get("approved_content_sha256"),
+        },
+    )
+    return MeetingReviewResponse(
+        status="success",
+        meeting_id=meeting_id,
+        review_status=record.get("review_status") or "generated",
+        reviewed_at=record.get("reviewed_at"),
+        reviewed_by=record.get("reviewed_by"),
+        review_note=record.get("review_note"),
+        approved_content_sha256=record.get("approved_content_sha256"),
     )
 
 
@@ -3713,7 +3822,8 @@ async def add_meeting_evidence(
         if bytes_written == 0:
             raise HTTPException(status_code=400, detail="上傳的補充資料是空檔案")
 
-        result = analyze_and_append_evidence(
+        result = await asyncio.to_thread(
+            analyze_and_append_evidence,
             meeting_id=meeting_id,
             source_path=temp_path,
             original_filename=original_filename,

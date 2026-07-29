@@ -1,14 +1,14 @@
 """
 Supplementary evidence analysis for existing meeting notes.
 
-This module keeps the first version deliberately file-based: uploaded evidence is
-stored next to generated output, analyzed by Gemini, and appended to the meeting
-Markdown without changing the database schema.
+Uploaded evidence is stored next to generated output, analyzed by Gemini, and
+persisted with a content revision, SHA-256, metadata, and refreshed search index.
 """
 
 from __future__ import annotations
 
 import mimetypes
+import hashlib
 import os
 import re
 import shutil
@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from backend.database import get_meeting
+from backend.database import append_meeting_evidence_with_revision, get_meeting
 from backend.tasks import GEMINI_MODEL, MAX_UPLOAD_WAIT_SECONDS, POLLING_INTERVAL
 
 
@@ -55,6 +55,14 @@ def _safe_filename(filename: str) -> str:
     if not safe_stem:
         safe_stem = "evidence"
     return f"{safe_stem[:80]}{suffix}"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _unique_attachment_path(meeting_id: int, filename: str) -> Path:
@@ -267,24 +275,45 @@ def analyze_and_append_evidence(
 
     attachment_path = _unique_attachment_path(meeting_id, original_filename)
     shutil.copy2(source, attachment_path)
+    persisted = False
+    try:
+        evidence_markdown = generate_evidence_markdown(
+            meeting_record=meeting_record,
+            attachment_path=attachment_path,
+            original_filename=original_filename,
+            note=note,
+            model=model,
+        )
 
-    evidence_markdown = generate_evidence_markdown(
-        meeting_record=meeting_record,
-        attachment_path=attachment_path,
-        original_filename=original_filename,
-        note=note,
-        model=model,
-    )
-
-    current_markdown = output_path.read_text(encoding="utf-8")
-    updated_markdown = _append_evidence(current_markdown, evidence_markdown)
-    output_path.write_text(updated_markdown, encoding="utf-8")
+        current_markdown = output_path.read_text(encoding="utf-8")
+        updated_markdown = _append_evidence(current_markdown, evidence_markdown)
+        attachment_sha256 = _sha256_file(attachment_path)
+        revision_id, evidence_id = append_meeting_evidence_with_revision(
+            meeting_id,
+            full_content=updated_markdown,
+            summary=str(meeting_record.get("summary") or ""),
+            original_filename=original_filename,
+            stored_path=str(attachment_path),
+            sha256=attachment_sha256,
+            note=note,
+            analysis_markdown=evidence_markdown.strip(),
+        )
+        persisted = True
+    finally:
+        if not persisted:
+            try:
+                attachment_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     return {
         "status": "success",
         "meeting_id": meeting_id,
         "file_name": attachment_path.name,
         "attachment_path": str(attachment_path),
+        "attachment_sha256": attachment_sha256,
+        "revision_id": revision_id,
+        "evidence_id": evidence_id,
         "evidence_markdown": evidence_markdown.strip(),
         "full_content": updated_markdown,
     }

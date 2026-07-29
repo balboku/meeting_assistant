@@ -823,6 +823,34 @@
       background: rgba(122,162,247,0.16);
     }
     .quality-action:disabled { opacity: 0.55; cursor: wait; }
+    .meeting-review-panel {
+      width: 100%; max-width: 1280px; margin: 0 auto 18px;
+      display: flex; align-items: center; justify-content: space-between; gap: 14px;
+      padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px;
+      background: rgba(122,162,247,0.06);
+    }
+    .meeting-review-copy { min-width: 0; line-height: 1.5; }
+    .meeting-review-copy strong { display: block; color: var(--text); font-size: 13px; }
+    .meeting-review-copy span { color: var(--text-mid); font-size: 12px; overflow-wrap: anywhere; }
+    .meeting-review-badge {
+      display: inline-flex; align-items: center; margin-right: 7px; padding: 2px 8px;
+      border: 1px solid var(--yellow); border-radius: 999px; color: var(--yellow);
+      font-size: 11px; font-weight: 700; white-space: nowrap;
+    }
+    .meeting-review-badge.approved { border-color: var(--green); color: var(--green); }
+    .meeting-review-badge.reviewed { border-color: var(--blue); color: var(--blue); }
+    .meeting-review-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .meeting-review-action {
+      min-height: 32px; padding: 6px 10px; border: 1px solid var(--blue); border-radius: 6px;
+      background: rgba(122,162,247,0.1); color: var(--blue); font: inherit; font-size: 12px;
+      cursor: pointer; white-space: nowrap;
+    }
+    .meeting-review-action.approve { border-color: var(--green); color: var(--green); }
+    .meeting-review-action:disabled { opacity: 0.5; cursor: not-allowed; }
+    @media (max-width: 760px) {
+      .meeting-review-panel { align-items: flex-start; flex-direction: column; }
+      .meeting-review-actions { justify-content: flex-start; }
+    }
     .segment-status-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
     .segment-status {
       display: inline-flex; align-items: center; gap: 7px;
@@ -3393,6 +3421,17 @@ function renderCardQuality(record, qualityType = 'all') {
     return warningCount;
   };
   const chips = [];
+  const reviewStatus = String(record?.review_status || 'generated').trim().toLowerCase();
+  const reviewLabels = {
+    generated: 'AI 產出',
+    needs_review: '待人工複核',
+    reviewed: '已人工複核',
+    approved: '已核准',
+  };
+  chips.push(
+    `<span class="card-quality-chip ${reviewStatus === 'approved' ? 'good' : 'needs-review'}">` +
+    `${escapeHtml(reviewLabels[reviewStatus] || reviewStatus)}</span>`
+  );
   let hasTranscriptWarningChip = false;
   const filterType = ['summary', 'recording', 'transcript', 'rerunnable', 'other'].includes(qualityType)
     ? qualityType
@@ -5702,6 +5741,90 @@ function setDetailBusy(busy) {
   setElementBusy(document.getElementById('detail-panel'), busy);
 }
 
+function meetingReviewStatusLabel(status = '') {
+  return {
+    generated: 'AI 產出，尚未複核',
+    needs_review: '內容有變更，待重新複核',
+    reviewed: '已人工複核',
+    approved: '已核准',
+  }[String(status || '').toLowerCase()] || status || 'AI 產出，尚未複核';
+}
+
+function meetingHasApprovalBlockers(meeting) {
+  const report = meeting?.quality_report || {};
+  if ((report.blocking_segment_indices || []).length) return true;
+  return (report.segments || []).some(segment =>
+    Boolean(segment?.delivery_blocking) || String(segment?.status || '') === 'failed'
+  );
+}
+
+function renderMeetingReviewPanel(meeting) {
+  const meetingId = Number(meeting?.id) || 0;
+  const status = String(meeting?.review_status || 'generated').toLowerCase();
+  const blockers = meetingHasApprovalBlockers(meeting);
+  const badgeClass = ['approved', 'reviewed'].includes(status) ? status : '';
+  const reviewerText = meeting?.reviewed_by
+    ? `；${escapeHtml(meeting.reviewed_by)} · ${escapeHtml(formatDate(meeting.reviewed_at))}`
+    : '';
+  const noteText = meeting?.review_note
+    ? `；備註：${escapeHtml(meeting.review_note)}`
+    : '';
+  const hashText = status === 'approved' && meeting?.approved_content_sha256
+    ? `；內容 SHA-256 ${escapeHtml(String(meeting.approved_content_sha256).slice(0, 12))}…`
+    : '';
+  const actions = [];
+  if (!['reviewed', 'approved'].includes(status)) {
+    actions.push(
+      `<button class="meeting-review-action" onclick="updateMeetingReview(${meetingId}, 'reviewed')">✓ 標記已複核</button>`
+    );
+  }
+  if (status === 'reviewed') {
+    actions.push(
+      `<button class="meeting-review-action approve" ${blockers ? 'disabled' : ''} ` +
+      `title="${blockers ? '仍有阻擋交付的品質問題，請先重跑或修正' : '核准目前 Markdown 內容並記錄 SHA-256'}" ` +
+      `onclick="updateMeetingReview(${meetingId}, 'approved')">核准記錄</button>`
+    );
+  }
+  if (status === 'approved') {
+    actions.push(
+      `<button class="meeting-review-action" onclick="updateMeetingReview(${meetingId}, 'needs_review')">重新開啟複核</button>`
+    );
+  }
+  return `<section class="meeting-review-panel" aria-label="會議人工審查狀態">
+    <div class="meeting-review-copy">
+      <strong><span class="meeting-review-badge ${badgeClass}">${escapeHtml(meetingReviewStatusLabel(status))}</span>AI 產出不等於正式核准</strong>
+      <span>人工審查狀態會與品質警示、內容版本分開保存${reviewerText}${noteText}${hashText}</span>
+    </div>
+    <div class="meeting-review-actions">${actions.join('')}</div>
+  </section>`;
+}
+
+async function updateMeetingReview(meetingId, status) {
+  if (status === 'approved' && !confirm('要核准目前顯示的會議記錄嗎？後續任何內容修改都會自動撤銷核准。')) {
+    return;
+  }
+  const promptText = status === 'approved' ? '核准備註（可留空）' : '複核備註（可留空）';
+  const note = window.prompt(promptText, '');
+  if (note === null) return;
+  setDetailBusy(true);
+  setDetailStatus('正在更新人工審查狀態...');
+  try {
+    const response = await fetch(`${API}/meetings/${meetingId}/review`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status, note }),
+    });
+    if (!response.ok) throw new Error(await apiErrorMessage(response));
+    await openDetail(meetingId);
+    await loadMeetings(document.getElementById('search-input')?.value.trim() || '');
+  } catch (error) {
+    setDetailStatus(`更新人工審查狀態失敗：${error.message}`);
+    alert(`更新人工審查狀態失敗：${error.message}`);
+  } finally {
+    setDetailBusy(false);
+  }
+}
+
 async function openDetail(id) {
   currentId = id;
 
@@ -5757,6 +5880,7 @@ async function openDetail(id) {
           <div class="meta-chip"><span class="icon">⏰</span>${formatDate(r.created_at)}</div>
         </div>
       </div>
+      ${renderMeetingReviewPanel(r)}
       ${renderQualityReport(r)}
       ${renderAudioEvidence(r)}
       <div class="document-view">

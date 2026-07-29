@@ -1,8 +1,8 @@
-# 🎙️ AI 語音會議助理 — 完整系統架構文件 v2.0
+# 🎙️ AI 語音會議助理 — 現行系統架構文件 v2.1
 
-> **文件版本**：2.0.0
-> **更新日期**：2026/07/05
-> **現況**：MVP v1.0（單檔處理腳本）已驗證完成，本文件定義完整產品架構的擴展路徑。
+> **文件版本**：2.1.0
+> **更新日期**：2026/07/29
+> **現況**：FastAPI、SQLite 持久化佇列、Web/LINE/GUI、多段轉錄、品質閘門、人工複核與全文搜尋均為現行功能。
 
 ---
 
@@ -11,6 +11,7 @@
 ```mermaid
 graph TB
     subgraph CLIENT["🖥️ 1. 使用者介面層 (Client)"]
+        WEB["🌐 Web 歷史與複核介面"]
         LINE["📱 LINE Bot\n(手機端 · Webhook)"]
         GUI["💻 桌面錄音工具\n(Python GUI · sounddevice)"]
     end
@@ -18,30 +19,37 @@ graph TB
     subgraph BACKEND["⚙️ 2. 核心後端層 (Backend)"]
         FASTAPI["🚪 API 網關\nFastAPI"]
         PREPROCESS["🔧 媒體預處理模組\nPydub · 格式轉換 / 切割"]
-        QUEUE["📋 任務佇列\nBackground Tasks / Celery"]
+        QUEUE["📋 SQLite 持久化佇列\n單一背景 Worker"]
     end
 
     subgraph AI["🤖 3. AI 服務層 (AI Services)"]
-        GEMINI["✨ Gemini 3.1 Flash-Lite\n語音辨識 + 摘要生成\n(File API · 一次性處理)"]
+        TRANSCRIBE["✨ Gemini File API\n逐段轉錄 / 補救 / 重跑"]
+        SUMMARY["🧠 摘要模型\nJSON D/R/A + 可選第二模型查核"]
     end
 
     subgraph STORAGE["💾 4. 資料儲存層 (Storage)"]
         TEMP["📁 Temp 資料夾\n(分段 / 處理暫存 · 自動刪除)"]
         SOURCE["🎧 Source Media\n(原始錄音/錄影保留)"]
         OUTPUT["📂 Output 資料夾\n(Markdown 會議記錄)"]
-        SQLITE["🗄️ SQLite\n(可選 · 歷史記錄搜尋)"]
+        ATTACH["📎 Attachments\n補充佐證與 SHA-256"]
+        SQLITE["🗄️ SQLite + FTS5\n佇列 / 結構資料 / 版本 / 搜尋"]
     end
 
+    WEB --> FASTAPI
     LINE -- "音檔 Webhook" --> FASTAPI
     GUI -- "HTTP POST /upload-media" --> FASTAPI
     FASTAPI --> PREPROCESS
     FASTAPI --> SOURCE
     PREPROCESS --> TEMP
     PREPROCESS --> QUEUE
-    QUEUE --> GEMINI
-    GEMINI -- "結構化 Markdown" --> QUEUE
+    QUEUE --> TRANSCRIBE
+    TRANSCRIBE -- "含時間戳逐字稿" --> QUEUE
+    QUEUE --> SUMMARY
+    SUMMARY -- "結構化 JSON D/R/A" --> QUEUE
     QUEUE --> OUTPUT
-    QUEUE -- "metadata" --> SQLITE
+    QUEUE -- "metadata + structured items" --> SQLITE
+    FASTAPI --> ATTACH
+    ATTACH --> SQLITE
     QUEUE -- "Push Message" --> LINE
     QUEUE -- "結果通知" --> GUI
 ```
@@ -53,9 +61,9 @@ graph TB
 | 層級名稱 | 負責模組與技術堆疊 | 主要任務 |
 | --- | --- | --- |
 | **1. 使用者介面層 (Client)** | 手機端：LINE Bot (Webhook)<br>電腦端：Python GUI (Tkinter/PyQt) + `sounddevice` | 收集音訊或影片來源（實體錄音 / 線上擷取 / 螢幕錄製），並向後端發送請求，最後展示結果給使用者。 |
-| **2. 核心後端層 (Backend)** | 框架：Python + FastAPI<br>非同步處理：Celery 或 Background Tasks | 系統中樞。接收媒體檔、進行格式檢查、排程處理、呼叫 AI API，並將結果回傳給介面層。 |
-| **3. AI 服務層 (AI Services)** | Gemini 3.1 Flash-Lite API（語音辨識 + 摘要生成一體化） | 執行高耗能的機器學習運算，將語音直接轉換為結構化會議記錄。 |
-| **4. 資料儲存層 (Storage)** | 檔案系統：本地資料夾（暫存區 / 封存區）<br>資料庫：SQLite（輕量級，可選） | 暫存處理中的媒體檔，並永久保存轉錄好的 Markdown 文件與會議元資料。 |
+| **2. 核心後端層 (Backend)** | Python + FastAPI<br>SQLite 持久化佇列 + 單一 Worker | 接收媒體檔、驗證、排程、重試、取消、處理品質閘門，並提供審查與維運 API。 |
+| **3. AI 服務層 (AI Services)** | Gemini 轉錄模型 + 摘要/查核模型 | 先產生可追溯逐字稿，再以 JSON contract 產生 D/R/A；高品質模式增加第二模型證據查核。 |
+| **4. 資料儲存層 (Storage)** | 本地檔案 + SQLite/FTS5 | 保存原始媒體、Markdown、附件、任務事件、結構化 D/R/A、人工審查狀態與修訂歷史。 |
 
 ---
 
@@ -85,17 +93,17 @@ graph TB
 |--------|------|------|
 | **API 網關** | FastAPI | 開出 `/upload-media`（桌面端上傳；`/upload-audio` 保留相容）與 `/line-webhook`（LINE 傳遞）端點 |
 | **媒體預處理** | Pydub | 必要時抽取/轉換音訊並切割，保留原始音訊或影片作為證據檔 |
-| **任務佇列** | Background Tasks | 背景非同步執行，讓前端不卡住；進階版可升級至 Celery + Redis |
+| **任務佇列** | SQLite `jobs` + 單一 Worker | 跨服務重啟保留任務，支援 retry/backoff、取消、進度與事件時間線。 |
 
 ---
 
 ### 3. AI 服務層 (AI Services)
 
-> **架構亮點**：使用 Gemini File API，**一次 API 呼叫即完成語音辨識 + 摘要生成**，相較 Whisper + GPT-4o 雙 API 方案，速度更快、成本更低。
+> **架構亮點**：轉錄與摘要分離。逐字稿先通過時間戳、音訊覆蓋、重複幻覺與快取安全檢查，再交給摘要模型；因此可以單獨重跑問題段或只重整摘要。
 
 | 方案 | 技術 | 優勢 | 限制 |
 |------|------|------|------|
-| ⭐ **現行方案（已實作）** | Gemini 3.1 Flash-Lite | 一次 API 完成、費用低、免費層可用 | 單次音訊長度上限 |
+| ⭐ **現行方案（已實作）** | Gemini File API + 分段轉錄 + JSON 摘要 | 可分段補救、保留時間證據、獨立重整摘要 | 仍受上游服務可用性與模型品質影響 |
 | 備選方案 | OpenAI Whisper → GPT-4o | 逐字稿品質高、語言支援廣 | 需兩次 API、成本較高、Whisper 25MB 限制 |
 
 **Output Prompt 四大區塊**：
@@ -125,7 +133,9 @@ meeting_assistant/
 
 | 資料表 | 用途 |
 |--------|------|
-| `meetings` | 保存會議標題、日期、原始媒體檔名稱、Markdown 輸出路徑、摘要與建立時間。 |
+| `meetings` | 保存會議主檔、品質報告、結構化摘要、人工審查狀態與核准內容 SHA-256。 |
+| `meeting_items` | 將 D/R/A 逐項保存成 JSON 索引，保留證據時間與未來逐項複核欄位。 |
+| `meeting_evidence` | 保存補充附件檔名、路徑、SHA-256、分析內容與對應 revision。 |
 | `meeting_fts` | SQLite FTS5 虛擬表，索引 `title`、`source_audio`、`summary`、`output_path`，支援快速的欄位搜尋。 |
 | `meeting_content_fts` | SQLite FTS5 虛擬表，索引每筆會議的完整 Markdown 內容，支援逐字稿搜尋。 |
 | `meeting_revisions` | 保存人工修訂摘要或逐字稿前的完整舊版 Markdown，供回溯 AI 原稿與修改歷史。 |
@@ -133,10 +143,15 @@ meeting_assistant/
 | `job_events` | 任務事件時間線，記錄建立、worker claim、狀態轉換、retry、取消等事件，供維運與 UI 觀察流程。 |
 | `app_users` | 未來帳號/角色功能使用者表；目前 `MEETING_AUTH_ENABLED=0`，程式碼已完成但不啟用權限控管。 |
 | `audit_logs` | 未來稽核紀錄表，保存 actor、action、resource 與 request metadata；目前只提供底層 helper，不影響既有流程。 |
+| `app_meta` | 保存資料庫 schema version，供 `/health` 驗證執行版本。 |
 
 搜尋流程依序合併欄位 FTS、完整內容 FTS 與參數化 `LIKE` 後備搜尋；後備搜尋補足 SQLite `unicode61` 對中文連續字串部分匹配的限制。兩個 FTS 索引在新增、編輯、刪除會議時增量更新，啟動時只對缺漏的既有資料進行一次性補建，搜尋本身維持唯讀。若部署環境的 SQLite 不支援 FTS5，API 仍可使用 `LIKE` 搜尋欄位與完整內容。
 
-Web 歷史頁可從 `/meetings/{id}/source-media` 串流保留的原始錄音或錄影，並把逐字稿時間戳連回播放器；舊的 `/meetings/{id}/source-audio` 仍保留相容。人工修訂分成兩條路徑：`PUT /meetings/{id}/summary` 只改摘要、決議與待辦；`PUT /meetings/{id}/transcript` 只改完整逐字稿。兩者都會先寫入 `meeting_revisions`，再更新 Markdown 與 FTS 索引。
+Web 歷史頁可從 `/meetings/{id}/source-media` 串流保留的原始錄音或錄影，並把逐字稿時間戳連回播放器；舊的 `/meetings/{id}/source-audio` 仍保留相容。人工修訂分成兩條路徑：`PUT /meetings/{id}/summary` 只改摘要、決議與待辦；`PUT /meetings/{id}/transcript` 只改完整逐字稿。兩者都會先寫入 `meeting_revisions`，再更新 Markdown 與 FTS 索引，並將會議退回 `needs_review`。`PUT /meetings/{id}/review` 明確保存人工複核／核准；核准時記錄目前 Markdown SHA-256，有阻擋交付的品質問題時拒絕核准。
+
+補充佐證經 `POST /meetings/{id}/evidence` 上傳後，Gemini 的同步 SDK 呼叫會放入工作執行緒，避免阻塞 FastAPI event loop。成功時附件、SHA-256、分析內容、revision 與全文索引一致更新；失敗時尚未入庫的附件會清理。
+
+`GET /health` 除依賴檢查外，也回傳載入 commit、工作區 commit、程式碼指紋、worker 狀態、schema version 與 segment cache version。若服務仍載入舊程式碼，`matches_workspace=false` 且健康狀態降級。
 
 ---
 
@@ -149,19 +164,20 @@ sequenceDiagram
     participant U as 使用者桌面工具
     participant API as FastAPI 後端
     participant PROC as 預處理模組
-    participant AI as Gemini 3.1 Flash-Lite
+    participant TX as Gemini 轉錄
+    participant SUM as 摘要模型
     participant DB as 儲存層
     participant LINE as LINE Bot
 
     U->>API: POST /upload-media (媒體檔)
     API-->>U: {"status": "processing"} 立即回應
     API->>PROC: 存入 Temp，格式檢查
-    PROC->>AI: 上傳媒體檔 (File API)
-    AI-->>PROC: ACTIVE（媒體檔就緒）
-    PROC->>AI: generate_content（媒體檔 + Prompt）
-    AI-->>PROC: Markdown 會議記錄
-    PROC->>DB: 寫入 Output 資料夾
-    PROC->>DB: 元資料寫入 SQLite（可選）
+    PROC->>TX: 分段上傳與轉錄
+    TX-->>PROC: 含時間戳逐字稿
+    PROC->>PROC: 本機品質閘門與必要補救
+    PROC->>SUM: 完整逐字稿 + JSON contract
+    SUM-->>PROC: 結構化 D/R/A
+    PROC->>DB: 寫入 Markdown + SQLite + FTS
     PROC->>PROC: 刪除 Temp 媒體檔
     PROC-->>U: 推播「處理完成」通知
     PROC-->>LINE: Push Message（會議記錄）
@@ -198,3 +214,4 @@ sequenceDiagram
 ---
 
 *AI 語音會議助理 · 系統架構文件 v2.0 · 2026/07/05*
+    WEB --> FASTAPI

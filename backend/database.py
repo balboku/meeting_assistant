@@ -7,6 +7,7 @@ backend/database.py — SQLite 資料庫初始化與 CRUD 操作
 =============================================================================
 """
 
+import hashlib
 import json
 import sqlite3
 import logging
@@ -32,6 +33,8 @@ DEFAULT_JOB_MAX_ATTEMPTS = int(os.getenv("JOB_QUEUE_MAX_ATTEMPTS", "5"))
 # can alter review locations. Older rechecks remain visible, but must not mask
 # current diagnostics until they have been refreshed locally.
 TRANSCRIPT_QUALITY_RECHECK_VERSION = 4
+SCHEMA_VERSION = 2
+MEETING_REVIEW_STATUSES = frozenset({"generated", "needs_review", "reviewed", "approved"})
 TRANSIENT_RETRY_MARKERS = (
     "503",
     "429",
@@ -1447,6 +1450,66 @@ def _ensure_meeting_revisions_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_meeting_workflow_tables(conn: sqlite3.Connection) -> None:
+    """Create structured-summary, evidence, and schema metadata tables."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_meta (
+            key         TEXT PRIMARY KEY,
+            value       TEXT NOT NULL,
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    conn.execute(
+        """INSERT OR IGNORE INTO app_meta (key, value, updated_at)
+           VALUES ('schema_version', ?, ?)""",
+        (str(SCHEMA_VERSION), _now()),
+    )
+    conn.execute(
+        """UPDATE app_meta
+              SET value=?, updated_at=?
+            WHERE key='schema_version' AND value<>?""",
+        (str(SCHEMA_VERSION), _now(), str(SCHEMA_VERSION)),
+    )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS meeting_items (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            meeting_id          INTEGER NOT NULL,
+            item_type           TEXT    NOT NULL,
+            item_key            TEXT    NOT NULL,
+            position            INTEGER NOT NULL,
+            payload_json        TEXT    NOT NULL,
+            evidence_json       TEXT,
+            review_status       TEXT    NOT NULL DEFAULT 'generated',
+            reviewed_by         TEXT,
+            reviewed_at         TEXT,
+            review_note         TEXT,
+            created_at          TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            updated_at          TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            UNIQUE(meeting_id, item_type, item_key)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_meeting_items_meeting_type ON meeting_items(meeting_id, item_type, position)"
+    )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS meeting_evidence (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            meeting_id          INTEGER NOT NULL,
+            original_filename   TEXT    NOT NULL,
+            stored_path         TEXT    NOT NULL,
+            sha256              TEXT    NOT NULL,
+            note                TEXT,
+            analysis_markdown   TEXT    NOT NULL,
+            status              TEXT    NOT NULL DEFAULT 'analyzed',
+            revision_id         INTEGER,
+            created_at          TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_meeting_evidence_meeting ON meeting_evidence(meeting_id, id DESC)"
+    )
+
+
 def _ensure_auth_tables(conn: sqlite3.Connection) -> None:
     """Create future account/role/audit tables without enabling enforcement."""
     conn.execute("""
@@ -1487,13 +1550,19 @@ def _ensure_auth_tables(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_meeting_quality_columns(conn: sqlite3.Connection) -> None:
-    """Add local quality-report fields to existing databases in place."""
+    """Add quality, structured-summary, and review fields in place."""
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(meetings)").fetchall()}
     columns = {
         "job_id": "TEXT",
         "quality_score": "INTEGER",
         "quality_label": "TEXT",
         "quality_report_json": "TEXT",
+        "structured_summary_json": "TEXT",
+        "review_status": "TEXT NOT NULL DEFAULT 'generated'",
+        "reviewed_at": "TEXT",
+        "reviewed_by": "TEXT",
+        "review_note": "TEXT",
+        "approved_content_sha256": "TEXT",
     }
     for name, definition in columns.items():
         if name not in existing:
@@ -1622,6 +1691,7 @@ def init_db() -> None:
         # 任務事件時間線：供維運頁面與 API 追蹤狀態變化。
         _ensure_job_events_table(conn)
         _ensure_meeting_revisions_table(conn)
+        _ensure_meeting_workflow_tables(conn)
         _ensure_auth_tables(conn)
         _ensure_meeting_fts(conn)
 
@@ -2177,6 +2247,85 @@ def is_job_cancel_requested(job_id: str) -> bool:
 # Meetings CRUD（會議記錄管理）
 # =============================================================================
 
+def _structured_summary_items(structured_summary: Optional[dict[str, Any]]) -> list[tuple[str, str, int, dict[str, Any], list[Any]]]:
+    if not isinstance(structured_summary, dict):
+        return []
+    definitions = (
+        ("discussion", "D", "discussion_summary", "evidence_timecodes"),
+        ("decision", "R", "final_decisions", "evidence_timecodes"),
+        ("action", "A", "action_items", "source_timecodes"),
+    )
+    items: list[tuple[str, str, int, dict[str, Any], list[Any]]] = []
+    for item_type, prefix, field, evidence_field in definitions:
+        raw_items = structured_summary.get(field)
+        if not isinstance(raw_items, list):
+            continue
+        for position, raw in enumerate(raw_items, start=1):
+            payload = dict(raw) if isinstance(raw, dict) else {"content": str(raw)}
+            item_key = str(payload.get("id") or f"{prefix}{position}").strip() or f"{prefix}{position}"
+            evidence = payload.get(evidence_field)
+            if not isinstance(evidence, list):
+                evidence = []
+            items.append((item_type, item_key, position, payload, evidence))
+    return items
+
+
+def _replace_meeting_items(
+    conn: sqlite3.Connection,
+    meeting_id: int,
+    structured_summary: Optional[dict[str, Any]],
+) -> None:
+    _ensure_meeting_workflow_tables(conn)
+    conn.execute("DELETE FROM meeting_items WHERE meeting_id=?", (meeting_id,))
+    now = _now()
+    for item_type, item_key, position, payload, evidence in _structured_summary_items(structured_summary):
+        conn.execute(
+            """INSERT INTO meeting_items (
+                   meeting_id, item_type, item_key, position, payload_json,
+                   evidence_json, review_status, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, 'generated', ?, ?)""",
+            (
+                meeting_id,
+                item_type,
+                item_key,
+                position,
+                json.dumps(payload, ensure_ascii=False),
+                json.dumps(evidence, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+
+
+def _meeting_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _quality_report_blockers(report: Any) -> list[int]:
+    if not isinstance(report, dict):
+        return []
+    blockers: set[int] = set()
+    for raw in report.get("blocking_segment_indices") or []:
+        try:
+            blockers.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    for segment in report.get("segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        if not segment.get("delivery_blocking") and str(segment.get("status") or "") != "failed":
+            continue
+        try:
+            blockers.add(int(segment.get("index")))
+        except (TypeError, ValueError):
+            continue
+    return sorted(blockers)
+
+
 def save_meeting(
     title: str,
     date: str,
@@ -2185,6 +2334,7 @@ def save_meeting(
     summary: Optional[str] = None,
     job_id: Optional[str] = None,
     quality_report: Optional[dict[str, Any]] = None,
+    structured_summary: Optional[dict[str, Any]] = None,
 ) -> int:
     """
     將新會議記錄存入資料庫。
@@ -2197,11 +2347,17 @@ def save_meeting(
         quality_score = quality_report.get("score") if quality_report else None
         quality_label = quality_report.get("label") if quality_report else None
         quality_report_json = json.dumps(quality_report, ensure_ascii=False) if quality_report else None
+        structured_summary_json = (
+            json.dumps(structured_summary, ensure_ascii=False)
+            if isinstance(structured_summary, dict)
+            else None
+        )
         cursor = conn.execute(
             """INSERT INTO meetings (
                    title, date, source_audio, output_path, summary,
-                   job_id, quality_score, quality_label, quality_report_json
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   job_id, quality_score, quality_label, quality_report_json,
+                   structured_summary_json, review_status
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 title,
                 date,
@@ -2212,9 +2368,12 @@ def save_meeting(
                 quality_score,
                 quality_label,
                 quality_report_json,
+                structured_summary_json,
+                "needs_review" if _quality_report_blockers(quality_report) else "generated",
             )
         )
         meeting_id = cursor.lastrowid
+        _replace_meeting_items(conn, int(meeting_id), structured_summary)
         try:
             _upsert_meeting_fts_row(
                 conn,
@@ -2245,9 +2404,22 @@ def update_meeting_quality_report(meeting_id: int, quality_report: dict[str, Any
             return False
         quality_score = report.get("score") if "score" in report else row["quality_score"]
         quality_label = report.get("label") if "label" in report else row["quality_label"]
+        review_update = ""
+        if _quality_report_blockers(report):
+            review_update = """,
+                      review_status=CASE
+                          WHEN review_status='approved' THEN 'needs_review'
+                          ELSE review_status
+                      END,
+                      approved_content_sha256=CASE
+                          WHEN review_status='approved' THEN NULL
+                          ELSE approved_content_sha256
+                      END"""
         cursor = conn.execute(
             """UPDATE meetings
-                  SET quality_score=?, quality_label=?, quality_report_json=?
+                  SET quality_score=?, quality_label=?, quality_report_json=?"""
+            + review_update
+            + """
                 WHERE id=?""",
             (quality_score, quality_label, quality_report_json, meeting_id),
         )
@@ -2781,6 +2953,8 @@ def list_meetings(
                           substr(summary, 1, 200) as summary_preview,
                           job_id, quality_score, quality_label,
                           quality_report_json,
+                          review_status, reviewed_at, reviewed_by, review_note,
+                          approved_content_sha256,
                           created_at
                    FROM meetings
                    ORDER BY created_at DESC"""
@@ -2801,6 +2975,8 @@ def list_meetings(
                       substr(summary, 1, 200) as summary_preview,
                       job_id, quality_score, quality_label,
                       quality_report_json,
+                      review_status, reviewed_at, reviewed_by, review_note,
+                      approved_content_sha256,
                       created_at
                FROM meetings
                ORDER BY created_at DESC
@@ -2820,6 +2996,8 @@ def count_meetings(needs_review: bool = False, quality_type: Optional[str] = Non
                           substr(summary, 1, 200) as summary_preview,
                           job_id, quality_score, quality_label,
                           quality_report_json,
+                          review_status, reviewed_at, reviewed_by, review_note,
+                          approved_content_sha256,
                           created_at
                    FROM meetings"""
             ).fetchall()
@@ -2871,6 +3049,52 @@ def get_meeting(meeting_id: int) -> Optional[dict]:
             record["quality_report"] = json.loads(quality_report_json) if quality_report_json else None
         except json.JSONDecodeError:
             record["quality_report"] = None
+        structured_summary_json = record.pop("structured_summary_json", None)
+        try:
+            record["structured_summary"] = (
+                json.loads(structured_summary_json)
+                if structured_summary_json
+                else None
+            )
+        except json.JSONDecodeError:
+            record["structured_summary"] = None
+        _ensure_meeting_workflow_tables(conn)
+        item_rows = conn.execute(
+            """SELECT id, item_type, item_key, position, payload_json,
+                      evidence_json, review_status, reviewed_by, reviewed_at,
+                      review_note, created_at, updated_at
+                 FROM meeting_items
+                WHERE meeting_id=?
+                ORDER BY CASE item_type
+                             WHEN 'discussion' THEN 1
+                             WHEN 'decision' THEN 2
+                             WHEN 'action' THEN 3
+                             ELSE 4
+                         END, position, id""",
+            (meeting_id,),
+        ).fetchall()
+        structured_items: list[dict[str, Any]] = []
+        for item_row in item_rows:
+            item = dict(item_row)
+            try:
+                item["payload"] = json.loads(item.pop("payload_json"))
+            except (TypeError, json.JSONDecodeError):
+                item["payload"] = {}
+            try:
+                item["evidence"] = json.loads(item.pop("evidence_json") or "[]")
+            except (TypeError, json.JSONDecodeError):
+                item["evidence"] = []
+            structured_items.append(item)
+        record["structured_items"] = structured_items
+        evidence_rows = conn.execute(
+            """SELECT id, original_filename, stored_path, sha256, note,
+                      analysis_markdown, status, revision_id, created_at
+                 FROM meeting_evidence
+                WHERE meeting_id=?
+                ORDER BY id DESC""",
+            (meeting_id,),
+        ).fetchall()
+        record["evidence_records"] = [dict(row) for row in evidence_rows]
         # 讀取完整的 Markdown 內容
         output_file = Path(record["output_path"])
         if output_file.exists():
@@ -2886,6 +3110,7 @@ def update_meeting_content_with_revision(
     full_content: str,
     summary: str,
     source: str = "manual_edit",
+    preserve_structured_summary: bool = False,
 ) -> int:
     """Replace meeting Markdown while preserving the previous full content."""
     record = get_meeting(meeting_id)
@@ -2907,7 +3132,22 @@ def update_meeting_content_with_revision(
                 (meeting_id, source, record["full_content"], _now()),
             )
             revision_id = int(cursor.lastrowid)
-            conn.execute("UPDATE meetings SET summary=? WHERE id=?", (summary, meeting_id))
+            structured_update = ""
+            if not preserve_structured_summary:
+                structured_update = ", structured_summary_json=NULL"
+                _replace_meeting_items(conn, meeting_id, None)
+            conn.execute(
+                """UPDATE meetings
+                      SET summary=?,
+                          review_status='needs_review',
+                          reviewed_at=NULL,
+                          reviewed_by=NULL,
+                          approved_content_sha256=NULL"""
+                + structured_update
+                + """
+                    WHERE id=?""",
+                (summary, meeting_id),
+            )
             try:
                 _upsert_meeting_fts_row(
                     conn,
@@ -2927,6 +3167,165 @@ def update_meeting_content_with_revision(
 
     logger.info("✏️  會議記錄已人工修訂並保留版本（ID: %s，revision: %s）", meeting_id, revision_id)
     return revision_id
+
+
+def update_meeting_review_status(
+    meeting_id: int,
+    status: str,
+    *,
+    reviewed_by: Optional[str] = None,
+    note: Optional[str] = None,
+) -> dict[str, Any]:
+    """Move one meeting through the explicit human-review workflow."""
+    normalized = str(status or "").strip().lower()
+    if normalized not in MEETING_REVIEW_STATUSES:
+        raise ValueError(f"不支援的會議審查狀態：{status}")
+
+    with get_db() as conn:
+        _ensure_meeting_quality_columns(conn)
+        row = conn.execute(
+            """SELECT id, output_path, quality_report_json, review_status
+                 FROM meetings
+                WHERE id=?""",
+            (meeting_id,),
+        ).fetchone()
+        if not row:
+            raise KeyError(f"找不到會議記錄：ID={meeting_id}")
+
+        try:
+            quality_report = json.loads(row["quality_report_json"] or "{}")
+        except json.JSONDecodeError:
+            quality_report = {}
+        blockers = _quality_report_blockers(quality_report)
+        current_status = str(row["review_status"] or "generated")
+        if normalized == "approved" and current_status != "reviewed":
+            raise ValueError("會議必須先完成人工複核，才能核准。")
+        if normalized == "approved" and blockers:
+            labels = "、".join(str(index + 1) for index in blockers)
+            raise ValueError(f"第 {labels} 段仍有阻擋交付的品質問題，不能核准。")
+
+        approved_hash = None
+        if normalized == "approved":
+            output_file = Path(row["output_path"])
+            if not output_file.is_file():
+                raise FileNotFoundError(f"找不到會議 Markdown：{output_file}")
+            approved_hash = _meeting_file_sha256(output_file)
+
+        timestamp = _now() if normalized in {"reviewed", "approved"} else None
+        actor = (
+            (reviewed_by or "").strip() or None
+            if normalized in {"reviewed", "approved"}
+            else None
+        )
+        review_note = (note or "").strip() or None
+        conn.execute(
+            """UPDATE meetings
+                  SET review_status=?,
+                      reviewed_at=?,
+                      reviewed_by=?,
+                      review_note=?,
+                      approved_content_sha256=?
+                WHERE id=?""",
+            (
+                normalized,
+                timestamp,
+                actor,
+                review_note,
+                approved_hash,
+                meeting_id,
+            ),
+        )
+
+    updated = get_meeting(meeting_id)
+    if not updated:
+        raise KeyError(f"找不到會議記錄：ID={meeting_id}")
+    return updated
+
+
+def append_meeting_evidence_with_revision(
+    meeting_id: int,
+    *,
+    full_content: str,
+    summary: str,
+    original_filename: str,
+    stored_path: str,
+    sha256: str,
+    note: Optional[str],
+    analysis_markdown: str,
+) -> tuple[int, int]:
+    """Persist evidence metadata and a searchable Markdown revision together."""
+    record = get_meeting(meeting_id)
+    if not record:
+        raise KeyError(f"找不到會議記錄：ID={meeting_id}")
+    output_file = Path(record["output_path"])
+    if not output_file.is_file():
+        raise FileNotFoundError(f"找不到會議 Markdown：{output_file}")
+
+    temp_file = output_file.with_suffix(output_file.suffix + ".evidence.tmp")
+    temp_file.write_text(full_content, encoding="utf-8")
+    try:
+        with get_db() as conn:
+            _ensure_meeting_revisions_table(conn)
+            _ensure_meeting_workflow_tables(conn)
+            revision_cursor = conn.execute(
+                """INSERT INTO meeting_revisions (meeting_id, source, content, created_at)
+                   VALUES (?, 'evidence_append', ?, ?)""",
+                (meeting_id, record["full_content"], _now()),
+            )
+            revision_id = int(revision_cursor.lastrowid)
+            evidence_cursor = conn.execute(
+                """INSERT INTO meeting_evidence (
+                       meeting_id, original_filename, stored_path, sha256, note,
+                       analysis_markdown, status, revision_id, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, 'analyzed', ?, ?)""",
+                (
+                    meeting_id,
+                    original_filename,
+                    stored_path,
+                    sha256,
+                    (note or "").strip() or None,
+                    analysis_markdown,
+                    revision_id,
+                    _now(),
+                ),
+            )
+            evidence_id = int(evidence_cursor.lastrowid)
+            conn.execute(
+                """UPDATE meetings
+                      SET summary=?,
+                          review_status='needs_review',
+                          reviewed_at=NULL,
+                          reviewed_by=NULL,
+                          approved_content_sha256=NULL
+                    WHERE id=?""",
+                (summary, meeting_id),
+            )
+            _upsert_meeting_fts_row(
+                conn,
+                meeting_id,
+                record["title"],
+                record["source_audio"],
+                summary,
+                record["output_path"],
+                content=full_content,
+            )
+            temp_file.replace(output_file)
+    finally:
+        if temp_file.exists():
+            temp_file.unlink()
+    return revision_id, evidence_id
+
+
+def get_schema_version() -> int:
+    with get_db() as conn:
+        _ensure_meeting_workflow_tables(conn)
+        row = conn.execute(
+            "SELECT value FROM app_meta WHERE key='schema_version'"
+        ).fetchone()
+        try:
+            return int(row["value"]) if row else 0
+        except (TypeError, ValueError):
+            return 0
 
 
 def list_meeting_revisions(meeting_id: int) -> list[dict[str, Any]]:
@@ -3098,6 +3497,8 @@ def search_meetings(
                           substr(m.summary, 1, 200) as summary_preview,
                           m.job_id, m.quality_score, m.quality_label,
                           m.quality_report_json,
+                          m.review_status, m.reviewed_at, m.reviewed_by,
+                          m.review_note, m.approved_content_sha256,
                           m.created_at
                      FROM meeting_fts
                      JOIN meetings AS m ON m.id = meeting_fts.rowid
@@ -3116,6 +3517,8 @@ def search_meetings(
                           substr(m.summary, 1, 200) as summary_preview,
                           m.job_id, m.quality_score, m.quality_label,
                           m.quality_report_json,
+                          m.review_status, m.reviewed_at, m.reviewed_by,
+                          m.review_note, m.approved_content_sha256,
                           m.created_at
                      FROM meeting_content_fts
                      JOIN meetings AS m ON m.id = meeting_content_fts.rowid
@@ -3134,6 +3537,8 @@ def search_meetings(
                           substr(m.summary, 1, 200) as summary_preview,
                           m.job_id, m.quality_score, m.quality_label,
                           m.quality_report_json,
+                          m.review_status, m.reviewed_at, m.reviewed_by,
+                          m.review_note, m.approved_content_sha256,
                           m.created_at
                      FROM meetings AS m
                      LEFT JOIN meeting_content_fts AS c ON c.rowid = m.id
@@ -3155,6 +3560,8 @@ def search_meetings(
                           substr(summary, 1, 200) as summary_preview,
                           job_id, quality_score, quality_label,
                           quality_report_json,
+                          review_status, reviewed_at, reviewed_by, review_note,
+                          approved_content_sha256,
                           created_at
                    FROM meetings
                    WHERE title LIKE ?
@@ -3205,7 +3612,10 @@ def delete_meeting(meeting_id: int) -> bool:
     # 刪除資料庫記錄
     with get_db() as conn:
         _ensure_meeting_revisions_table(conn)
+        _ensure_meeting_workflow_tables(conn)
         conn.execute("DELETE FROM meeting_revisions WHERE meeting_id=?", (meeting_id,))
+        conn.execute("DELETE FROM meeting_items WHERE meeting_id=?", (meeting_id,))
+        conn.execute("DELETE FROM meeting_evidence WHERE meeting_id=?", (meeting_id,))
         _remove_meeting_fts_row(conn, meeting_id)
         conn.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
         logger.info(f"🗑️  已從資料庫移除會議記錄（ID: {meeting_id}）")

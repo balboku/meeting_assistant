@@ -4426,6 +4426,26 @@ def _segment_cache_quality_issues(
     )
 
 
+def _quarantine_segment_cache_file(output_dir: Path, cache_file: Path) -> Optional[Path]:
+    """Move a rejected cache aside so it remains inspectable and recoverable."""
+    cache_root = output_dir / SEGMENT_CACHE_DIRNAME
+    try:
+        relative = cache_file.resolve().relative_to(cache_root.resolve())
+    except (OSError, ValueError):
+        relative = Path(cache_file.name)
+    destination = output_dir / "segment_cache_quarantine" / "runtime" / relative
+    if destination.exists():
+        destination = destination.with_name(
+            f"{destination.stem}_{uuid.uuid4().hex[:8]}{destination.suffix}"
+        )
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.replace(destination)
+    except OSError:
+        return None
+    return destination
+
+
 def _load_segment_transcript_cache(
     output_dir: Path,
     job_id: str,
@@ -4465,10 +4485,13 @@ def _load_segment_transcript_cache(
                 segment_index + 1,
                 "；".join(issues),
             )
-            try:
-                cache_file.unlink()
-            except OSError:
-                pass
+            quarantined = _quarantine_segment_cache_file(output_dir, cache_file)
+            if quarantined is not None:
+                logger.warning(
+                    "[%s] 🧯 不安全快取已隔離：%s",
+                    job_id,
+                    quarantined,
+                )
             continue
         if cache_file == shared_file:
             logger.info("[%s] ♻️  第 %s 段使用相同音檔的共用快取", job_id, segment_index + 1)
@@ -7893,6 +7916,19 @@ def _summary_response_to_markdown(
     return cleaned.strip()
 
 
+def _summary_response_to_payload_and_markdown(
+    text: str,
+    full_transcript: str = "",
+    meeting_date: Optional[date] = None,
+) -> tuple[str, dict[str, Any]]:
+    """Require the structured contract used for durable meeting records."""
+    payload = _extract_json_object(text)
+    if not payload:
+        raise RuntimeError("摘要模型未回傳有效 JSON，保留任務以便自動重試。")
+    normalized = _normalize_summary_payload(payload, full_transcript, meeting_date)
+    return _summary_json_to_markdown(normalized), normalized
+
+
 def _build_summary_prompt(full_transcript: str, meeting_date: Optional[date] = None) -> str:
     actual_meeting_date = meeting_date or datetime.now().date()
     weekday_names = "一二三四五六日"
@@ -8020,7 +8056,8 @@ def _generate_meeting_content_from_transcript(
     summary_verifier_model: Optional[str] = None,
     meeting_date: Optional[date] = None,
     high_quality: bool = False,
-) -> tuple[str, str]:
+    return_structured: bool = False,
+):
     update_job_status(
         job_id,
         "processing",
@@ -8048,7 +8085,7 @@ def _generate_meeting_content_from_transcript(
         stage="會議摘要生成",
     )
 
-    summary_section = _summary_response_to_markdown(
+    summary_section, structured_summary = _summary_response_to_payload_and_markdown(
         response.text or "",
         full_transcript,
         meeting_date,
@@ -8095,9 +8132,7 @@ Return JSON only, without Markdown fences, using exactly these top-level keys:
             job_id=job_id,
             stage="高品質摘要查核",
         )
-        if not _extract_json_object(verification_response.text or ""):
-            raise RuntimeError("高品質摘要查核未回傳有效 JSON，保留任務以便自動重試。")
-        summary_section = _summary_response_to_markdown(
+        summary_section, structured_summary = _summary_response_to_payload_and_markdown(
             verification_response.text or "",
             full_transcript,
             meeting_date,
@@ -8106,7 +8141,17 @@ Return JSON only, without Markdown fences, using exactly these top-level keys:
 
     meeting_content = _replace_transcript_section(summary_section, full_transcript)
     meeting_content = _prepend_transcript_quality_notice(meeting_content, full_transcript)
+    if return_structured:
+        return meeting_content, summary_model_used, structured_summary
     return meeting_content, summary_model_used
+
+
+def _meeting_generation_values(result: Any) -> tuple[str, str, Optional[dict[str, Any]]]:
+    """Accept legacy two-value test integrations while persisting new payloads."""
+    if not isinstance(result, tuple) or len(result) < 2:
+        raise RuntimeError("會議摘要生成結果格式無效。")
+    structured = result[2] if len(result) >= 3 and isinstance(result[2], dict) else None
+    return str(result[0]), str(result[1]), structured
 
 
 def _build_quality_report(
@@ -8933,6 +8978,7 @@ def process_audio_task(
     client_recording_warning = normalize_client_recording_warning(client_recording_warning)
     custom_vocabulary = normalize_custom_vocabulary(custom_vocabulary)
     summary_model_used = model
+    structured_summary: Optional[dict[str, Any]] = None
     actual_meeting_date = _infer_meeting_date(meeting_title, audio_path)
 
     try:
@@ -9099,15 +9145,18 @@ def process_audio_task(
                     "status": "reused",
                     "issues": [],
                 } for index, audio_slice in enumerate(audio_slices))
-            meeting_content, summary_model_used = _generate_meeting_content_from_transcript(
-                client=client,
-                full_transcript=full_transcript,
-                job_id=job_id,
-                summary_primary_model=summary_primary_model,
-                summary_secondary_model=summary_secondary_model,
-                summary_verifier_model=summary_verifier_model,
-                meeting_date=actual_meeting_date,
-                high_quality=high_quality_summary,
+            meeting_content, summary_model_used, structured_summary = _meeting_generation_values(
+                _generate_meeting_content_from_transcript(
+                    client=client,
+                    full_transcript=full_transcript,
+                    job_id=job_id,
+                    summary_primary_model=summary_primary_model,
+                    summary_secondary_model=summary_secondary_model,
+                    summary_verifier_model=summary_verifier_model,
+                    meeting_date=actual_meeting_date,
+                    high_quality=high_quality_summary,
+                    return_structured=True,
+                )
             )
 
         elif is_segmented:
@@ -10157,15 +10206,18 @@ def process_audio_task(
             # ------------------------------------------------------------------
             # 步驟 5：用完整逐字稿生成摘要/決議/待辦
             # ------------------------------------------------------------------
-            meeting_content, summary_model_used = _generate_meeting_content_from_transcript(
-                client=client,
-                full_transcript=full_transcript,
-                job_id=job_id,
-                summary_primary_model=summary_primary_model,
-                summary_secondary_model=summary_secondary_model,
-                summary_verifier_model=summary_verifier_model,
-                meeting_date=actual_meeting_date,
-                high_quality=high_quality_summary,
+            meeting_content, summary_model_used, structured_summary = _meeting_generation_values(
+                _generate_meeting_content_from_transcript(
+                    client=client,
+                    full_transcript=full_transcript,
+                    job_id=job_id,
+                    summary_primary_model=summary_primary_model,
+                    summary_secondary_model=summary_secondary_model,
+                    summary_verifier_model=summary_verifier_model,
+                    meeting_date=actual_meeting_date,
+                    high_quality=high_quality_summary,
+                    return_structured=True,
+                )
             )
 
         else:
@@ -10705,19 +10757,23 @@ def process_audio_task(
             )
             _raise_if_delivery_blocked_by_segment_quality(segment_report)
             _raise_if_full_transcript_unsafe(full_transcript, job_id)
-            meeting_content, summary_model_used = _generate_meeting_content_from_transcript(
-                client=client,
-                full_transcript=full_transcript,
-                job_id=job_id,
-                summary_primary_model=summary_primary_model,
-                summary_secondary_model=summary_secondary_model,
-                summary_verifier_model=summary_verifier_model,
-                meeting_date=actual_meeting_date,
-                high_quality=high_quality_summary,
+            meeting_content, summary_model_used, structured_summary = _meeting_generation_values(
+                _generate_meeting_content_from_transcript(
+                    client=client,
+                    full_transcript=full_transcript,
+                    job_id=job_id,
+                    summary_primary_model=summary_primary_model,
+                    summary_secondary_model=summary_secondary_model,
+                    summary_verifier_model=summary_verifier_model,
+                    meeting_date=actual_meeting_date,
+                    high_quality=high_quality_summary,
+                    return_structured=True,
+                )
             )
 
         repair_model = summary_model_used
         repair_fallback_model = summary_secondary_model if repair_model != summary_secondary_model else model
+        generated_meeting_content = meeting_content
         meeting_content = _normalize_domain_terms(_repair_meeting_content_if_needed(
             client=client,
             model=repair_model,
@@ -10725,6 +10781,10 @@ def process_audio_task(
             job_id=job_id,
             fallback_model=repair_fallback_model,
         ))
+        if meeting_content != generated_meeting_content:
+            # A repair can rewrite D/R/A. Avoid persisting JSON that no longer
+            # exactly represents the delivered Markdown.
+            structured_summary = None
         meeting_content = _finalize_meeting_content(meeting_content, full_transcript, job_id)
         logger.info(f"[{job_id}] ✅ 會議記錄生成成功")
 
@@ -10818,6 +10878,7 @@ quality_label: {quality_report['label']}
             summary=summary_preview,
             job_id=job_id,
             quality_report=quality_report,
+            structured_summary=structured_summary,
         )
 
         # ------------------------------------------------------------------

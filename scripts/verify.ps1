@@ -53,7 +53,7 @@ Invoke-Check "Unsafe segment cache prune dry-run" {
     Write-Output $json
     $payload = $json | ConvertFrom-Json
     if ([int]$payload.would_delete -gt 0) {
-        throw ("{0} unsafe segment cache files remain; run scripts/prune_bad_segment_cache.py --apply first." -f $payload.would_delete)
+        throw ("{0} unsafe segment cache files remain; run scripts/prune_bad_segment_cache.py --apply to quarantine them first." -f $payload.would_delete)
     }
 }
 

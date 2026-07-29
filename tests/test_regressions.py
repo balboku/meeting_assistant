@@ -20,6 +20,47 @@ import httpx
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def structured_summary_response(summary_content: str) -> str:
+    summary_lines = [
+        line.strip()
+        for line in str(summary_content or "").splitlines()
+        if line.strip()
+        and not line.lstrip().startswith(("#", "---", "|"))
+    ]
+    summary_text = summary_lines[0] if summary_lines else "測試摘要"
+    return json.dumps(
+        {
+            "discussion_summary": [
+                {
+                    "topic": "測試摘要",
+                    "summary": summary_text,
+                    "evidence_timecodes": ["00:00"],
+                }
+            ],
+            "final_decisions": [
+                {
+                    "decision": "尚未決定",
+                    "status": "pending",
+                    "related_discussions": ["D1"],
+                    "evidence_timecodes": ["00:00"],
+                }
+            ],
+            "action_items": [
+                {
+                    "task": "確認後續事項",
+                    "owner": "發言者 A",
+                    "due": "未提及",
+                    "priority": "中",
+                    "related_discussions": ["D1"],
+                    "related_decisions": ["R1"],
+                    "source_timecodes": ["00:00"],
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+
 def asgi_request(app, method: str, path: str, asgi_client=("127.0.0.1", 123), **kwargs):
     async def _request():
         transport = httpx.ASGITransport(app=app, client=asgi_client)
@@ -485,6 +526,7 @@ class ProjectGovernanceRegressionTests(unittest.TestCase):
     def test_ci_runs_quality_backfill_dry_run(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
+        self.assertIn("python scripts/run_ci_tests.py", workflow)
         self.assertIn("Quality review backfill dry-run", workflow)
         self.assertIn("python scripts/backfill_quality_review_segments.py", workflow)
         self.assertIn("Markdown quality note backfill dry-run", workflow)
@@ -1411,6 +1453,11 @@ class StartupHealthRegressionTests(unittest.TestCase):
         self.assertIn("checks", payload)
         self.assertFalse(payload["auth"]["enabled"])
         self.assertTrue(any(check["name"] == "database" for check in payload["checks"]))
+        self.assertIn("loaded_commit", payload["build"])
+        self.assertIn("matches_workspace", payload["build"])
+        self.assertIn("worker_running", payload["runtime"])
+        self.assertIn("schema_version", payload["runtime"])
+        self.assertIn("segment_cache_version", payload["runtime"])
 
 
 class MediaValidationRegressionTests(unittest.TestCase):
@@ -2883,7 +2930,10 @@ class TaskRegressionTests(unittest.TestCase):
                 cache_dir=output_dir / tasks.SEGMENT_CACHE_DIRNAME,
                 apply=True,
             )
-            self.assertEqual(applied["deleted"], 1)
+            self.assertEqual(applied["quarantined"], 1)
+            self.assertEqual(applied["deleted"], 0)
+            self.assertTrue(Path(applied["manifest_path"]).is_file())
+            self.assertTrue(Path(applied["records"][0]["quarantine_path"]).is_file())
             self.assertFalse(cache_file.exists())
 
     def test_segmented_audio_task_reuses_cached_transcripts(self):
@@ -2904,7 +2954,7 @@ class TaskRegressionTests(unittest.TestCase):
 
         class FakeModels:
             def generate_content(self, **kwargs):
-                return type("Response", (), {"text": summary_content})()
+                return type("Response", (), {"text": structured_summary_response(summary_content)})()
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -2974,7 +3024,7 @@ class TaskRegressionTests(unittest.TestCase):
 
         class FakeModels:
             def generate_content(self, **kwargs):
-                return type("Response", (), {"text": summary_content})()
+                return type("Response", (), {"text": structured_summary_response(summary_content)})()
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
@@ -3511,7 +3561,7 @@ class TaskRegressionTests(unittest.TestCase):
 
             def generate_content(self, **kwargs):
                 self.calls.append(kwargs)
-                return type("Response", (), {"text": summary_content})()
+                return type("Response", (), {"text": structured_summary_response(summary_content)})()
 
         class FakeClient:
             def __init__(self):
@@ -3588,8 +3638,11 @@ class TaskRegressionTests(unittest.TestCase):
 
             def generate_content(self, **kwargs):
                 self.calls.append(kwargs)
-                text = malformed_summary if len(self.calls) == 1 else repaired_with_short_transcript
-                return type("Response", (), {"text": text})()
+                return type(
+                    "Response",
+                    (),
+                    {"text": structured_summary_response(malformed_summary)},
+                )()
 
         class FakeClient:
             def __init__(self):
@@ -3609,6 +3662,11 @@ class TaskRegressionTests(unittest.TestCase):
                  mock.patch.object(tasks, "_transcribe_segment", return_value=full_transcript), \
                  mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
                  mock.patch.object(tasks, "update_job_status"), \
+                 mock.patch.object(
+                     tasks,
+                     "_repair_meeting_content_if_needed",
+                     return_value=repaired_with_short_transcript,
+                 ) as repair_mock, \
                  mock.patch.object(tasks, "save_meeting"):
                 output_path = tasks.process_audio_task(
                     job_id="preserve-transcript-job",
@@ -3620,7 +3678,8 @@ class TaskRegressionTests(unittest.TestCase):
                 )
 
             self.assertIsNotNone(output_path)
-            self.assertEqual(len(fake_client.models.calls), 2)
+            self.assertEqual(len(fake_client.models.calls), 1)
+            repair_mock.assert_called_once()
             content = output_path.read_text(encoding="utf-8")
             self.assertIn("[00:30] **[發言者 A]**：不可省略的第二句。", content)
             self.assertNotIn("為節省篇幅", content)
@@ -3651,7 +3710,7 @@ class TaskRegressionTests(unittest.TestCase):
                 self.calls.append(kwargs)
                 if kwargs["model"] == "gemma-4-31b-it":
                     raise RuntimeError("primary summary model unavailable")
-                return type("Response", (), {"text": summary_content})()
+                return type("Response", (), {"text": structured_summary_response(summary_content)})()
 
         class FakeClient:
             def __init__(self):
@@ -19860,6 +19919,152 @@ console.log('quality_type_filter_ok');
             self.skipTest("Node.js is not available")
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class MeetingReviewWorkflowRegressionTests(unittest.TestCase):
+    def test_structured_summary_review_and_revision_invalidation(self):
+        from backend import database
+
+        structured = {
+            "discussion_summary": [{"id": "D1", "summary": "討論內容", "evidence_timecodes": ["00:10"]}],
+            "final_decisions": [{"id": "R1", "decision": "採用方案", "evidence_timecodes": ["00:20"]}],
+            "action_items": [{"id": "A1", "task": "完成測試", "source_timecodes": ["00:30"]}],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            markdown = root / "meeting.md"
+            markdown.write_text("# 會議\n\n初始內容", encoding="utf-8")
+            with mock.patch.object(database, "DB_PATH", root / "meetings.db"):
+                database.init_db()
+                meeting_id = database.save_meeting(
+                    title="審查流程",
+                    date="2026/07/29",
+                    source_audio="meeting.wav",
+                    output_path=str(markdown),
+                    summary="初始摘要",
+                    structured_summary=structured,
+                )
+                created = database.get_meeting(meeting_id)
+                self.assertEqual(created["review_status"], "generated")
+                self.assertEqual(len(created["structured_items"]), 3)
+                self.assertEqual(created["structured_summary"]["action_items"][0]["id"], "A1")
+
+                reviewed = database.update_meeting_review_status(
+                    meeting_id,
+                    "reviewed",
+                    reviewed_by="reviewer@example.com",
+                    note="已核對逐字稿",
+                )
+                self.assertEqual(reviewed["review_status"], "reviewed")
+                approved = database.update_meeting_review_status(
+                    meeting_id,
+                    "approved",
+                    reviewed_by="reviewer@example.com",
+                )
+                self.assertEqual(
+                    approved["approved_content_sha256"],
+                    hashlib.sha256(markdown.read_bytes()).hexdigest(),
+                )
+
+                database.update_meeting_content_with_revision(
+                    meeting_id,
+                    "# 會議\n\n人工修訂",
+                    "人工修訂",
+                )
+                revised = database.get_meeting(meeting_id)
+                self.assertEqual(revised["review_status"], "needs_review")
+                self.assertIsNone(revised["approved_content_sha256"])
+                self.assertIsNone(revised["structured_summary"])
+                self.assertEqual(revised["structured_items"], [])
+
+    def test_approval_rejects_delivery_blocking_segments(self):
+        from backend import database
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            markdown = root / "blocked.md"
+            markdown.write_text("# 尚待修正", encoding="utf-8")
+            with mock.patch.object(database, "DB_PATH", root / "meetings.db"):
+                database.init_db()
+                meeting_id = database.save_meeting(
+                    title="阻擋測試",
+                    date="2026/07/29",
+                    source_audio="blocked.wav",
+                    output_path=str(markdown),
+                    quality_report={"blocking_segment_indices": [1]},
+                )
+                database.update_meeting_review_status(meeting_id, "reviewed")
+                with self.assertRaisesRegex(ValueError, "不能核准"):
+                    database.update_meeting_review_status(meeting_id, "approved")
+
+    def test_evidence_creates_revision_metadata_hash_and_search_index(self):
+        from backend import database, evidence
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            markdown = root / "evidence.md"
+            markdown.write_text("# 會議\n\n## 一、摘要\n\n原始摘要", encoding="utf-8")
+            source = root / "proof.txt"
+            source.write_text("批次驗證結果 PASS", encoding="utf-8")
+            with mock.patch.object(database, "DB_PATH", root / "meetings.db"), \
+                    mock.patch.object(evidence, "ATTACHMENT_DIR", root / "attachments"), \
+                    mock.patch.object(
+                        evidence,
+                        "generate_evidence_markdown",
+                        return_value="### 資料：proof.txt\n- 擷取重點：批次驗證結果 PASS",
+                    ):
+                database.init_db()
+                meeting_id = database.save_meeting(
+                    title="佐證測試",
+                    date="2026/07/29",
+                    source_audio="evidence.wav",
+                    output_path=str(markdown),
+                    summary="原始摘要",
+                )
+                result = evidence.analyze_and_append_evidence(
+                    meeting_id,
+                    source,
+                    "proof.txt",
+                    note="請核對結果",
+                )
+                record = database.get_meeting(meeting_id)
+                matches = database.search_meetings("批次驗證結果")
+
+                self.assertEqual(result["attachment_sha256"], hashlib.sha256(source.read_bytes()).hexdigest())
+                self.assertEqual(len(database.list_meeting_revisions(meeting_id)), 1)
+                self.assertEqual(len(record["evidence_records"]), 1)
+                self.assertEqual(record["review_status"], "needs_review")
+                self.assertEqual(matches[0]["id"], meeting_id)
+
+    def test_review_endpoint_and_frontend_controls_are_exposed(self):
+        from backend import database
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            markdown = root / "api-review.md"
+            markdown.write_text("# API review", encoding="utf-8")
+            with mock.patch.object(database, "DB_PATH", root / "meetings.db"):
+                database.init_db()
+                meeting_id = database.save_meeting(
+                    title="API 審查",
+                    date="2026/07/29",
+                    source_audio="api.wav",
+                    output_path=str(markdown),
+                )
+                response = asgi_request(
+                    main.app,
+                    "PUT",
+                    f"/meetings/{meeting_id}/review",
+                    json={"status": "reviewed", "reviewer": "測試者", "note": "已查核"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["review_status"], "reviewed")
+
+        frontend = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("function renderMeetingReviewPanel", frontend)
+        self.assertIn("function updateMeetingReview", frontend)
+        self.assertIn("/review`", frontend)
 
 
 if __name__ == "__main__":
