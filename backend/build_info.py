@@ -10,7 +10,7 @@ from typing import Any
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 SOURCE_SUFFIXES = {".py", ".html", ".js", ".css", ".ps1"}
 
 

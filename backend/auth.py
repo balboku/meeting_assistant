@@ -142,3 +142,56 @@ def require_permission(actor: AuthActor, permission: str) -> None:
         return
     if not actor.can(permission):
         raise HTTPException(status_code=403, detail=f"角色 {actor.role} 缺少權限：{permission}")
+
+
+def permission_for_request(method: str, path: str) -> Optional[str]:
+    """Return the least privilege required for one HTTP operation.
+
+    Public application-shell and webhook paths return ``None``.  Keeping this
+    policy in one place prevents newly added business routes from accidentally
+    bypassing RBAC when the feature flag is enabled.
+    """
+    verb = str(method or "GET").upper()
+    route = "/" + str(path or "").lstrip("/")
+    if (
+        route in {"/", "/history", "/favicon.ico", "/health", "/config", "/line-webhook"}
+        or route.startswith(("/static/", "/docs", "/redoc", "/openapi.json"))
+    ):
+        return None
+
+    if route.startswith("/admin/users"):
+        return "user:manage"
+    if route.startswith("/admin/audit-logs"):
+        return "audit:read"
+    if route == "/metrics":
+        return "job:read"
+    if route in {"/upload-media", "/upload-audio"}:
+        return "meeting:write"
+    if route.startswith("/status/"):
+        return "job:read"
+    if route == "/jobs" or route.startswith("/jobs/"):
+        return "job:read" if verb in {"GET", "HEAD"} else "job:manage"
+
+    if route.startswith("/source-media"):
+        if verb in {"GET", "HEAD"}:
+            return "meeting:read"
+        if verb == "DELETE" or route.endswith("/archive-unlinked"):
+            return "meeting:delete"
+        return "meeting:write"
+
+    if route == "/meetings" or route.startswith("/meetings/"):
+        if verb in {"GET", "HEAD"}:
+            return "meeting:export" if "/export/" in route else "meeting:read"
+        if verb == "DELETE":
+            return "meeting:delete"
+        if (
+            route.endswith("/rerun")
+            or "/quality/" in route
+            or route == "/meetings/quality/recheck-all"
+        ):
+            return "meeting:rerun"
+        return "meeting:write"
+
+    # Unknown API routes still pass through FastAPI and normally become 404.
+    # Default-deny only affects known business namespaces above.
+    return None

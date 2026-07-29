@@ -157,7 +157,7 @@ TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MAX_SPAN_SECONDS=30
 
 安全預設：`/line-webhook` 可公開給 LINE 呼叫；Web 介面與管理 API 允許本機與信任本機網段存取。若要透過 ngrok 或其他公開網路管理，請使用 `APP_API_KEY`。
 
-帳號、角色與稽核紀錄的資料表、helper 與管理 API 已先完成，但 `MEETING_AUTH_ENABLED` 預設為 `0`，目前不會改變既有同網段 / API key 使用方式。啟用前請先建立同仁帳號、角色配置與登入來源；啟用後系統只會從 `app_users` 讀取角色，HTTP header 只提供使用者身分，不可用來授權角色。未啟用時 `/admin/users` 與 `/admin/audit-logs` 會回傳 404。
+帳號、角色、稽核紀錄與中央路由權限政策已完成，但 `MEETING_AUTH_ENABLED` 預設為 `0`，因此不會改變既有同網段 / API key 使用方式。啟用前請先建立同仁帳號、角色配置與可信任的身分 header 來源；啟用後所有 jobs、meetings、source-media 與 admin 路由都依最小權限檢查，系統只從 `app_users` 讀取角色，HTTP header 只提供使用者身分，不可用來授權角色。未啟用時 `/admin/users` 與 `/admin/audit-logs` 會回傳 404。
 
 > 資安提醒：不要提交 `.env`、`meetings.db*`、`temp/`、`output/`、`backups/`、`logs/`、原始錄音、會議記錄或匯出的文件。若金鑰曾暴露，請立即到對應平台輪換 `GEMINI_API_KEY`、`APP_API_KEY`、LINE token 與 ngrok token。
 
@@ -253,7 +253,7 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `MEETING_OUTPUT_DIR` | `./output` | 生成 Markdown 會議記錄的輸出資料夾。 |
 | `MEETING_SOURCE_AUDIO_DIR` | `./output/source_audio` | 已上傳原始錄音/錄影的保留資料夾，處理完成後不會自動刪除。 |
 | `MEETING_ATTACHMENT_DIR` | `./output/attachments` | 會議補充資料、截圖、PDF、文件的保存位置。 |
-| `MEETING_BACKUP_DIR` | `./backups` | 啟動維護時保存 SQLite 備份的位置。 |
+| `MEETING_BACKUP_DIR` | `./backups` | 啟動維護時保存一致性 SQLite 備份與 DB＋Markdown＋附件記錄快照的位置。 |
 | `MEETING_DOCX_TEMPLATE_PATH` | `./4-QA-005 V01 會議紀錄.docx` | Word 匯出使用的本機範本路徑。公司表單範本請保留在本機，不提交到 Git。 |
 | `DB_BACKUP_KEEP` | `5` | 保留最近幾份資料庫備份。 |
 | `SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS` | `90` | 手動移除原始錄音/錄影後，`backups/source_media_deleted/` 備份保留天數；設為 `0` 可停用自動清理。 |
@@ -338,9 +338,9 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `TRANSCRIPT_SHORT_CYCLE_DUPLICATE_WINDOW_TURNS` | `4` | 搜尋異常時採用的相鄰發言視窗大小。 |
 | `TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MAX_SPAN_SECONDS` | `30` | 同一近似重複視窗允許的最大時間跨度。 |
 | `MEETING_ASSISTANT_TRUST_LOCAL_NETWORK` | `1` | 是否允許同 Wi-Fi / 信任本機網段直接開 Web 介面；設為 `0` 時手機網址會改用 `api_key`。 |
-| `MEETING_AUTH_ENABLED` | `0` | 未來帳號/角色權限開關。預設停用；停用時不會要求登入，也不會改變現有 API key / 同網段行為。 |
-| `MEETING_AUTH_USER_HEADER` | `X-Meeting-User` | 未來啟用帳號權限時讀取使用者身分的 HTTP header；角色必須先寫在 `app_users`。 |
-| `MEETING_AUTH_DEFAULT_ROLE` | `viewer` | 未來啟用帳號權限時，既有使用者資料缺少角色時的保守預設。 |
+| `MEETING_AUTH_ENABLED` | `0` | 帳號/角色權限開關。預設停用；啟用後中央政策會保護所有業務路由，停用時維持現有 API key / 同網段行為。 |
+| `MEETING_AUTH_USER_HEADER` | `X-Meeting-User` | 啟用帳號權限時由可信任代理提供的使用者身分 header；角色必須先寫在 `app_users`。 |
+| `MEETING_AUTH_DEFAULT_ROLE` | `viewer` | 啟用帳號權限時，既有使用者資料缺少角色時的保守預設。 |
 | `MEETING_ASSISTANT_NGROK` | `1` | 一鍵啟動是否自動啟動 ngrok；設為 `0` / `false` / `no` 可停用。 |
 | `MEETING_ASSISTANT_NGROK_URL` | 空白 | 固定 ngrok 公開 URL，例如 `https://example.ngrok-free.app`。留空時會嘗試沿用 LINE Console 既有 Webhook URL 的網域。 |
 | `MEETING_ASSISTANT_NGROK_API_URL` | `http://127.0.0.1:4040/api/tunnels` | ngrok 本機狀態 API；後端 `/metrics` 會讀取它，前端維運面板會顯示 LINE/ngrok 狀態。 |
@@ -396,7 +396,14 @@ open http://127.0.0.1:8001/history
 open http://127.0.0.1:8001/docs
 ```
 
-`GET /health` 會回傳載入中的 Git commit、工作區 commit、程式碼指紋、`matches_workspace`、worker 狀態、資料庫 schema version 與分段快取版本。若修改程式後尚未重啟，`matches_workspace` 會變成 `false` 且狀態為 `degraded`；這只能表示服務載入版本過舊，不代表要在仍有執行中任務時直接重啟。
+`GET /health` 會回傳載入中的 Git commit、工作區 commit、程式碼指紋、`matches_workspace`、worker、schema、SQLite quick check、媒體工具與最新備份健康度。`GET /metrics` 會提供任務 p50/p90/p95、失敗分類、文件審查狀態及備份新鮮度。若修改程式後尚未重啟，`matches_workspace` 會變成 `false` 且狀態為 `degraded`；這只能表示服務載入版本過舊，不代表要在仍有執行中任務時直接重啟。
+
+啟動維護會同時產生 `meetings_*.db` 與 `meeting_records_*.zip`。ZIP 包含一致性資料庫、當下可讀的 Markdown、補充附件及逐檔 SHA-256 manifest；原始錄音／錄影仍依既有 source-media 保存與封存政策管理，不會在每次啟動重複複製。可用下列命令驗證或在全新空目錄進行還原演練：
+
+```bash
+.venv/bin/python scripts/verify_record_snapshot.py backups/meeting_records_YYYYMMDD_HHMMSS.zip
+.venv/bin/python scripts/restore_record_snapshot.py backups/meeting_records_YYYYMMDD_HHMMSS.zip restore-drill
+```
 
 ### B. 啟動桌面錄音 GUI（Phase 2）
 
@@ -559,7 +566,7 @@ LINE Bot 完成處理時只會推送前三個區塊與完整檔案位置，避�
 ### Web 品質修訂工具
 
 - 每筆會議都有獨立人工審查狀態：`AI 產出`、`待人工複核`、`已人工複核`、`已核准`。核准時會保存當下 Markdown SHA-256；摘要、逐字稿或補充佐證有任何變更，都會自動撤銷核准並退回待複核。仍有阻擋交付問題的分段不能核准。
-- 新產生的討論 D、決議 R、待辦 A 除了寫入 Markdown，也會保存為結構化 JSON 與逐項索引。舊會議維持原內容，不會因 schema 升級而被重寫。
+- 新產生的討論 D、決議 R、待辦 A 除了寫入 Markdown，也會保存為結構化 JSON 與逐項索引；可逐項複核／核准，補充佐證可關聯到指定 D/R/A 代碼。舊會議維持原內容，不會因 schema 升級而被重寫。
 - 每個逐字稿分段都有「重跑本段」與「完整重跑」按鈕。「重跑本段」若品質檢查已定位到原始媒體仍有聲音的時間缺口，或可由連續時間戳安全界定的重複轉錄/數列延伸異常，會先只轉錄該異常區間並安全合併回既有逐字稿；局部補救無法通過檢查時才改用整段穩定重跑。「完整重跑」則明確略過舊稿與局部補救，以約 60 秒小段、設定的完整重跑模型重新轉錄指定段，適合時間戳完整但文字內容已失真的情況；它只做一輪轉錄，不會額外重複呼叫模型。按整份「重跑」也會從原始媒體重新轉錄所有新切段而不使用快取；若舊品質報告已有重大問題，會按問題的實際時間範圍對應新切段後自動改用完整重跑模型。舊紀錄缺少有效起訖時間時，系統會保守地將整份改用完整重跑策略，不會猜測舊索引。「完整逐字稿品質檢核」同時會套用不需模型的術語正規化；只會寫入確實有差異的紀錄，並保留「術語正規化前版本」以便復原。
 - 無論是單段短音檔或多段長音檔，若主模型與第二模型都尚未完全通過音訊品質檢查，系統只會保存可驗證問題較少的「補救候選稿」到受原始檔 SHA-256、分段範圍、模型與詞彙表綁定的續跑資料；它不會產生摘要或覆蓋既有會議。下次同一段重跑時，系統會以該候選稿為底，只補救剩餘問題範圍。
 - 轉錄遇到無法確認、且無法組成合理句子的字詞時，會保守標記為 `[聽不清]`，不會依前後文硬補。品質報告會列出含此標記的分段；摘要與第二階段查核不會把這些未確認內容推論為決議、負責人、期限或待辦事項。

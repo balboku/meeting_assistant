@@ -33,7 +33,7 @@ DEFAULT_JOB_MAX_ATTEMPTS = int(os.getenv("JOB_QUEUE_MAX_ATTEMPTS", "5"))
 # can alter review locations. Older rechecks remain visible, but must not mask
 # current diagnostics until they have been refreshed locally.
 TRANSCRIPT_QUALITY_RECHECK_VERSION = 4
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MEETING_REVIEW_STATUSES = frozenset({"generated", "needs_review", "reviewed", "approved"})
 TRANSIENT_RETRY_MARKERS = (
     "503",
@@ -1508,6 +1508,22 @@ def _ensure_meeting_workflow_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_meeting_evidence_meeting ON meeting_evidence(meeting_id, id DESC)"
     )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS meeting_evidence_items (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            evidence_id         INTEGER NOT NULL,
+            meeting_item_id     INTEGER NOT NULL,
+            relation_type       TEXT    NOT NULL DEFAULT 'supports',
+            created_at          TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+            UNIQUE(evidence_id, meeting_item_id, relation_type)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_meeting_evidence_items_evidence ON meeting_evidence_items(evidence_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_meeting_evidence_items_item ON meeting_evidence_items(meeting_item_id)"
+    )
 
 
 def _ensure_auth_tables(conn: sqlite3.Connection) -> None:
@@ -1567,6 +1583,11 @@ def _ensure_meeting_quality_columns(conn: sqlite3.Connection) -> None:
     for name, definition in columns.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE meetings ADD COLUMN {name} {definition}")
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS ux_meetings_job_id
+             ON meetings(job_id)
+          WHERE job_id IS NOT NULL AND job_id<>''"""
+    )
 
 
 # =============================================================================
@@ -1895,6 +1916,86 @@ def average_completed_job_seconds() -> Optional[float]:
     return round(float(value), 2) if value is not None else None
 
 
+def completed_job_duration_percentiles(limit: int = 1000) -> dict[str, Optional[float]]:
+    """Return bounded p50/p90/p95 terminal-job durations for operations."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT (
+                       julianday(completed_at) -
+                       julianday(COALESCE(started_at, queued_at, created_at))
+                   ) * 86400.0 AS seconds
+                 FROM jobs
+                WHERE status IN ('done', 'failed', 'cancelled')
+                  AND completed_at IS NOT NULL
+                  AND COALESCE(started_at, queued_at, created_at) IS NOT NULL
+                ORDER BY completed_at DESC
+                LIMIT ?""",
+            (min(max(int(limit), 1), 10000),),
+        ).fetchall()
+    values = sorted(max(0.0, float(row["seconds"])) for row in rows if row["seconds"] is not None)
+    if not values:
+        return {"p50": None, "p90": None, "p95": None, "sample_size": 0}
+
+    def percentile(fraction: float) -> float:
+        index = max(0, min(len(values) - 1, int(round((len(values) - 1) * fraction))))
+        return round(values[index], 2)
+
+    return {
+        "p50": percentile(0.50),
+        "p90": percentile(0.90),
+        "p95": percentile(0.95),
+        "sample_size": len(values),
+    }
+
+
+def failed_job_class_counts(limit: int = 1000) -> dict[str, int]:
+    """Classify recent terminal errors into stable operational buckets."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT COALESCE(error_detail, message, '') AS detail
+                 FROM jobs
+                WHERE status='failed'
+                ORDER BY completed_at DESC, updated_at DESC
+                LIMIT ?""",
+            (min(max(int(limit), 1), 10000),),
+        ).fetchall()
+    counts: dict[str, int] = {}
+    for row in rows:
+        detail = str(row["detail"] or "").lower()
+        if any(token in detail for token in ("429", "quota", "rate limit", "resource exhausted")):
+            category = "quota_or_rate_limit"
+        elif any(token in detail for token in ("timeout", "timed out", "deadline exceeded")):
+            category = "timeout"
+        elif any(token in detail for token in ("401", "403", "api key", "permission", "unauthorized")):
+            category = "authentication"
+        elif any(token in detail for token in ("503", "502", "unavailable", "overloaded")):
+            category = "upstream_unavailable"
+        elif any(token in detail for token in ("ffmpeg", "ffprobe", "codec", "media", "音訊", "影片")):
+            category = "media_processing"
+        elif any(token in detail for token in ("not found", "找不到", "no such file", "missing")):
+            category = "missing_file"
+        elif any(token in detail for token in ("quality", "品質", "hallucination", "轉錄")):
+            category = "quality_gate"
+        else:
+            category = "other"
+        counts[category] = counts.get(category, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def count_meetings_by_review_status() -> dict[str, int]:
+    """Return persisted document-level review-state counts."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT COALESCE(review_status, 'generated') AS review_status,
+                      COUNT(*) AS count
+                 FROM meetings
+                GROUP BY COALESCE(review_status, 'generated')"""
+        ).fetchall()
+    counts = {status: 0 for status in MEETING_REVIEW_STATUSES}
+    counts.update({str(row["review_status"]): int(row["count"]) for row in rows})
+    return counts
+
+
 def list_recent_failed_jobs(limit: int = 5) -> list[dict]:
     """Return recent failed jobs for operational dashboards."""
     with get_db() as conn:
@@ -1910,24 +2011,30 @@ def list_recent_failed_jobs(limit: int = 5) -> list[dict]:
 
 
 def delete_terminal_jobs_completed_before(cutoff: str) -> int:
-    """Delete done/failed/cancelled jobs completed before a local timestamp string."""
+    """Delete old terminal jobs except those retained as meeting lineage."""
     with get_db() as conn:
         conn.execute(
             """DELETE FROM job_events
                 WHERE job_id IN (
-                    SELECT job_id
-                      FROM jobs
-                     WHERE status IN ('done', 'failed', 'cancelled')
-                       AND completed_at IS NOT NULL
-                       AND completed_at < ?
+                    SELECT j.job_id
+                      FROM jobs AS j
+                     WHERE j.status IN ('done', 'failed', 'cancelled')
+                       AND j.completed_at IS NOT NULL
+                       AND j.completed_at < ?
+                       AND NOT EXISTS (
+                           SELECT 1 FROM meetings AS m WHERE m.job_id=j.job_id
+                       )
                 )""",
             (cutoff,),
         )
         cursor = conn.execute(
-            """DELETE FROM jobs
-                WHERE status IN ('done', 'failed', 'cancelled')
-                  AND completed_at IS NOT NULL
-                  AND completed_at < ?""",
+            """DELETE FROM jobs AS j
+                WHERE j.status IN ('done', 'failed', 'cancelled')
+                  AND j.completed_at IS NOT NULL
+                  AND j.completed_at < ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM meetings AS m WHERE m.job_id=j.job_id
+                  )""",
             (cutoff,),
         )
         return cursor.rowcount
@@ -2214,6 +2321,14 @@ def delete_job(job_id: str) -> Optional[bool]:
             return None
         if row["status"] not in {"done", "failed", "cancelled"}:
             return False
+        linked = conn.execute(
+            "SELECT id FROM meetings WHERE job_id=? LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        if linked is not None:
+            raise ValueError(
+                f"任務已連結會議記錄 ID={linked['id']}，必須保留處理血緣。"
+            )
         conn.execute("DELETE FROM job_events WHERE job_id=?", (job_id,))
         conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
         return True
@@ -2276,6 +2391,13 @@ def _replace_meeting_items(
     structured_summary: Optional[dict[str, Any]],
 ) -> None:
     _ensure_meeting_workflow_tables(conn)
+    conn.execute(
+        """DELETE FROM meeting_evidence_items
+            WHERE meeting_item_id IN (
+                SELECT id FROM meeting_items WHERE meeting_id=?
+            )""",
+        (meeting_id,),
+    )
     conn.execute("DELETE FROM meeting_items WHERE meeting_id=?", (meeting_id,))
     now = _now()
     for item_type, item_key, position, payload, evidence in _structured_summary_items(structured_summary):
@@ -3094,7 +3216,20 @@ def get_meeting(meeting_id: int) -> Optional[dict]:
                 ORDER BY id DESC""",
             (meeting_id,),
         ).fetchall()
-        record["evidence_records"] = [dict(row) for row in evidence_rows]
+        evidence_records: list[dict[str, Any]] = []
+        for evidence_row in evidence_rows:
+            evidence = dict(evidence_row)
+            related_rows = conn.execute(
+                """SELECT mi.item_key, mei.relation_type
+                     FROM meeting_evidence_items AS mei
+                     JOIN meeting_items AS mi ON mi.id=mei.meeting_item_id
+                    WHERE mei.evidence_id=?
+                    ORDER BY mi.item_type, mi.position, mi.id""",
+                (evidence["id"],),
+            ).fetchall()
+            evidence["related_items"] = [dict(row) for row in related_rows]
+            evidence_records.append(evidence)
+        record["evidence_records"] = evidence_records
         # 讀取完整的 Markdown 內容
         output_file = Path(record["output_path"])
         if output_file.exists():
@@ -3176,70 +3311,35 @@ def update_meeting_review_status(
     reviewed_by: Optional[str] = None,
     note: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Move one meeting through the explicit human-review workflow."""
-    normalized = str(status or "").strip().lower()
-    if normalized not in MEETING_REVIEW_STATUSES:
-        raise ValueError(f"不支援的會議審查狀態：{status}")
+    """Compatibility wrapper for the extracted review domain service."""
+    from backend.review_workflow import update_meeting_review_status as update_review
 
-    with get_db() as conn:
-        _ensure_meeting_quality_columns(conn)
-        row = conn.execute(
-            """SELECT id, output_path, quality_report_json, review_status
-                 FROM meetings
-                WHERE id=?""",
-            (meeting_id,),
-        ).fetchone()
-        if not row:
-            raise KeyError(f"找不到會議記錄：ID={meeting_id}")
+    return update_review(
+        meeting_id,
+        status,
+        reviewed_by=reviewed_by,
+        note=note,
+    )
 
-        try:
-            quality_report = json.loads(row["quality_report_json"] or "{}")
-        except json.JSONDecodeError:
-            quality_report = {}
-        blockers = _quality_report_blockers(quality_report)
-        current_status = str(row["review_status"] or "generated")
-        if normalized == "approved" and current_status != "reviewed":
-            raise ValueError("會議必須先完成人工複核，才能核准。")
-        if normalized == "approved" and blockers:
-            labels = "、".join(str(index + 1) for index in blockers)
-            raise ValueError(f"第 {labels} 段仍有阻擋交付的品質問題，不能核准。")
 
-        approved_hash = None
-        if normalized == "approved":
-            output_file = Path(row["output_path"])
-            if not output_file.is_file():
-                raise FileNotFoundError(f"找不到會議 Markdown：{output_file}")
-            approved_hash = _meeting_file_sha256(output_file)
+def update_meeting_item_review_status(
+    meeting_id: int,
+    item_key: str,
+    status: str,
+    *,
+    reviewed_by: Optional[str] = None,
+    note: Optional[str] = None,
+) -> dict[str, Any]:
+    """Compatibility wrapper for the extracted review domain service."""
+    from backend.review_workflow import update_meeting_item_review_status as update_item_review
 
-        timestamp = _now() if normalized in {"reviewed", "approved"} else None
-        actor = (
-            (reviewed_by or "").strip() or None
-            if normalized in {"reviewed", "approved"}
-            else None
-        )
-        review_note = (note or "").strip() or None
-        conn.execute(
-            """UPDATE meetings
-                  SET review_status=?,
-                      reviewed_at=?,
-                      reviewed_by=?,
-                      review_note=?,
-                      approved_content_sha256=?
-                WHERE id=?""",
-            (
-                normalized,
-                timestamp,
-                actor,
-                review_note,
-                approved_hash,
-                meeting_id,
-            ),
-        )
-
-    updated = get_meeting(meeting_id)
-    if not updated:
-        raise KeyError(f"找不到會議記錄：ID={meeting_id}")
-    return updated
+    return update_item_review(
+        meeting_id,
+        item_key,
+        status,
+        reviewed_by=reviewed_by,
+        note=note,
+    )
 
 
 def append_meeting_evidence_with_revision(
@@ -3252,6 +3352,7 @@ def append_meeting_evidence_with_revision(
     sha256: str,
     note: Optional[str],
     analysis_markdown: str,
+    related_item_keys: Optional[list[str]] = None,
 ) -> tuple[int, int]:
     """Persist evidence metadata and a searchable Markdown revision together."""
     record = get_meeting(meeting_id)
@@ -3290,6 +3391,30 @@ def append_meeting_evidence_with_revision(
                 ),
             )
             evidence_id = int(evidence_cursor.lastrowid)
+            requested_keys = list(dict.fromkeys(
+                str(value or "").strip()
+                for value in (related_item_keys or [])
+                if str(value or "").strip()
+            ))
+            if requested_keys:
+                placeholders = ",".join("?" for _ in requested_keys)
+                linked_items = conn.execute(
+                    f"""SELECT id, item_key
+                          FROM meeting_items
+                         WHERE meeting_id=? AND item_key IN ({placeholders})""",
+                    (meeting_id, *requested_keys),
+                ).fetchall()
+                found_keys = {str(row["item_key"]) for row in linked_items}
+                missing = [key for key in requested_keys if key not in found_keys]
+                if missing:
+                    raise ValueError(f"找不到要關聯的結構化項目：{', '.join(missing)}")
+                for linked_item in linked_items:
+                    conn.execute(
+                        """INSERT INTO meeting_evidence_items (
+                               evidence_id, meeting_item_id, relation_type, created_at
+                           ) VALUES (?, ?, 'supports', ?)""",
+                        (evidence_id, linked_item["id"], _now()),
+                    )
             conn.execute(
                 """UPDATE meetings
                       SET summary=?,
@@ -3600,24 +3725,54 @@ def delete_meeting(meeting_id: int) -> bool:
     if not record:
         return False
 
-    # 刪除實體 Markdown 檔案
     output_file = Path(record["output_path"])
-    if output_file.exists():
-        try:
-            output_file.unlink()
-            logger.info(f"🗑️  已刪除會議記錄檔案：{output_file.name}")
-        except Exception as e:
-            logger.warning(f"⚠️  刪除會議記錄檔案失敗：{e}")
+    attachments = [
+        Path(str(evidence.get("stored_path") or ""))
+        for evidence in (record.get("evidence_records") or [])
+        if str(evidence.get("stored_path") or "").strip()
+    ]
 
     # 刪除資料庫記錄
     with get_db() as conn:
         _ensure_meeting_revisions_table(conn)
         _ensure_meeting_workflow_tables(conn)
         conn.execute("DELETE FROM meeting_revisions WHERE meeting_id=?", (meeting_id,))
+        conn.execute(
+            """DELETE FROM meeting_evidence_items
+                WHERE evidence_id IN (
+                    SELECT id FROM meeting_evidence WHERE meeting_id=?
+                ) OR meeting_item_id IN (
+                    SELECT id FROM meeting_items WHERE meeting_id=?
+                )""",
+            (meeting_id, meeting_id),
+        )
         conn.execute("DELETE FROM meeting_items WHERE meeting_id=?", (meeting_id,))
         conn.execute("DELETE FROM meeting_evidence WHERE meeting_id=?", (meeting_id,))
         _remove_meeting_fts_row(conn, meeting_id)
         conn.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
         logger.info(f"🗑️  已從資料庫移除會議記錄（ID: {meeting_id}）")
+
+    # Database deletion is authoritative.  Physical cleanup follows the
+    # committed transaction so a filesystem error cannot leave a broken row.
+    if output_file.is_file():
+        try:
+            output_file.unlink()
+            logger.info(f"🗑️  已刪除會議記錄檔案：{output_file.name}")
+        except OSError as exc:
+            logger.warning("⚠️  刪除會議記錄檔案失敗：%s", exc)
+    attachment_parents: set[Path] = set()
+    for attachment in attachments:
+        if not attachment.is_file():
+            continue
+        try:
+            attachment.unlink()
+            attachment_parents.add(attachment.parent)
+        except OSError as exc:
+            logger.warning("⚠️  刪除補充資料失敗：%s", exc)
+    for parent in attachment_parents:
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
 
     return True

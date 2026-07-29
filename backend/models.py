@@ -107,6 +107,8 @@ class JobMetrics(BaseModel):
     total: int
     by_status: dict[str, int]
     average_completed_seconds: Optional[float] = None
+    duration_percentiles_seconds: dict[str, Any] = Field(default_factory=dict)
+    failed_by_class: dict[str, int] = Field(default_factory=dict)
 
 
 class NgrokStatus(BaseModel):
@@ -241,6 +243,8 @@ class MetricsResponse(BaseModel):
     jobs: JobMetrics
     recent_errors: list[RecentJobError]
     meetings: dict[str, int]
+    meeting_review_statuses: dict[str, int] = Field(default_factory=dict)
+    backup: dict[str, Any] = Field(default_factory=dict)
     storage: StorageMetrics
     ngrok: NgrokStatus
 
@@ -361,6 +365,24 @@ class MeetingReviewResponse(BaseModel):
     approved_content_sha256: Optional[str] = None
 
 
+class MeetingItemReviewRequest(BaseModel):
+    status: str = Field(..., description="generated、needs_review、reviewed 或 approved")
+    reviewer: Optional[str] = Field(None, max_length=200, description="逐項複核者")
+    note: Optional[str] = Field(None, max_length=2000, description="逐項複核備註")
+
+
+class MeetingItemReviewResponse(BaseModel):
+    status: str
+    meeting_id: int
+    item_key: str
+    item_type: str
+    review_status: str
+    meeting_review_status: str
+    reviewed_at: Optional[datetime] = None
+    reviewed_by: Optional[str] = None
+    review_note: Optional[str] = None
+
+
 class MeetingRerunRequest(BaseModel):
     """Optionally rerun only selected zero-based transcript segments."""
     segments: Optional[list[int]] = Field(None, description="要強制重跑的零起算分段索引；省略代表全部重跑")
@@ -430,6 +452,9 @@ class MeetingEvidenceResponse(BaseModel):
     attachment_sha256: Optional[str] = None
     revision_id: Optional[int] = None
     evidence_id: Optional[int] = None
+    related_item_keys: list[str] = Field(default_factory=list)
+    revision_id: Optional[int] = None
+    evidence_id: Optional[int] = None
     evidence_markdown: str
     full_content: str
 
@@ -441,7 +466,7 @@ class MeetingEvidenceResponse(BaseModel):
 class HealthResponse(BaseModel):
     """GET /health 的回應格式"""
     status: str = "ok"
-    version: str = "2.1.0"
+    version: str = "2.2.0"
     model: str
     transcription_model: str
     summary_model: str

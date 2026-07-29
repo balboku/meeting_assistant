@@ -847,6 +847,31 @@
     }
     .meeting-review-action.approve { border-color: var(--green); color: var(--green); }
     .meeting-review-action:disabled { opacity: 0.5; cursor: not-allowed; }
+    .structured-review-panel {
+      margin: 0 0 14px;
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+    .structured-review-header { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+    .structured-review-header strong { color: var(--text); }
+    .structured-review-header span { color: var(--text-mid); font-size: 12px; }
+    .structured-review-list { display: grid; gap: 8px; }
+    .structured-review-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .structured-review-item-copy { min-width: 0; }
+    .structured-review-item-title { color: var(--text); font-size: 13px; font-weight: 700; }
+    .structured-review-item-text { color: var(--text-mid); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+    .structured-review-links { color: var(--blue); font-size: 11px; margin-top: 4px; }
+    .structured-review-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .structured-review-status { color: var(--text-mid); font-size: 11px; white-space: nowrap; }
     @media (max-width: 760px) {
       .meeting-review-panel { align-items: flex-start; flex-direction: column; }
       .meeting-review-actions { justify-content: flex-start; }
@@ -5669,6 +5694,25 @@ async function uploadEvidence(id, file) {
 
   const formData = new FormData();
   formData.append('file', file);
+  const itemKeys = (currentMeetingData?.structured_items || [])
+    .map(item => String(item?.item_key || '').trim())
+    .filter(Boolean);
+  if (itemKeys.length) {
+    const related = window.prompt(
+      `要把此佐證關聯到哪些項目？可輸入逗號分隔代碼（${itemKeys.join(', ')}）；留空代表整份會議。`,
+      ''
+    );
+    if (related === null) {
+      setEvidenceUploadStatus('已取消補充資料上傳。');
+      if (button) {
+        button.disabled = false;
+        button.setAttribute('aria-busy', 'false');
+        button.innerHTML = originalButtonText || '📎 補充資料';
+      }
+      return;
+    }
+    if (related.trim()) formData.append('related_item_keys', related.trim());
+  }
 
   try {
     const res = await fetch(`${API}/meetings/${id}/evidence`, {
@@ -5753,8 +5797,11 @@ function meetingReviewStatusLabel(status = '') {
 function meetingHasApprovalBlockers(meeting) {
   const report = meeting?.quality_report || {};
   if ((report.blocking_segment_indices || []).length) return true;
-  return (report.segments || []).some(segment =>
+  if ((report.segments || []).some(segment =>
     Boolean(segment?.delivery_blocking) || String(segment?.status || '') === 'failed'
+  )) return true;
+  return (meeting?.structured_items || []).some(item =>
+    !['reviewed', 'approved'].includes(String(item?.review_status || 'generated'))
   );
 }
 
@@ -5797,6 +5844,91 @@ function renderMeetingReviewPanel(meeting) {
     </div>
     <div class="meeting-review-actions">${actions.join('')}</div>
   </section>`;
+}
+
+function structuredItemText(item) {
+  const payload = item?.payload && typeof item.payload === 'object' ? item.payload : {};
+  const preferred = [
+    payload.topic,
+    payload.summary,
+    payload.content,
+    payload.decision,
+    payload.action,
+    payload.task,
+    payload.description,
+  ].find(value => String(value || '').trim());
+  return String(preferred || JSON.stringify(payload)).trim();
+}
+
+function relatedEvidenceForItem(meeting, itemKey) {
+  return (meeting?.evidence_records || []).filter(record =>
+    (record?.related_items || []).some(link => String(link?.item_key) === String(itemKey))
+  );
+}
+
+function renderStructuredReviewPanel(meeting) {
+  const items = Array.isArray(meeting?.structured_items) ? meeting.structured_items : [];
+  if (!items.length) return '';
+  const meetingId = Number(meeting?.id) || 0;
+  const rows = items.map(item => {
+    const itemKey = String(item?.item_key || '');
+    const status = String(item?.review_status || 'generated');
+    const evidence = relatedEvidenceForItem(meeting, itemKey);
+    const evidenceText = evidence.length
+      ? `<div class="structured-review-links">佐證：${evidence.map(record => escapeHtml(record.original_filename)).join('、')}</div>`
+      : '<div class="structured-review-links">尚未關聯補充佐證</div>';
+    const actions = [];
+    if (!['reviewed', 'approved'].includes(status)) {
+      actions.push(`<button class="meeting-review-action" onclick="updateMeetingItemReview(${meetingId}, '${escapeHtml(itemKey)}', 'reviewed')">已複核</button>`);
+    } else if (status === 'reviewed') {
+      actions.push(`<button class="meeting-review-action approve" onclick="updateMeetingItemReview(${meetingId}, '${escapeHtml(itemKey)}', 'approved')">核准項目</button>`);
+    } else {
+      actions.push(`<button class="meeting-review-action" onclick="updateMeetingItemReview(${meetingId}, '${escapeHtml(itemKey)}', 'needs_review')">重開</button>`);
+    }
+    return `<div class="structured-review-item">
+      <div class="structured-review-item-copy">
+        <div class="structured-review-item-title">${escapeHtml(itemKey)} · ${escapeHtml(item.item_type || '')}</div>
+        <div class="structured-review-item-text">${escapeHtml(structuredItemText(item))}</div>
+        ${evidenceText}
+      </div>
+      <div class="structured-review-actions">
+        <span class="structured-review-status">${escapeHtml(meetingReviewStatusLabel(status))}</span>
+        ${actions.join('')}
+      </div>
+    </div>`;
+  }).join('');
+  return `<section class="structured-review-panel" aria-label="D/R/A 逐項審查">
+    <div class="structured-review-header">
+      <strong>D/R/A 逐項審查</strong>
+      <span>每一項可獨立複核、核准並關聯佐證；整份會議仍需另行核准。</span>
+    </div>
+    <div class="structured-review-list">${rows}</div>
+  </section>`;
+}
+
+async function updateMeetingItemReview(meetingId, itemKey, status) {
+  const note = window.prompt(`${itemKey} 複核備註（可留空）`, '');
+  if (note === null) return;
+  setDetailBusy(true);
+  setDetailStatus(`正在更新 ${itemKey} 審查狀態...`);
+  try {
+    const response = await fetch(
+      `${API}/meetings/${meetingId}/items/${encodeURIComponent(itemKey)}/review`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, note }),
+      }
+    );
+    if (!response.ok) throw new Error(await apiErrorMessage(response));
+    await openDetail(meetingId);
+    await loadMeetings(document.getElementById('search-input')?.value.trim() || '');
+  } catch (error) {
+    setDetailStatus(`更新 ${itemKey} 審查狀態失敗：${error.message}`);
+    alert(`更新 ${itemKey} 審查狀態失敗：${error.message}`);
+  } finally {
+    setDetailBusy(false);
+  }
 }
 
 async function updateMeetingReview(meetingId, status) {
@@ -5881,6 +6013,7 @@ async function openDetail(id) {
         </div>
       </div>
       ${renderMeetingReviewPanel(r)}
+      ${renderStructuredReviewPanel(r)}
       ${renderQualityReport(r)}
       ${renderAudioEvidence(r)}
       <div class="document-view">

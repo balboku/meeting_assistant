@@ -1314,17 +1314,25 @@ database.save_meeting(
 
 class MaintenanceRegressionTests(unittest.TestCase):
     def test_backup_database_creates_timestamped_sqlite_copy_and_prunes_old_backups(self):
-        from backend.maintenance import backup_database
+        from backend.maintenance import backup_database, verify_database_backup
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             db_path = tmp_path / "meetings.db"
             backup_dir = tmp_path / "backups"
-            db_path.write_bytes(b"sqlite-content")
+            import sqlite3
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT)")
+                conn.execute("INSERT INTO sample (value) VALUES ('sqlite-content')")
+                conn.commit()
+            finally:
+                conn.close()
 
             old_backup = backup_dir / "meetings_20250101_000000.db"
             backup_dir.mkdir()
-            old_backup.write_bytes(b"old")
+            old_conn = sqlite3.connect(old_backup)
+            old_conn.close()
 
             created = backup_database(
                 db_path=db_path,
@@ -1334,8 +1342,68 @@ class MaintenanceRegressionTests(unittest.TestCase):
             )
 
             self.assertEqual(created.name, "meetings_20260705_140000.db")
-            self.assertEqual(created.read_bytes(), b"sqlite-content")
+            self.assertTrue(verify_database_backup(created)["ok"])
+            restored = sqlite3.connect(created)
+            try:
+                self.assertEqual(
+                    restored.execute("SELECT value FROM sample").fetchone()[0],
+                    "sqlite-content",
+                )
+            finally:
+                restored.close()
             self.assertFalse(old_backup.exists())
+
+    def test_record_snapshot_verifies_and_restores_to_empty_directory(self):
+        from backend import database
+        from backend.maintenance import (
+            backup_database,
+            create_record_snapshot,
+            restore_record_snapshot,
+            verify_record_snapshot,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "meeting.md"
+            output.write_text("# 可還原會議", encoding="utf-8")
+            attachment = root / "proof.txt"
+            attachment.write_text("PASS", encoding="utf-8")
+            backup_dir = root / "backups"
+            with mock.patch.object(database, "DB_PATH", root / "meetings.db"):
+                database.init_db()
+                meeting_id = database.save_meeting(
+                    title="快照測試",
+                    date="2026/07/29",
+                    source_audio="snapshot.wav",
+                    output_path=str(output),
+                )
+                with database.get_db() as conn:
+                    conn.execute(
+                        """INSERT INTO meeting_evidence (
+                               meeting_id, original_filename, stored_path, sha256,
+                               analysis_markdown, status, created_at
+                           ) VALUES (?, ?, ?, ?, ?, 'analyzed', ?)""",
+                        (
+                            meeting_id,
+                            attachment.name,
+                            str(attachment),
+                            hashlib.sha256(attachment.read_bytes()).hexdigest(),
+                            "PASS",
+                            "2026-07-29 12:00:00",
+                        ),
+                    )
+                backup = backup_database(database.DB_PATH, backup_dir)
+                snapshot = create_record_snapshot(backup, backup_dir)
+
+            verification = verify_record_snapshot(snapshot)
+            self.assertTrue(verification["ok"], verification)
+            self.assertGreaterEqual(verification["entries"], 3)
+            restore_dir = root / "restore-drill"
+            restored = restore_record_snapshot(snapshot, restore_dir)
+            self.assertTrue(restored["restored"])
+            self.assertTrue((restore_dir / "database" / "meetings.db").is_file())
+            self.assertTrue(any((restore_dir / "meetings").rglob("meeting.md")))
+            self.assertTrue(any((restore_dir / "attachments").rglob("*proof.txt")))
 
     def test_cleanup_source_media_archives_prunes_only_expired_date_buckets(self):
         from backend.maintenance import cleanup_source_media_archives
@@ -19956,6 +20024,19 @@ class MeetingReviewWorkflowRegressionTests(unittest.TestCase):
                     note="已核對逐字稿",
                 )
                 self.assertEqual(reviewed["review_status"], "reviewed")
+                with self.assertRaisesRegex(ValueError, "逐項複核"):
+                    database.update_meeting_review_status(
+                        meeting_id,
+                        "approved",
+                        reviewed_by="reviewer@example.com",
+                    )
+                for item_key in ("D1", "R1", "A1"):
+                    database.update_meeting_item_review_status(
+                        meeting_id,
+                        item_key,
+                        "reviewed",
+                        reviewed_by="reviewer@example.com",
+                    )
                 approved = database.update_meeting_review_status(
                     meeting_id,
                     "approved",
@@ -20035,6 +20116,81 @@ class MeetingReviewWorkflowRegressionTests(unittest.TestCase):
                 self.assertEqual(len(record["evidence_records"]), 1)
                 self.assertEqual(record["review_status"], "needs_review")
                 self.assertEqual(matches[0]["id"], meeting_id)
+
+    def test_item_review_rollup_and_evidence_links_are_persisted(self):
+        from backend import database, evidence
+
+        structured = {
+            "discussion_summary": [
+                {"id": "D1", "summary": "需佐證的討論", "evidence_timecodes": ["00:10"]}
+            ],
+            "final_decisions": [],
+            "action_items": [],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            markdown = root / "linked.md"
+            markdown.write_text("# 會議\n\n原始內容", encoding="utf-8")
+            source = root / "proof.txt"
+            source.write_text("證據內容", encoding="utf-8")
+            with mock.patch.object(database, "DB_PATH", root / "meetings.db"), \
+                    mock.patch.object(evidence, "ATTACHMENT_DIR", root / "attachments"), \
+                    mock.patch.object(
+                        evidence,
+                        "generate_evidence_markdown",
+                        return_value="### 資料：proof.txt\n- 擷取重點：證據內容",
+                    ):
+                database.init_db()
+                meeting_id = database.save_meeting(
+                    title="逐項審查",
+                    date="2026/07/29",
+                    source_audio="linked.wav",
+                    output_path=str(markdown),
+                    structured_summary=structured,
+                )
+                reviewed = database.update_meeting_item_review_status(
+                    meeting_id,
+                    "D1",
+                    "reviewed",
+                    reviewed_by="reviewer@example.com",
+                )
+                self.assertEqual(reviewed["meeting_review_status"], "reviewed")
+                approved = database.update_meeting_item_review_status(
+                    meeting_id,
+                    "D1",
+                    "approved",
+                    reviewed_by="reviewer@example.com",
+                )
+                self.assertEqual(approved["review_status"], "approved")
+                evidence.analyze_and_append_evidence(
+                    meeting_id,
+                    source,
+                    "proof.txt",
+                    related_item_keys=["D1"],
+                )
+                record = database.get_meeting(meeting_id)
+
+            self.assertEqual(
+                record["evidence_records"][0]["related_items"],
+                [{"item_key": "D1", "relation_type": "supports"}],
+            )
+            self.assertEqual(record["review_status"], "needs_review")
+
+    def test_central_permission_policy_covers_business_routes(self):
+        from backend.auth import permission_for_request
+
+        self.assertEqual(permission_for_request("GET", "/meetings/1"), "meeting:read")
+        self.assertEqual(permission_for_request("PUT", "/meetings/1/summary"), "meeting:write")
+        self.assertEqual(permission_for_request("POST", "/meetings/1/rerun"), "meeting:rerun")
+        self.assertEqual(permission_for_request("DELETE", "/meetings/1"), "meeting:delete")
+        self.assertEqual(permission_for_request("GET", "/jobs"), "job:read")
+        self.assertEqual(permission_for_request("POST", "/jobs/abc/retry"), "job:manage")
+        self.assertEqual(permission_for_request("POST", "/upload-audio"), "meeting:write")
+        self.assertEqual(
+            permission_for_request("POST", "/source-media/archive/restore"),
+            "meeting:write",
+        )
+        self.assertIsNone(permission_for_request("POST", "/line-webhook"))
 
     def test_review_endpoint_and_frontend_controls_are_exposed(self):
         from backend import database

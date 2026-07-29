@@ -255,6 +255,7 @@ def analyze_and_append_evidence(
     original_filename: str,
     note: Optional[str] = None,
     model: Optional[str] = None,
+    related_item_keys: Optional[list[str]] = None,
 ) -> dict:
     """Copy an uploaded evidence file, analyze it, and append the result to Markdown."""
     source = Path(source_path)
@@ -297,6 +298,7 @@ def analyze_and_append_evidence(
             sha256=attachment_sha256,
             note=note,
             analysis_markdown=evidence_markdown.strip(),
+            related_item_keys=related_item_keys,
         )
         persisted = True
     finally:
@@ -314,6 +316,7 @@ def analyze_and_append_evidence(
         "attachment_sha256": attachment_sha256,
         "revision_id": revision_id,
         "evidence_id": evidence_id,
+        "related_item_keys": list(related_item_keys or []),
         "evidence_markdown": evidence_markdown.strip(),
         "full_content": updated_markdown,
     }

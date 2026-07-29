@@ -52,6 +52,8 @@ from backend.database import (
     count_jobs,
     count_jobs_by_status,
     average_completed_job_seconds,
+    completed_job_duration_percentiles,
+    failed_job_class_counts,
     list_recent_failed_jobs,
     request_job_cancel,
     requeue_failed_job,
@@ -59,6 +61,7 @@ from backend.database import (
     list_job_events,
     list_meetings,
     count_meetings,
+    count_meetings_by_review_status,
     apply_quality_preview_fields,
     list_meeting_source_audio_refs,
     get_meeting,
@@ -67,6 +70,7 @@ from backend.database import (
     update_meeting_quality_report,
     update_meeting_content_with_revision,
     update_meeting_review_status,
+    update_meeting_item_review_status,
     get_schema_version,
     list_meeting_revisions,
     upsert_app_user,
@@ -92,6 +96,8 @@ from backend.models import (
     MeetingEvidenceResponse,
     MeetingReviewRequest,
     MeetingReviewResponse,
+    MeetingItemReviewRequest,
+    MeetingItemReviewResponse,
     HealthResponse,
     AppUserUpsertRequest,
     AppUserRecord,
@@ -118,14 +124,24 @@ from backend.job_queue import (
     job_worker,
 )
 from backend import auth as auth_module
-from backend.auth import actor_from_request, auth_config_payload, require_permission
+from backend.auth import (
+    actor_from_request,
+    auth_config_payload,
+    permission_for_request,
+    require_permission,
+)
 from backend.cleanup import (
     SOURCE_AUDIO_TEMP_PREFIXES,
     cleanup_stale_source_audio_temp_segments,
     cleanup_stale_temp_files_for_jobs,
     cleanup_terminal_jobs,
 )
-from backend.maintenance import cleanup_source_media_archives, run_startup_health_checks, run_startup_maintenance
+from backend.maintenance import (
+    cleanup_source_media_archives,
+    latest_backup_health,
+    run_startup_health_checks,
+    run_startup_maintenance,
+)
 from backend.media_validation import validate_media_magic
 from backend.ngrok_status import get_ngrok_status
 from backend.quality_segments import review_segment_details_from_text, review_segment_label
@@ -402,6 +418,23 @@ async def restrict_remote_access(request: Request, call_next):
     )
 
 
+@app.middleware("http")
+async def enforce_role_permissions(request: Request, call_next):
+    """Apply the central route policy only when RBAC is explicitly enabled."""
+    permission = permission_for_request(request.method, request.url.path)
+    if auth_module.AUTH_FEATURE_ENABLED and permission:
+        try:
+            actor = actor_from_request(request)
+            require_permission(actor, permission)
+        except HTTPException as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+                headers=exc.headers,
+            )
+    return await call_next(request)
+
+
 allowed_origins = [
     origin.strip()
     for origin in os.getenv(
@@ -484,6 +517,14 @@ async def health_check():
             "detail": f"schema={schema_version}；expected={SCHEMA_VERSION}",
         },
     ])
+    backup_health = latest_backup_health(BACKUP_DIR)
+    checks.append({
+        "name": "database_backup",
+        "status": "ok" if backup_health["ok"] else "error",
+        "detail": (
+            f"{backup_health.get('detail')}; age_hours={backup_health.get('age_hours')}"
+        ),
+    })
     status = "ok" if all(check["status"] == "ok" for check in checks) else "degraded"
     return HealthResponse(
         status=status,
@@ -500,6 +541,7 @@ async def health_check():
             "worker_running": job_worker.is_running(),
             "schema_version": schema_version,
             "segment_cache_version": SEGMENT_CACHE_VERSION,
+            "backup": backup_health,
         },
         checks=checks,
     )
@@ -1230,6 +1272,8 @@ async def metrics():
             total=sum(by_status.values()),
             by_status=by_status,
             average_completed_seconds=average_completed_job_seconds(),
+            duration_percentiles_seconds=completed_job_duration_percentiles(),
+            failed_by_class=failed_job_class_counts(),
         ),
         recent_errors=list_recent_failed_jobs(limit=5),
         meetings={
@@ -1241,6 +1285,8 @@ async def metrics():
             "quality_rerunnable": count_meetings(quality_type="rerunnable"),
             "quality_other": count_meetings(quality_type="other"),
         },
+        meeting_review_statuses=count_meetings_by_review_status(),
+        backup=latest_backup_health(BACKUP_DIR),
         storage=_storage_metrics(),
         ngrok=get_ngrok_status(expected_port=SERVER_PORT),
     )
@@ -2073,7 +2119,10 @@ async def get_job_event_timeline(job_id: str):
 )
 async def delete_job_record(job_id: str):
     """刪除 done/failed/cancelled 任務；處理中或等待中的任務需先取消。"""
-    deleted = delete_job(job_id)
+    try:
+        deleted = delete_job(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if deleted is None:
         raise HTTPException(status_code=404, detail=f"找不到任務：{job_id}")
     if deleted is False:
@@ -3180,6 +3229,65 @@ async def update_meeting_review(
     )
 
 
+@app.put(
+    "/meetings/{meeting_id}/items/{item_key}/review",
+    response_model=MeetingItemReviewResponse,
+    summary="更新單一 D/R/A 項目的人工審查狀態",
+    tags=["會議記錄"],
+    responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+)
+async def update_meeting_item_review(
+    meeting_id: int,
+    item_key: str,
+    request: Request,
+    request_body: MeetingItemReviewRequest,
+):
+    actor = actor_from_request(request)
+    require_permission(actor, "meeting:write")
+    reviewer = (
+        actor.email
+        if actor.enabled
+        else (request_body.reviewer or "").strip() or "local-user"
+    )
+    try:
+        item = update_meeting_item_review_status(
+            meeting_id,
+            item_key,
+            request_body.status,
+            reviewed_by=reviewer,
+            note=request_body.note,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_audit_log(
+        action="meeting.item.review.update",
+        actor_user_id=actor.user_id,
+        actor_email=reviewer,
+        resource_type="meeting_item",
+        resource_id=f"{meeting_id}:{item_key}",
+        request_method=request.method,
+        request_path=request.url.path,
+        client_host=_request_client_host(request),
+        detail={
+            "review_status": item["review_status"],
+            "meeting_review_status": item["meeting_review_status"],
+        },
+    )
+    return MeetingItemReviewResponse(
+        status="success",
+        meeting_id=meeting_id,
+        item_key=item["item_key"],
+        item_type=item["item_type"],
+        review_status=item["review_status"],
+        meeting_review_status=item["meeting_review_status"],
+        reviewed_at=item.get("reviewed_at"),
+        reviewed_by=item.get("reviewed_by"),
+        review_note=item.get("review_note"),
+    )
+
+
 @app.post(
     "/meetings/{meeting_id}/quality/recheck",
     response_model=MeetingQualityRecheckResponse,
@@ -3778,6 +3886,10 @@ async def add_meeting_evidence(
     meeting_id: int,
     file: UploadFile = File(..., description="補充資料（圖片、PDF、文字或 Word 文件）"),
     note: Optional[str] = Form(default=None, description="補充資料備註或希望 AI 特別檢查的問題"),
+    related_item_keys: Optional[str] = Form(
+        default=None,
+        description="以逗號分隔的 D/R/A 項目代碼，例如 D1,R2",
+    ),
     model: Optional[str] = Form(default=None, description=f"指定 Gemini 模型（預設：{GEMINI_MODEL}）"),
     content_length: Optional[int] = Header(default=None, alias="Content-Length"),
 ):
@@ -3829,6 +3941,11 @@ async def add_meeting_evidence(
             original_filename=original_filename,
             note=note,
             model=model,
+            related_item_keys=[
+                value.strip()
+                for value in re.split(r"[,，\s]+", related_item_keys or "")
+                if value.strip()
+            ],
         )
         return MeetingEvidenceResponse(**result)
     except HTTPException:

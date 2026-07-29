@@ -1,6 +1,6 @@
-# 🎙️ AI 語音會議助理 — 現行系統架構文件 v2.1
+# 🎙️ AI 語音會議助理 — 現行系統架構文件 v2.2
 
-> **文件版本**：2.1.0
+> **文件版本**：2.2.0
 > **更新日期**：2026/07/29
 > **現況**：FastAPI、SQLite 持久化佇列、Web/LINE/GUI、多段轉錄、品質閘門、人工複核與全文搜尋均為現行功能。
 
@@ -134,24 +134,46 @@ meeting_assistant/
 | 資料表 | 用途 |
 |--------|------|
 | `meetings` | 保存會議主檔、品質報告、結構化摘要、人工審查狀態與核准內容 SHA-256。 |
-| `meeting_items` | 將 D/R/A 逐項保存成 JSON 索引，保留證據時間與未來逐項複核欄位。 |
+| `meeting_items` | 將 D/R/A 逐項保存成 JSON 索引，保留證據時間、逐項複核／核准狀態、複核者與備註。 |
 | `meeting_evidence` | 保存補充附件檔名、路徑、SHA-256、分析內容與對應 revision。 |
+| `meeting_evidence_items` | 將補充佐證關聯到一或多個 D/R/A 項目；關聯可與文件版本、附件雜湊一併稽核。 |
 | `meeting_fts` | SQLite FTS5 虛擬表，索引 `title`、`source_audio`、`summary`、`output_path`，支援快速的欄位搜尋。 |
 | `meeting_content_fts` | SQLite FTS5 虛擬表，索引每筆會議的完整 Markdown 內容，支援逐字稿搜尋。 |
 | `meeting_revisions` | 保存人工修訂摘要或逐字稿前的完整舊版 Markdown，供回溯 AI 原稿與修改歷史。 |
 | `jobs` | 持久化媒體處理佇列，保存狀態、payload、attempts、取消旗標與進度欄位。 |
 | `job_events` | 任務事件時間線，記錄建立、worker claim、狀態轉換、retry、取消等事件，供維運與 UI 觀察流程。 |
-| `app_users` | 未來帳號/角色功能使用者表；目前 `MEETING_AUTH_ENABLED=0`，程式碼已完成但不啟用權限控管。 |
-| `audit_logs` | 未來稽核紀錄表，保存 actor、action、resource 與 request metadata；目前只提供底層 helper，不影響既有流程。 |
+| `app_users` | 帳號與角色表；`MEETING_AUTH_ENABLED=0` 時維持既有本機模式，啟用後中央路由政策全面執行最小權限。 |
+| `audit_logs` | 保存 actor、action、resource 與 request metadata；文件與逐項審查變更會建立稽核紀錄。 |
 | `app_meta` | 保存資料庫 schema version，供 `/health` 驗證執行版本。 |
 
 搜尋流程依序合併欄位 FTS、完整內容 FTS 與參數化 `LIKE` 後備搜尋；後備搜尋補足 SQLite `unicode61` 對中文連續字串部分匹配的限制。兩個 FTS 索引在新增、編輯、刪除會議時增量更新，啟動時只對缺漏的既有資料進行一次性補建，搜尋本身維持唯讀。若部署環境的 SQLite 不支援 FTS5，API 仍可使用 `LIKE` 搜尋欄位與完整內容。
 
 Web 歷史頁可從 `/meetings/{id}/source-media` 串流保留的原始錄音或錄影，並把逐字稿時間戳連回播放器；舊的 `/meetings/{id}/source-audio` 仍保留相容。人工修訂分成兩條路徑：`PUT /meetings/{id}/summary` 只改摘要、決議與待辦；`PUT /meetings/{id}/transcript` 只改完整逐字稿。兩者都會先寫入 `meeting_revisions`，再更新 Markdown 與 FTS 索引，並將會議退回 `needs_review`。`PUT /meetings/{id}/review` 明確保存人工複核／核准；核准時記錄目前 Markdown SHA-256，有阻擋交付的品質問題時拒絕核准。
 
-補充佐證經 `POST /meetings/{id}/evidence` 上傳後，Gemini 的同步 SDK 呼叫會放入工作執行緒，避免阻塞 FastAPI event loop。成功時附件、SHA-256、分析內容、revision 與全文索引一致更新；失敗時尚未入庫的附件會清理。
+補充佐證經 `POST /meetings/{id}/evidence` 上傳後，Gemini 的同步 SDK 呼叫會放入工作執行緒，避免阻塞 FastAPI event loop。成功時附件、SHA-256、分析內容、D/R/A 關聯、revision 與全文索引一致更新；失敗時尚未入庫的附件會清理。`PUT /meetings/{id}/items/{item_key}/review` 提供逐項複核／核准，逐項狀態會回捲整份文件，但不會自動取代正式文件核准。
 
-`GET /health` 除依賴檢查外，也回傳載入 commit、工作區 commit、程式碼指紋、worker 狀態、schema version 與 segment cache version。若服務仍載入舊程式碼，`matches_workspace=false` 且健康狀態降級。
+`GET /health` 除依賴檢查外，也回傳載入 commit、工作區 commit、程式碼指紋、worker、schema、SQLite quick check、ffmpeg/ffprobe 與最新備份健康度。`GET /metrics` 額外提供任務 p50/p90/p95、失敗分類、文件審查狀態與備份新鮮度。若服務仍載入舊程式碼，`matches_workspace=false` 且健康狀態降級。
+
+### 5. 治理與維運模組邊界
+
+| 模組 | 責任 | 禁止跨越的邊界 |
+| --- | --- | --- |
+| `backend.auth` | 身分、角色、中央路由權限政策 | 不接受用戶端自報角色 |
+| `backend.review_workflow` | 文件與 D/R/A 逐項狀態轉換、回捲規則 | 不處理 HTTP 或畫面 |
+| `backend.evidence` | 附件複製、分析與提交 | 未完成資料庫交易前不得留下孤兒附件 |
+| `backend.maintenance` | 一致性備份、記錄快照、驗證與安全還原 | 還原不得覆寫非空目錄 |
+| `backend.database` | schema、交易、查詢與相容 wrapper | 不承擔路由授權判斷 |
+
+營運查詢都有明確上限：任務延遲與錯誤分類最多讀取最近 1,000 筆，API 清單維持分頁上限；若長期工作量超過單機 SQLite／單 worker 的容量，再以觀測到的 p95 與 queue depth 作為升級外部佇列或 PostgreSQL 的依據。
+
+### 6. P0～P3 驗收矩陣（2026/07/29）
+
+| 優先級 | 驗收範圍 | 完成證據 |
+| --- | --- | --- |
+| **P0** | 資料完整性、任務血緣、備份一致性、權限邊界 | WAL 安全 backup API、integrity check、meeting↔job 唯一索引、保留已連結 job/event、中央 RBAC 政策、刪除附件生命週期 |
+| **P1** | 結構化逐項審查與佐證鏈 | D/R/A 逐項 API/UI、狀態回捲、`meeting_evidence_items`、逐項稽核紀錄 |
+| **P2** | 可觀測性與還原能力 | p50/p90/p95、錯誤分類、審查統計、備份健康；DB＋Markdown＋附件快照及驗證／空目錄還原工具 |
+| **P3** | 維護邊界與容量限制 | review domain service、auth/maintenance/evidence 分層、有限查詢、schema 3、文件化升級觸發條件 |
 
 ---
 
