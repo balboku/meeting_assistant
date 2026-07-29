@@ -245,6 +245,9 @@ class MetricsResponse(BaseModel):
     meetings: dict[str, int]
     meeting_review_statuses: dict[str, int] = Field(default_factory=dict)
     backup: dict[str, Any] = Field(default_factory=dict)
+    offsite_backup: dict[str, Any] = Field(default_factory=dict)
+    queue: dict[str, Any] = Field(default_factory=dict)
+    worker: dict[str, Any] = Field(default_factory=dict)
     storage: StorageMetrics
     ngrok: NgrokStatus
 
@@ -466,7 +469,7 @@ class MeetingEvidenceResponse(BaseModel):
 class HealthResponse(BaseModel):
     """GET /health 的回應格式"""
     status: str = "ok"
-    version: str = "2.2.0"
+    version: str = "2.3.0"
     model: str
     transcription_model: str
     summary_model: str

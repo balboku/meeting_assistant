@@ -25,6 +25,7 @@ from backend.quality_segments import (
     review_segment_label_sort_key,
 )
 from backend.auth import normalize_role
+from backend.schema_migrations import apply_schema_migrations
 
 logger = logging.getLogger("MeetingAssistant.DB")
 
@@ -33,7 +34,7 @@ DEFAULT_JOB_MAX_ATTEMPTS = int(os.getenv("JOB_QUEUE_MAX_ATTEMPTS", "5"))
 # can alter review locations. Older rechecks remain visible, but must not mask
 # current diagnostics until they have been refreshed locally.
 TRANSCRIPT_QUALITY_RECHECK_VERSION = 4
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 MEETING_REVIEW_STATUSES = frozenset({"generated", "needs_review", "reviewed", "approved"})
 TRANSIENT_RETRY_MARKERS = (
     "503",
@@ -55,6 +56,13 @@ DB_PATH = Path(os.getenv("DB_PATH") or Path(__file__).parent.parent / "meetings.
 def _now() -> str:
     """Return a local timestamp in the same format SQLite uses in this project."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _after_seconds(seconds: int | float) -> str:
+    """Return a local SQLite-compatible timestamp after a bounded interval."""
+    return (
+        datetime.now() + timedelta(seconds=max(1, int(seconds)))
+    ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _markdown_section(text: str, heading_terms: tuple[str, ...], next_terms: tuple[str, ...]) -> str:
@@ -1450,7 +1458,11 @@ def _ensure_meeting_revisions_table(conn: sqlite3.Connection) -> None:
     )
 
 
-def _ensure_meeting_workflow_tables(conn: sqlite3.Connection) -> None:
+def _ensure_meeting_workflow_tables(
+    conn: sqlite3.Connection,
+    *,
+    initial_schema_version: int = 1,
+) -> None:
     """Create structured-summary, evidence, and schema metadata tables."""
     conn.execute("""
         CREATE TABLE IF NOT EXISTS app_meta (
@@ -1462,13 +1474,7 @@ def _ensure_meeting_workflow_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         """INSERT OR IGNORE INTO app_meta (key, value, updated_at)
            VALUES ('schema_version', ?, ?)""",
-        (str(SCHEMA_VERSION), _now()),
-    )
-    conn.execute(
-        """UPDATE app_meta
-              SET value=?, updated_at=?
-            WHERE key='schema_version' AND value<>?""",
-        (str(SCHEMA_VERSION), _now(), str(SCHEMA_VERSION)),
+        (str(initial_schema_version), _now()),
     )
     conn.execute("""
         CREATE TABLE IF NOT EXISTS meeting_items (
@@ -1595,7 +1601,7 @@ def _ensure_meeting_quality_columns(conn: sqlite3.Connection) -> None:
 # =============================================================================
 
 @contextmanager
-def get_db():
+def get_db(*, enforce_foreign_keys: bool = True):
     """
     Context manager：安全地取得 SQLite 連線，使用完畢後自動關閉。
 
@@ -1606,6 +1612,9 @@ def get_db():
     conn.row_factory = sqlite3.Row  # 讓查詢結果可用欄位名稱存取
     conn.execute("PRAGMA journal_mode=WAL")  # 提升並發性能
     conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(
+        f"PRAGMA foreign_keys={'ON' if enforce_foreign_keys else 'OFF'}"
+    )
     try:
         yield conn
         conn.commit()
@@ -1638,6 +1647,10 @@ def _ensure_jobs_queue_columns(conn: sqlite3.Connection) -> None:
         "cancel_requested": "INTEGER NOT NULL DEFAULT 0",
         "progress_current": "INTEGER",
         "progress_total": "INTEGER",
+        "worker_id": "TEXT",
+        "worker_generation": "INTEGER",
+        "heartbeat_at": "TEXT",
+        "lease_expires_at": "TEXT",
     }
 
     for column_name, definition in columns.items():
@@ -1661,6 +1674,28 @@ def _ensure_jobs_queue_columns(conn: sqlite3.Connection) -> None:
               AND status IN ('pending', 'processing', 'failed')""",
         (DEFAULT_JOB_MAX_ATTEMPTS, DEFAULT_JOB_MAX_ATTEMPTS),
     )
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_jobs_status_lease
+             ON jobs(status, lease_expires_at, queued_at)"""
+    )
+
+
+def _ensure_runtime_leases_table(conn: sqlite3.Connection) -> None:
+    """Create the cross-process leadership lease used by embedded workers."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS runtime_leases (
+            lease_name      TEXT PRIMARY KEY,
+            owner_id        TEXT NOT NULL,
+            generation      INTEGER NOT NULL,
+            acquired_at     TEXT NOT NULL,
+            heartbeat_at    TEXT NOT NULL,
+            expires_at      TEXT NOT NULL
+        )
+    """)
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_runtime_leases_expires
+             ON runtime_leases(expires_at)"""
+    )
 
 def init_db() -> None:
     """
@@ -1668,8 +1703,11 @@ def init_db() -> None:
     應於 FastAPI 啟動時呼叫一次。
     """
     logger.info(f"🗄️  初始化 SQLite 資料庫：{DB_PATH}")
+    database_existed = DB_PATH.is_file() and DB_PATH.stat().st_size > 0
 
-    with get_db() as conn:
+    # Schema v5 rebuilds parent and child tables in one transaction, so foreign
+    # key enforcement is enabled only after the migration finishes.
+    with get_db(enforce_foreign_keys=False) as conn:
         # 會議記錄主表
         conn.execute("""
             CREATE TABLE IF NOT EXISTS meetings (
@@ -1704,17 +1742,53 @@ def init_db() -> None:
                 updated_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
                 cancel_requested INTEGER NOT NULL DEFAULT 0,
                 progress_current INTEGER,
-                progress_total   INTEGER
+                progress_total   INTEGER,
+                worker_id        TEXT,
+                worker_generation INTEGER,
+                heartbeat_at     TEXT,
+                lease_expires_at TEXT
             )
         """)
         _ensure_jobs_queue_columns(conn)
+        _ensure_runtime_leases_table(conn)
 
         # 任務事件時間線：供維運頁面與 API 追蹤狀態變化。
         _ensure_job_events_table(conn)
         _ensure_meeting_revisions_table(conn)
-        _ensure_meeting_workflow_tables(conn)
+        _ensure_meeting_workflow_tables(conn, initial_schema_version=1)
         _ensure_auth_tables(conn)
         _ensure_meeting_fts(conn)
+
+        migration = apply_schema_migrations(
+            conn,
+            DB_PATH,
+            target_version=SCHEMA_VERSION,
+            database_existed=database_existed,
+        )
+
+        # Recreate indexes/triggers removed together with legacy tables.
+        _ensure_jobs_queue_columns(conn)
+        _ensure_runtime_leases_table(conn)
+        _ensure_job_events_table(conn)
+        _ensure_meeting_revisions_table(conn)
+        _ensure_meeting_workflow_tables(conn)
+        _ensure_auth_tables(conn)
+        _ensure_meeting_quality_columns(conn)
+        _ensure_meeting_fts(conn)
+
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.IntegrityError(
+                f"資料庫初始化 foreign_key_check 失敗：{violations[:5]}"
+            )
+        if migration.get("from_version") != migration.get("to_version"):
+            logger.info(
+                "✅ Schema migration v%s → v%s；backup=%s；details=%s",
+                migration.get("from_version"),
+                migration.get("to_version"),
+                migration.get("backup_path") or "new-database",
+                migration.get("details"),
+            )
 
     logger.info("✅ 資料庫初始化完成")
 
@@ -1734,7 +1808,6 @@ def create_job(
     """建立新的任務記錄（初始狀態：pending）"""
     now = _now()
     with get_db() as conn:
-        _ensure_jobs_queue_columns(conn)
         conn.execute(
             """INSERT INTO jobs (
                    job_id, status, message, task_type, source, payload_json,
@@ -1757,6 +1830,160 @@ def create_job(
     logger.debug(f"📝 任務已建立：{job_id}")
 
 
+def try_acquire_runtime_lease(
+    lease_name: str,
+    owner_id: str,
+    *,
+    lease_seconds: int = 90,
+) -> Optional[int]:
+    """Acquire or renew one named cross-process lease.
+
+    A monotonically increasing generation acts as a fencing token whenever a
+    different owner takes over an expired lease.
+    """
+    normalized_name = str(lease_name or "").strip()
+    normalized_owner = str(owner_id or "").strip()
+    if not normalized_name or not normalized_owner:
+        raise ValueError("lease_name 與 owner_id 不可為空")
+
+    now = _now()
+    expires_at = _after_seconds(lease_seconds)
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _ensure_runtime_leases_table(conn)
+        row = conn.execute(
+            "SELECT * FROM runtime_leases WHERE lease_name=?",
+            (normalized_name,),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """INSERT INTO runtime_leases (
+                       lease_name, owner_id, generation, acquired_at,
+                       heartbeat_at, expires_at
+                   ) VALUES (?, ?, 1, ?, ?, ?)""",
+                (normalized_name, normalized_owner, now, now, expires_at),
+            )
+            return 1
+
+        current_owner = str(row["owner_id"] or "")
+        current_generation = int(row["generation"] or 0)
+        if current_owner == normalized_owner:
+            conn.execute(
+                """UPDATE runtime_leases
+                      SET heartbeat_at=?, expires_at=?
+                    WHERE lease_name=? AND owner_id=? AND generation=?""",
+                (
+                    now,
+                    expires_at,
+                    normalized_name,
+                    normalized_owner,
+                    current_generation,
+                ),
+            )
+            return current_generation
+
+        if str(row["expires_at"] or "") > now:
+            return None
+
+        next_generation = current_generation + 1
+        cursor = conn.execute(
+            """UPDATE runtime_leases
+                  SET owner_id=?, generation=?, acquired_at=?,
+                      heartbeat_at=?, expires_at=?
+                WHERE lease_name=? AND generation=? AND expires_at<=?""",
+            (
+                normalized_owner,
+                next_generation,
+                now,
+                now,
+                expires_at,
+                normalized_name,
+                current_generation,
+                now,
+            ),
+        )
+        return next_generation if cursor.rowcount == 1 else None
+
+
+def renew_runtime_lease(
+    lease_name: str,
+    owner_id: str,
+    generation: int,
+    *,
+    lease_seconds: int = 90,
+) -> bool:
+    """Renew a lease only when the caller still owns its fencing generation."""
+    now = _now()
+    with get_db() as conn:
+        _ensure_runtime_leases_table(conn)
+        cursor = conn.execute(
+            """UPDATE runtime_leases
+                  SET heartbeat_at=?, expires_at=?
+                WHERE lease_name=? AND owner_id=? AND generation=?""",
+            (
+                now,
+                _after_seconds(lease_seconds),
+                str(lease_name or "").strip(),
+                str(owner_id or "").strip(),
+                int(generation),
+            ),
+        )
+        return cursor.rowcount == 1
+
+
+def release_runtime_lease(
+    lease_name: str,
+    owner_id: str,
+    generation: int,
+) -> bool:
+    """Release a lease without allowing a stale owner to delete a successor."""
+    with get_db() as conn:
+        _ensure_runtime_leases_table(conn)
+        cursor = conn.execute(
+            """DELETE FROM runtime_leases
+                WHERE lease_name=? AND owner_id=? AND generation=?""",
+            (
+                str(lease_name or "").strip(),
+                str(owner_id or "").strip(),
+                int(generation),
+            ),
+        )
+        return cursor.rowcount == 1
+
+
+def expire_abandoned_runtime_lease(
+    lease_name: str,
+    owner_id: str,
+    generation: int,
+) -> bool:
+    """Expire an exact dead-owner lease without deleting its fencing history."""
+    now = _now()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """UPDATE runtime_leases
+                  SET expires_at=?, heartbeat_at=?
+                WHERE lease_name=? AND owner_id=? AND generation=?""",
+            (
+                now, now,
+                str(lease_name or "").strip(),
+                str(owner_id or "").strip(),
+                int(generation),
+            ),
+        )
+        return cursor.rowcount == 1
+
+
+def get_runtime_lease(lease_name: str) -> Optional[dict[str, Any]]:
+    """Return one runtime lease for health and operations reporting."""
+    with get_db() as conn:
+        _ensure_runtime_leases_table(conn)
+        row = conn.execute(
+            "SELECT * FROM runtime_leases WHERE lease_name=?",
+            (str(lease_name or "").strip(),),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def update_job_status(
     job_id: str,
     status: str,
@@ -1770,7 +1997,26 @@ def update_job_status(
     completed_at = _now() if status in ("done", "failed", "cancelled") else None
 
     with get_db() as conn:
-        _ensure_jobs_queue_columns(conn)
+        previous = conn.execute(
+            """SELECT status, message, output_path, error_detail,
+                      progress_current, progress_total
+                 FROM jobs WHERE job_id=?""",
+            (job_id,),
+        ).fetchone()
+        if previous is None:
+            raise KeyError(f"找不到任務：{job_id}")
+        same_terminal_state = (
+            status in {"done", "failed", "cancelled"}
+            and str(previous["status"] or "") == status
+            and str(previous["message"] or "") == str(message or "")
+            and str(previous["output_path"] or "") == str(
+                output_path or previous["output_path"] or ""
+            )
+            and str(previous["error_detail"] or "") == str(error_detail or "")
+            and previous["progress_current"] == progress_current
+            and previous["progress_total"] == progress_total
+        )
+        release_lease = status in {"pending", "done", "failed", "cancelled"}
         conn.execute(
             """UPDATE jobs
                SET status=?,
@@ -1780,8 +2026,12 @@ def update_job_status(
                    completed_at=?,
                    updated_at=?,
                    progress_current=?,
-                   progress_total=?
-               WHERE job_id=?""",
+                   progress_total=?,
+                   worker_id=CASE WHEN ? THEN NULL ELSE worker_id END,
+                   worker_generation=CASE WHEN ? THEN NULL ELSE worker_generation END,
+                   heartbeat_at=CASE WHEN ? THEN NULL ELSE heartbeat_at END,
+                   lease_expires_at=CASE WHEN ? THEN NULL ELSE lease_expires_at END
+                WHERE job_id=?""",
             (
                 status,
                 message,
@@ -1791,10 +2041,15 @@ def update_job_status(
                 _now(),
                 progress_current,
                 progress_total,
+                int(release_lease),
+                int(release_lease),
+                int(release_lease),
+                int(release_lease),
                 job_id,
             )
         )
-        _record_job_event(conn, job_id, f"status_{status}", message, error_detail)
+        if not same_terminal_state:
+            _record_job_event(conn, job_id, f"status_{status}", message, error_detail)
     logger.debug(f"🔄 任務狀態更新：{job_id} → {status}")
 
 
@@ -1810,7 +2065,6 @@ def get_job(job_id: str) -> Optional[dict]:
 def find_line_job_by_message_id(message_id: str) -> Optional[dict]:
     """Return the existing LINE processing job for a LINE message ID, if any."""
     with get_db() as conn:
-        _ensure_jobs_queue_columns(conn)
         rows = conn.execute(
             """SELECT *
                  FROM jobs
@@ -1829,7 +2083,6 @@ def list_line_jobs_for_user(user_id: str, limit: int = 3) -> list[dict]:
     """Return recent LINE media jobs for one LINE user."""
     matches: list[dict] = []
     with get_db() as conn:
-        _ensure_jobs_queue_columns(conn)
         rows = conn.execute(
             """SELECT *
                  FROM jobs
@@ -1898,6 +2151,131 @@ def count_jobs_by_status() -> dict[str, int]:
     for row in rows:
         counts[row["status"]] = int(row["count"])
     return counts
+
+
+def queue_operational_metrics() -> dict[str, Any]:
+    """Return queue depth, attempt, lease, and leader evidence in one snapshot."""
+    with get_db() as conn:
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        task_expression = (
+            "task_type" if "task_type" in columns else "'legacy'"
+        )
+        attempts_expression = (
+            "attempts" if "attempts" in columns else "0"
+        )
+        max_attempts_expression = (
+            "max_attempts" if "max_attempts" in columns else "1"
+        )
+        queued_expression = (
+            "COALESCE(queued_at, created_at)"
+            if "queued_at" in columns
+            else "created_at"
+        )
+        lease_expired_expression = (
+            """SUM(
+                   CASE WHEN status='processing'
+                              AND (
+                                  lease_expires_at IS NULL
+                                  OR lease_expires_at <= datetime('now', 'localtime')
+                              )
+                        THEN 1 ELSE 0 END
+               )"""
+            if "lease_expires_at" in columns
+            else "0"
+        )
+        lease_expiring_expression = (
+            """SUM(
+                   CASE WHEN status='processing'
+                              AND lease_expires_at >
+                                  datetime('now', 'localtime')
+                              AND lease_expires_at <=
+                                  datetime('now', 'localtime', '+30 seconds')
+                        THEN 1 ELSE 0 END
+               )"""
+            if "lease_expires_at" in columns
+            else "0"
+        )
+        task_rows = conn.execute(
+            f"""SELECT {task_expression} AS task_type,
+                       status, COUNT(*) AS count
+                 FROM jobs
+                GROUP BY {task_expression}, status
+                ORDER BY task_type, status"""
+        ).fetchall()
+        attempt_rows = conn.execute(
+            f"""SELECT {attempts_expression} AS attempts, COUNT(*) AS count
+                 FROM jobs
+                GROUP BY {attempts_expression}
+                ORDER BY attempts"""
+        ).fetchall()
+        timing = conn.execute(
+            f"""SELECT
+                   MAX(
+                       CASE WHEN status='pending'
+                            THEN MAX(
+                                0,
+                                (julianday('now', 'localtime') -
+                                 julianday({queued_expression})) * 86400.0
+                            )
+                       END
+                   ) AS oldest_pending_seconds,
+                   SUM(CASE WHEN {attempts_expression} > 0 THEN 1 ELSE 0 END)
+                       AS attempted_jobs,
+                   COALESCE(SUM({attempts_expression}), 0) AS total_attempts,
+                   SUM(
+                       CASE WHEN status='failed'
+                                  AND {attempts_expression} >= {max_attempts_expression}
+                            THEN 1 ELSE 0 END
+                   ) AS exhausted_jobs,
+                   {lease_expired_expression} AS expired_processing_leases,
+                   {lease_expiring_expression} AS expiring_processing_leases
+                 FROM jobs"""
+        ).fetchone()
+        runtime_leases_exists = conn.execute(
+            """SELECT 1 FROM sqlite_master
+                WHERE type='table' AND name='runtime_leases'"""
+        ).fetchone()
+        leader = (
+            conn.execute(
+                """SELECT lease_name, owner_id, generation,
+                          heartbeat_at, expires_at
+                     FROM runtime_leases
+                    WHERE lease_name='meeting-assistant-job-queue'"""
+            ).fetchone()
+            if runtime_leases_exists
+            else None
+        )
+
+    by_task: dict[str, dict[str, int]] = {}
+    for row in task_rows:
+        by_task.setdefault(str(row["task_type"]), {})[
+            str(row["status"])
+        ] = int(row["count"])
+    return {
+        "by_task_and_status": by_task,
+        "attempt_distribution": {
+            str(int(row["attempts"])): int(row["count"])
+            for row in attempt_rows
+        },
+        "oldest_pending_seconds": (
+            round(float(timing["oldest_pending_seconds"]), 2)
+            if timing and timing["oldest_pending_seconds"] is not None
+            else None
+        ),
+        "attempted_jobs": int(timing["attempted_jobs"] or 0) if timing else 0,
+        "total_attempts": int(timing["total_attempts"] or 0) if timing else 0,
+        "exhausted_jobs": int(timing["exhausted_jobs"] or 0) if timing else 0,
+        "expired_processing_leases": (
+            int(timing["expired_processing_leases"] or 0) if timing else 0
+        ),
+        "expiring_processing_leases": (
+            int(timing["expiring_processing_leases"] or 0) if timing else 0
+        ),
+        "leader": dict(leader) if leader else None,
+    }
 
 
 def average_completed_job_seconds() -> Optional[float]:
@@ -2040,9 +2418,17 @@ def delete_terminal_jobs_completed_before(cutoff: str) -> int:
         return cursor.rowcount
 
 
-def claim_next_pending_job() -> Optional[dict[str, Any]]:
-    """Atomically claim the oldest pending job for a local worker."""
+def claim_next_pending_job(
+    *,
+    worker_id: Optional[str] = None,
+    worker_generation: Optional[int] = None,
+    lease_seconds: int = 90,
+) -> Optional[dict[str, Any]]:
+    """Atomically claim the oldest pending job with a renewable owner lease."""
     now = _now()
+    normalized_worker_id = str(worker_id or f"manual:{os.getpid()}").strip()
+    normalized_generation = int(worker_generation or 0)
+    lease_expires_at = _after_seconds(lease_seconds)
     with get_db() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
@@ -2064,20 +2450,101 @@ def claim_next_pending_job() -> Optional[dict[str, Any]]:
                       attempts=attempts + 1,
                       started_at=?,
                       updated_at=?,
+                      worker_id=?,
+                      worker_generation=?,
+                      heartbeat_at=?,
+                      lease_expires_at=?,
                       message='⚙️ 任務已由本機 worker 取出，開始處理...'
                 WHERE job_id=?
                   AND status='pending'
                   AND cancel_requested=0""",
-            (now, now, row["job_id"])
+            (
+                now,
+                now,
+                normalized_worker_id,
+                normalized_generation,
+                now,
+                lease_expires_at,
+                row["job_id"],
+            )
         )
         if cursor.rowcount == 0:
             return None
 
-        _record_job_event(conn, row["job_id"], "claimed", "任務已由 worker 取出，開始處理...")
+        _record_job_event(
+            conn,
+            row["job_id"],
+            "claimed",
+            "任務已由 worker 取出，開始處理...",
+            json.dumps(
+                {
+                    "worker_id": normalized_worker_id,
+                    "worker_generation": normalized_generation,
+                    "lease_expires_at": lease_expires_at,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
         claimed = conn.execute(
             "SELECT * FROM jobs WHERE job_id=?", (row["job_id"],)
         ).fetchone()
         return _deserialize_job(claimed)
+
+
+def renew_job_lease(
+    job_id: str,
+    worker_id: str,
+    worker_generation: int,
+    *,
+    lease_seconds: int = 90,
+) -> bool:
+    """Renew an active job only for the current fenced worker owner."""
+    now = _now()
+    with get_db() as conn:
+        cursor = conn.execute(
+            """UPDATE jobs
+                  SET heartbeat_at=?, lease_expires_at=?, updated_at=?
+                WHERE job_id=?
+                  AND status='processing'
+                  AND worker_id=?
+                  AND worker_generation=?""",
+            (
+                now,
+                _after_seconds(lease_seconds),
+                now,
+                job_id,
+                str(worker_id or "").strip(),
+                int(worker_generation),
+            ),
+        )
+        return cursor.rowcount == 1
+
+
+def job_lease_is_current(
+    job_id: str,
+    worker_id: str,
+    worker_generation: int,
+) -> bool:
+    """Return whether a worker still owns a non-expired processing lease."""
+    now = _now()
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT 1
+                 FROM jobs
+                WHERE job_id=?
+                  AND status='processing'
+                  AND worker_id=?
+                  AND worker_generation=?
+                  AND lease_expires_at>?""",
+            (
+                job_id,
+                str(worker_id or "").strip(),
+                int(worker_generation),
+                now,
+            ),
+        ).fetchone()
+        return row is not None
 
 
 def retry_or_fail_job(job_id: str, error_detail: str) -> str:
@@ -2102,7 +2569,11 @@ def retry_or_fail_job(job_id: str, error_detail: str) -> str:
                           message='任務已取消。',
                           error_detail=NULL,
                           completed_at=?,
-                          updated_at=?
+                          updated_at=?,
+                          worker_id=NULL,
+                          worker_generation=NULL,
+                          heartbeat_at=NULL,
+                          lease_expires_at=NULL
                     WHERE job_id=?""",
                 (now, now, job_id),
             )
@@ -2127,7 +2598,11 @@ def retry_or_fail_job(job_id: str, error_detail: str) -> str:
                           queued_at=?,
                           started_at=NULL,
                           completed_at=NULL,
-                          updated_at=?
+                          updated_at=?,
+                          worker_id=NULL,
+                          worker_generation=NULL,
+                          heartbeat_at=NULL,
+                          lease_expires_at=NULL
                     WHERE job_id=?""",
                 (
                     retry_message,
@@ -2146,7 +2621,11 @@ def retry_or_fail_job(job_id: str, error_detail: str) -> str:
                       message='❌ 處理失敗，已達重試上限。',
                       error_detail=?,
                       completed_at=?,
-                      updated_at=?
+                      updated_at=?,
+                      worker_id=NULL,
+                      worker_generation=NULL,
+                      heartbeat_at=NULL,
+                      lease_expires_at=NULL
                 WHERE job_id=?""",
             (error_detail, now, now, job_id),
         )
@@ -2154,31 +2633,54 @@ def retry_or_fail_job(job_id: str, error_detail: str) -> str:
         return "failed"
 
 
-def requeue_interrupted_jobs() -> int:
-    """
-    Move processing jobs left behind by a previous process back to the queue.
+def requeue_interrupted_jobs(
+    *,
+    legacy_grace_seconds: int = 90,
+) -> int:
+    """Requeue only processing jobs whose owner lease has expired.
 
-    Returns the number of jobs requeued to pending.
+    Legacy rows without a lease are considered interrupted only after their
+    last update exceeds the grace period. Starting a second API process can
+    therefore no longer steal work that a healthy process is still executing.
     """
     now = _now()
+    legacy_cutoff = (
+        datetime.now() - timedelta(seconds=max(1, int(legacy_grace_seconds)))
+    ).strftime("%Y-%m-%d %H:%M:%S")
     requeued = 0
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT * FROM jobs WHERE status='processing'"
+            """SELECT *
+                 FROM jobs
+                WHERE status='processing'
+                  AND (
+                      (lease_expires_at IS NOT NULL AND lease_expires_at<=?)
+                      OR (
+                          lease_expires_at IS NULL
+                          AND COALESCE(updated_at, started_at, created_at)<=?
+                      )
+                  )""",
+            (now, legacy_cutoff),
         ).fetchall()
         for row in rows:
             job_id = row["job_id"]
             attempts = int(row["attempts"] or 0)
             max_attempts = int(row["max_attempts"] or 1)
+            clear_lease_sql = """
+                              worker_id=NULL,
+                              worker_generation=NULL,
+                              heartbeat_at=NULL,
+                              lease_expires_at=NULL"""
 
             if row["cancel_requested"]:
                 conn.execute(
-                    """UPDATE jobs
-                          SET status='cancelled',
-                              message='任務已取消。',
-                              completed_at=?,
-                              updated_at=?
-                        WHERE job_id=?""",
+                    f"""UPDATE jobs
+                           SET status='cancelled',
+                               message='任務已取消。',
+                               completed_at=?,
+                               updated_at=?,
+                               {clear_lease_sql}
+                         WHERE job_id=?""",
                     (now, now, job_id),
                 )
                 _record_job_event(conn, job_id, "status_cancelled", "任務已取消。")
@@ -2186,13 +2688,14 @@ def requeue_interrupted_jobs() -> int:
 
             if not _has_recoverable_payload(row):
                 conn.execute(
-                    """UPDATE jobs
-                          SET status='failed',
-                              message='❌ 前次處理中斷，且缺少可恢復的任務資料。',
-                              error_detail='缺少可恢復的任務 payload，無法自動重試舊式背景任務。',
-                              completed_at=?,
-                              updated_at=?
-                        WHERE job_id=?""",
+                    f"""UPDATE jobs
+                           SET status='failed',
+                               message='❌ 前次處理中斷，且缺少可恢復的任務資料。',
+                               error_detail='缺少可恢復的任務 payload，無法自動重試舊式背景任務。',
+                               completed_at=?,
+                               updated_at=?,
+                               {clear_lease_sql}
+                         WHERE job_id=?""",
                     (now, now, job_id),
                 )
                 _record_job_event(
@@ -2206,31 +2709,43 @@ def requeue_interrupted_jobs() -> int:
 
             if attempts < max_attempts:
                 conn.execute(
-                    """UPDATE jobs
-                          SET status='pending',
-                              message='偵測到前次處理中斷，已重新排入佇列。',
-                              queued_at=?,
-                              started_at=NULL,
-                              completed_at=NULL,
-                              updated_at=?
-                        WHERE job_id=?""",
+                    f"""UPDATE jobs
+                           SET status='pending',
+                               message='偵測到 worker lease 過期，已重新排入佇列。',
+                               queued_at=?,
+                               started_at=NULL,
+                               completed_at=NULL,
+                               updated_at=?,
+                               {clear_lease_sql}
+                         WHERE job_id=?""",
                     (now, now, job_id),
                 )
-                _record_job_event(conn, job_id, "interrupted_requeued", "偵測到前次處理中斷，已重新排入佇列。")
+                _record_job_event(
+                    conn,
+                    job_id,
+                    "lease_expired_requeued",
+                    "偵測到 worker lease 過期，已重新排入佇列。",
+                )
                 requeued += 1
                 continue
 
             conn.execute(
-                """UPDATE jobs
-                      SET status='failed',
-                          message='❌ 前次處理中斷且已達重試上限。',
-                          error_detail=COALESCE(error_detail, '任務處理中斷'),
-                          completed_at=?,
-                          updated_at=?
-                    WHERE job_id=?""",
+                f"""UPDATE jobs
+                       SET status='failed',
+                           message='❌ 前次處理中斷且已達重試上限。',
+                           error_detail=COALESCE(error_detail, '任務處理中斷'),
+                           completed_at=?,
+                           updated_at=?,
+                           {clear_lease_sql}
+                     WHERE job_id=?""",
                 (now, now, job_id),
             )
-            _record_job_event(conn, job_id, "status_failed", "❌ 前次處理中斷且已達重試上限。")
+            _record_job_event(
+                conn,
+                job_id,
+                "status_failed",
+                "❌ 前次處理中斷且已達重試上限。",
+            )
     return requeued
 
 
@@ -2362,6 +2877,20 @@ def is_job_cancel_requested(job_id: str) -> bool:
 # Meetings CRUD（會議記錄管理）
 # =============================================================================
 
+
+def get_meeting_by_job_id(job_id: str) -> Optional[dict[str, Any]]:
+    """Return the durable result for an idempotent processing job."""
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        return None
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM meetings WHERE job_id=? LIMIT 1",
+            (normalized_job_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def _structured_summary_items(structured_summary: Optional[dict[str, Any]]) -> list[tuple[str, str, int, dict[str, Any], list[Any]]]:
     if not isinstance(structured_summary, dict):
         return []
@@ -2462,10 +2991,55 @@ def save_meeting(
     將新會議記錄存入資料庫。
 
     Returns:
-        int: 新插入記錄的 ID
+        int: 新插入或既有冪等記錄的 ID
     """
     with get_db() as conn:
         _ensure_meeting_quality_columns(conn)
+        normalized_job_id = str(job_id or "").strip() or None
+        if normalized_job_id:
+            existing = conn.execute(
+                "SELECT id, output_path FROM meetings WHERE job_id=? LIMIT 1",
+                (normalized_job_id,),
+            ).fetchone()
+            if existing is not None:
+                existing_output_path = str(existing["output_path"] or output_path)
+                job = conn.execute(
+                    "SELECT status, output_path FROM jobs WHERE job_id=?",
+                    (normalized_job_id,),
+                ).fetchone()
+                if job is not None and (
+                    str(job["status"] or "") != "done"
+                    or str(job["output_path"] or "") != existing_output_path
+                ):
+                    now = _now()
+                    conn.execute(
+                        """UPDATE jobs
+                              SET status='done',
+                                  message='✅ 會議記錄生成完成！',
+                                  output_path=?,
+                                  error_detail=NULL,
+                                  completed_at=?,
+                                  updated_at=?,
+                                  worker_id=NULL,
+                                  worker_generation=NULL,
+                                  heartbeat_at=NULL,
+                                  lease_expires_at=NULL
+                            WHERE job_id=?""",
+                        (
+                            existing_output_path,
+                            now,
+                            now,
+                            normalized_job_id,
+                        ),
+                    )
+                    _record_job_event(
+                        conn,
+                        normalized_job_id,
+                        "status_done",
+                        "✅ 偵測到既有會議結果，任務已冪等完成。",
+                    )
+                return int(existing["id"])
+
         quality_score = quality_report.get("score") if quality_report else None
         quality_label = quality_report.get("label") if quality_report else None
         quality_report_json = json.dumps(quality_report, ensure_ascii=False) if quality_report else None
@@ -2486,7 +3060,7 @@ def save_meeting(
                 source_audio,
                 str(output_path),
                 summary,
-                job_id,
+                normalized_job_id,
                 quality_score,
                 quality_label,
                 quality_report_json,
@@ -2507,6 +3081,34 @@ def save_meeting(
             )
         except sqlite3.OperationalError:
             logger.warning("⚠️  會議已寫入，但 FTS 索引更新失敗（ID: %s）", meeting_id)
+        if normalized_job_id:
+            job = conn.execute(
+                "SELECT status FROM jobs WHERE job_id=?",
+                (normalized_job_id,),
+            ).fetchone()
+            if job is not None:
+                now = _now()
+                conn.execute(
+                    """UPDATE jobs
+                          SET status='done',
+                              message='✅ 會議記錄生成完成！',
+                              output_path=?,
+                              error_detail=NULL,
+                              completed_at=?,
+                              updated_at=?,
+                              worker_id=NULL,
+                              worker_generation=NULL,
+                              heartbeat_at=NULL,
+                              lease_expires_at=NULL
+                        WHERE job_id=?""",
+                    (str(output_path), now, now, normalized_job_id),
+                )
+                _record_job_event(
+                    conn,
+                    normalized_job_id,
+                    "status_done",
+                    "✅ 會議記錄與任務已在同一交易完成。",
+                )
 
     logger.info(f"💾 會議記錄已寫入 SQLite（ID: {meeting_id}）")
     return meeting_id

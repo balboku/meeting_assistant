@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover - direct use before dependencies are ins
     load_dotenv = None
 
 from backend.ngrok_status import DEFAULT_NGROK_API_URL, get_ngrok_status
+from backend.access_tokens import create_access_token
 
 
 def configure_stdio_encoding() -> None:
@@ -200,14 +201,24 @@ def local_lan_ip() -> Optional[str]:
 def mobile_history_url(host: str, port: int, api_key: str = "") -> str:
     url = f"http://{host}:{port}/history"
     if api_key:
-        return f"{url}?api_key={quote(api_key, safe='')}"
+        bootstrap_token = create_access_token(
+            api_key,
+            "bootstrap",
+            ttl_seconds=5 * 60,
+        )
+        return f"{url}?bootstrap_token={quote(bootstrap_token, safe='')}"
     return url
 
 
 def public_history_url(public_url: str, api_key: str = "") -> str:
     url = f"{public_url.rstrip('/')}/history"
     if api_key:
-        return f"{url}?api_key={quote(api_key, safe='')}"
+        bootstrap_token = create_access_token(
+            api_key,
+            "bootstrap",
+            ttl_seconds=5 * 60,
+        )
+        return f"{url}?bootstrap_token={quote(bootstrap_token, safe='')}"
     return url
 
 
@@ -225,11 +236,11 @@ def print_access_urls():
 
     if _env_flag("MEETING_ASSISTANT_TRUST_LOCAL_NETWORK", default=True):
         print(f"手機 / 平板：{mobile_history_url(lan_ip, SERVER_PORT)}")
-        print("同 Wi-Fi / 信任本機網段可直接開啟；ngrok 公開網址仍會使用 api_key。")
+        print("同 Wi-Fi / 信任本機網段可直接開啟；ngrok 使用五分鐘有效的登入連結。")
     else:
         api_key = os.getenv("APP_API_KEY", "").strip()
         print(f"手機 / 平板：{mobile_history_url(lan_ip, SERVER_PORT, api_key)}")
-        print("目前已停用信任本機網段，手機網址需帶 api_key。")
+        print("目前已停用信任本機網段，手機網址使用五分鐘有效的登入連結。")
 
 
 def _line_api_headers():

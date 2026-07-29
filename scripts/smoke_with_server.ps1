@@ -42,6 +42,18 @@ function Invoke-SmokeScript {
     }
 }
 
+function Stop-ProcessTree {
+    param([Parameter(Mandatory = $true)][int]$RootProcessId)
+
+    $children = @(
+        Get-CimInstance Win32_Process -Filter "ParentProcessId = $RootProcessId" -ErrorAction SilentlyContinue
+    )
+    foreach ($child in $children) {
+        Stop-ProcessTree -RootProcessId ([int]$child.ProcessId)
+    }
+    Stop-Process -Id $RootProcessId -Force -ErrorAction SilentlyContinue
+}
+
 if (Test-SmokeServerReady $BaseUrl) {
     Write-Host "Using existing Meeting Assistant server: $BaseUrl"
     Invoke-SmokeScript $BaseUrl
@@ -90,9 +102,11 @@ try {
     Invoke-SmokeScript $BaseUrl
 }
 finally {
-    if ($ServerProcess -and -not $ServerProcess.HasExited) {
-        Stop-Process -Id $ServerProcess.Id -Force
-        $ServerProcess.WaitForExit(5000) | Out-Null
+    if ($ServerProcess) {
+        Stop-ProcessTree -RootProcessId $ServerProcess.Id
+        if (-not $ServerProcess.HasExited) {
+            $ServerProcess.WaitForExit(5000) | Out-Null
+        }
         Write-Host "Stopped temporary Meeting Assistant server."
     }
 }

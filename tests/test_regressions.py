@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -100,17 +101,24 @@ class SecurityRegressionTests(unittest.TestCase):
                 headers={"X-Forwarded-For": "203.0.113.8"},
             )
             self.assertIn(first_response.status_code, (307, 308))
-            self.assertIn(
-                "meeting_assistant_api_key=mobile-secret",
-                first_response.headers.get("set-cookie", ""),
+            cookie_header = first_response.headers.get("set-cookie", "")
+            self.assertIn("meeting_assistant_api_key=session.", cookie_header)
+            self.assertNotIn("mobile-secret", cookie_header)
+            self.assertNotIn(
+                "api_key",
+                first_response.headers.get("location", ""),
             )
+            session_cookie = cookie_header.split(
+                "meeting_assistant_api_key=",
+                1,
+            )[1].split(";", 1)[0]
 
             followup_response = asgi_request(
                 main.app,
                 "GET",
                 "/health",
                 headers={"X-Forwarded-For": "203.0.113.8"},
-                cookies={"meeting_assistant_api_key": "mobile-secret"},
+                cookies={"meeting_assistant_api_key": session_cookie},
             )
         finally:
             main.APP_API_KEY = original_key
@@ -1358,6 +1366,8 @@ class MaintenanceRegressionTests(unittest.TestCase):
         from backend.maintenance import (
             backup_database,
             create_record_snapshot,
+            latest_record_snapshot_health,
+            replicate_record_snapshot,
             restore_record_snapshot,
             verify_record_snapshot,
         )
@@ -1368,6 +1378,10 @@ class MaintenanceRegressionTests(unittest.TestCase):
             output.write_text("# 可還原會議", encoding="utf-8")
             attachment = root / "proof.txt"
             attachment.write_text("PASS", encoding="utf-8")
+            source_dir = root / "source_audio"
+            source_dir.mkdir()
+            source_media = source_dir / "snapshot.wav"
+            source_media.write_bytes(b"original-media")
             backup_dir = root / "backups"
             with mock.patch.object(database, "DB_PATH", root / "meetings.db"):
                 database.init_db()
@@ -1393,17 +1407,50 @@ class MaintenanceRegressionTests(unittest.TestCase):
                         ),
                     )
                 backup = backup_database(database.DB_PATH, backup_dir)
-                snapshot = create_record_snapshot(backup, backup_dir)
+                snapshot = create_record_snapshot(
+                    backup,
+                    backup_dir,
+                    source_media_dir=source_dir,
+                )
 
             verification = verify_record_snapshot(snapshot)
             self.assertTrue(verification["ok"], verification)
-            self.assertGreaterEqual(verification["entries"], 3)
+            self.assertGreaterEqual(verification["entries"], 4)
+            self.assertEqual(verification["source_media"], 1)
+
+            offsite_dir = root / "offsite"
+            offsite = replicate_record_snapshot(snapshot, offsite_dir)
+            self.assertTrue(offsite.is_file())
+            self.assertTrue(
+                offsite.with_suffix(f"{offsite.suffix}.sha256").is_file()
+            )
+            self.assertTrue(
+                latest_record_snapshot_health(offsite_dir)["ok"]
+            )
+
             restore_dir = root / "restore-drill"
             restored = restore_record_snapshot(snapshot, restore_dir)
             self.assertTrue(restored["restored"])
             self.assertTrue((restore_dir / "database" / "meetings.db").is_file())
             self.assertTrue(any((restore_dir / "meetings").rglob("meeting.md")))
             self.assertTrue(any((restore_dir / "attachments").rglob("*proof.txt")))
+            runtime_db = Path(restored["runtime"]["runtime_database"])
+            self.assertTrue(runtime_db.is_file())
+            restored_conn = sqlite3.connect(runtime_db)
+            try:
+                restored_meeting = restored_conn.execute(
+                    "SELECT output_path, source_audio FROM meetings WHERE id=?",
+                    (meeting_id,),
+                ).fetchone()
+                restored_evidence = restored_conn.execute(
+                    "SELECT stored_path FROM meeting_evidence WHERE meeting_id=?",
+                    (meeting_id,),
+                ).fetchone()
+            finally:
+                restored_conn.close()
+            self.assertTrue(Path(restored_meeting[0]).is_file())
+            self.assertTrue(Path(restored_meeting[1]).is_file())
+            self.assertTrue(Path(restored_evidence[0]).is_file())
 
     def test_cleanup_source_media_archives_prunes_only_expired_date_buckets(self):
         from backend.maintenance import cleanup_source_media_archives
@@ -1468,7 +1515,7 @@ class MaintenanceRegressionTests(unittest.TestCase):
             finally:
                 conn.close()
 
-            result = maintain_database(db_path=db_path)
+            result = maintain_database(db_path=db_path, force_vacuum=True)
 
             self.assertTrue(result["wal_checkpoint"])
             self.assertTrue(result["vacuum"])
@@ -4019,6 +4066,10 @@ class DurableQueueRegressionTests(unittest.TestCase):
                 "cancel_requested",
                 "progress_current",
                 "progress_total",
+                "worker_id",
+                "worker_generation",
+                "heartbeat_at",
+                "lease_expires_at",
             }.issubset(columns)
         )
 
@@ -4106,6 +4157,12 @@ class DurableQueueRegressionTests(unittest.TestCase):
             max_attempts=3,
         )
         database.claim_next_pending_job()
+        with database.get_db() as conn:
+            conn.execute(
+                """UPDATE jobs
+                      SET lease_expires_at='2000-01-01 00:00:00'
+                    WHERE job_id='queue-job-3'"""
+            )
 
         requeued = database.requeue_interrupted_jobs()
         job = database.get_job("queue-job-3")
@@ -4118,6 +4175,12 @@ class DurableQueueRegressionTests(unittest.TestCase):
         database = self._isolated_database()
         database.create_job("queue-job-legacy", max_attempts=3)
         database.claim_next_pending_job()
+        with database.get_db() as conn:
+            conn.execute(
+                """UPDATE jobs
+                      SET lease_expires_at='2000-01-01 00:00:00'
+                    WHERE job_id='queue-job-legacy'"""
+            )
 
         requeued = database.requeue_interrupted_jobs()
         job = database.get_job("queue-job-legacy")
@@ -4231,8 +4294,12 @@ class UploadQueueRegressionTests(unittest.TestCase):
                 )
 
             self.assertEqual(response.status_code, 202)
-            self.assertEqual(captured["audio_path"], existing_audio)
-            self.assertEqual(list(source_audio_dir.glob("*.mp3")), [existing_audio])
+            digest = hashlib.sha256(media_bytes).hexdigest()
+            content_addressed = source_audio_dir / f"{digest}.mp3"
+            self.assertEqual(captured["audio_path"], content_addressed)
+            self.assertTrue(existing_audio.exists())
+            self.assertTrue(content_addressed.exists())
+            self.assertTrue(os.path.samefile(existing_audio, content_addressed))
             self.assertFalse(list(source_audio_dir.glob(".upload_*")))
 
     def test_upload_route_keeps_reused_audio_when_enqueue_fails(self):
@@ -4260,7 +4327,10 @@ class UploadQueueRegressionTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 500)
             self.assertTrue(existing_audio.exists())
-            self.assertEqual(list(source_audio_dir.glob("*.mp3")), [existing_audio])
+            digest = hashlib.sha256(media_bytes).hexdigest()
+            content_addressed = source_audio_dir / f"{digest}.mp3"
+            self.assertTrue(content_addressed.exists())
+            self.assertTrue(os.path.samefile(existing_audio, content_addressed))
             self.assertFalse(list(source_audio_dir.glob(".upload_*")))
 
     def test_legacy_upload_audio_route_remains_supported(self):
@@ -8779,7 +8849,8 @@ class LineRegressionTests(unittest.TestCase):
                         model="gemini-3.1-flash-lite",
                     )
 
-                saved_audio = list(tmpdir_path.glob("line-reg_*.m4a"))
+                digest = hashlib.sha256(b"audio").hexdigest()
+                saved_audio = list(tmpdir_path.glob(f"{digest}.m4a"))
                 self.assertEqual(len(saved_audio), 1)
                 self.assertEqual(saved_audio[0].read_bytes(), b"audio")
                 self.assertFalse(process_mock.call_args.kwargs["cleanup_source_audio"])
@@ -8819,8 +8890,15 @@ class LineRegressionTests(unittest.TestCase):
                         model="gemini-3.1-flash-lite",
                     )
 
-                self.assertEqual(process_mock.call_args.kwargs["audio_path"], existing_audio)
-                self.assertEqual(list(tmpdir_path.glob("*.m4a")), [existing_audio])
+                digest = hashlib.sha256(b"audio").hexdigest()
+                content_addressed = tmpdir_path / f"{digest}.m4a"
+                self.assertEqual(
+                    process_mock.call_args.kwargs["audio_path"],
+                    content_addressed,
+                )
+                self.assertTrue(existing_audio.exists())
+                self.assertTrue(content_addressed.exists())
+                self.assertTrue(os.path.samefile(existing_audio, content_addressed))
                 self.assertFalse(list(tmpdir_path.glob(".upload_*")))
 
                 with database.get_db() as conn:
@@ -9946,7 +10024,8 @@ console.log('recording_audio_clipping_warning_ok');
         self.assertIn("Test-SmokeServerReady", ps1_with_server)
         self.assertIn("smoke_e2e.ps1", ps1_with_server)
         self.assertIn("-WindowStyle Hidden", ps1_with_server)
-        self.assertIn("Stop-Process -Id $ServerProcess.Id -Force", ps1_with_server)
+        self.assertIn("Stop-ProcessTree -RootProcessId $ServerProcess.Id", ps1_with_server)
+        self.assertIn("Get-CimInstance Win32_Process", ps1_with_server)
         self.assertIn("-UseBasicParsing", ps1_with_server)
 
     def test_desktop_gui_client_uses_primary_media_upload_endpoint(self):
@@ -10051,12 +10130,26 @@ class StartupScriptRegressionTests(unittest.TestCase):
             main_block.index("subprocess.run(["),
         )
 
-    def test_startup_can_build_mobile_history_url_with_api_key(self):
+    def test_startup_builds_mobile_history_url_with_short_lived_bootstrap_token(self):
         import start
 
-        url = start.mobile_history_url("192.168.1.20", 8001, "mobile secret")
+        with mock.patch.object(
+            start,
+            "create_access_token",
+            return_value="bootstrap.123.nonce.signature",
+        ):
+            url = start.mobile_history_url(
+                "192.168.1.20",
+                8001,
+                "mobile secret",
+            )
 
-        self.assertEqual(url, "http://192.168.1.20:8001/history?api_key=mobile%20secret")
+        self.assertEqual(
+            url,
+            "http://192.168.1.20:8001/history"
+            "?bootstrap_token=bootstrap.123.nonce.signature",
+        )
+        self.assertNotIn("mobile secret", url)
 
     def test_startup_prints_direct_mobile_access_url_for_same_network(self):
         import start
@@ -13011,6 +13104,7 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             quality_report = {"score": 95, "label": "良好", "segments": [{"index": 0}]}
             with mock.patch.object(database, "DB_PATH", root / "meetings.db"):
                 database.init_db()
+                database.create_job("quality-job")
                 meeting_id = database.save_meeting(
                     "品質測試",
                     "2026/07/12",

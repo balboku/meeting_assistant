@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import shutil
 import threading
-import uuid
 from pathlib import Path
 from typing import Collection
 
@@ -22,6 +23,17 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(HASH_READ_CHUNK_BYTES), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def content_addressed_source_path(final_path: Path, digest: str) -> Path:
+    """Return the stable source-media object name for a verified SHA-256."""
+    normalized_digest = str(digest or "").strip().lower()
+    if (
+        len(normalized_digest) != 64
+        or any(character not in "0123456789abcdef" for character in normalized_digest)
+    ):
+        raise ValueError("source media SHA-256 格式不正確")
+    return final_path.with_name(f"{normalized_digest}{final_path.suffix.lower()}")
 
 
 def find_source_audio_by_sha256(
@@ -67,8 +79,18 @@ def finalize_source_audio_upload(
     size_bytes: int,
     supported_suffixes: Collection[str],
 ) -> tuple[Path, bool]:
-    """Move a validated upload into place, or reuse an existing file with the same SHA256."""
+    """Commit one upload to a SHA-256 addressed object, reusing identical bytes."""
     with _SOURCE_AUDIO_DEDUP_LOCK:
+        object_path = content_addressed_source_path(final_path, digest)
+        if object_path.is_file():
+            if (
+                object_path.stat().st_size != int(size_bytes)
+                or sha256_file(object_path) != digest.lower()
+            ):
+                raise OSError(f"內容定址媒體檔發生 SHA-256 衝突：{object_path}")
+            temp_path.unlink(missing_ok=True)
+            return object_path, False
+
         duplicate = find_source_audio_by_sha256(
             final_path.parent,
             digest,
@@ -77,16 +99,33 @@ def finalize_source_audio_upload(
             exclude=temp_path,
         )
         if duplicate is not None:
+            # Preserve legacy filename references while exposing the same bytes
+            # under the canonical object name. NTFS hard links avoid duplication;
+            # copy2 is a safe fallback for filesystems that do not support links.
+            try:
+                os.link(duplicate, object_path)
+            except OSError:
+                shutil.copy2(duplicate, object_path)
             temp_path.unlink(missing_ok=True)
             logger.info(
-                "♻️  上傳內容 SHA256 已存在，重用原始檔：%s（sha256=%s）",
+                "♻️  上傳內容 SHA256 已存在，建立內容定址引用：%s（來源=%s）",
+                object_path,
                 duplicate,
-                digest,
             )
-            return duplicate, False
+            return object_path, True
 
-        candidate = final_path
-        while candidate.exists():
-            candidate = final_path.with_name(f"{final_path.stem}_{uuid.uuid4().hex[:8]}{final_path.suffix}")
-        temp_path.replace(candidate)
-        return candidate, True
+        if sha256_file(temp_path) != digest.lower():
+            raise OSError(
+                f"上傳暫存檔 SHA-256 驗證失敗：{temp_path}"
+            )
+        if temp_path.stat().st_size != int(size_bytes):
+            raise OSError(
+                f"上傳暫存檔大小驗證失敗：{temp_path}"
+            )
+        temp_path.replace(object_path)
+        logger.info(
+            "📦 已保存內容定址原始媒體：%s（sha256=%s）",
+            object_path,
+                digest,
+        )
+        return object_path, True

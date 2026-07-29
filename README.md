@@ -37,18 +37,18 @@ meeting_assistant/
 ### 步驟 1：確認 Python 版本
 
 ```bash
-python3.13 --version  # 建議 Python 3.13+
+python3.14 --version  # 建議 Python 3.14
 ```
 
 ### 步驟 2：安裝相依套件
 
 ```bash
-python3.13 -m venv .venv
+python3.14 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip setuptools wheel
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-若要完全重現目前驗證過的 Python 3.13 環境，可改用 `requirements.lock`。
+若要完全重現目前驗證過的 Python 3.14 環境，請使用 `requirements.lock`。
 
 ### 步驟 3：設定環境變數
 
@@ -79,6 +79,7 @@ APP_API_KEY=change_me_to_a_long_random_value
 MEETING_AUTH_ENABLED=0
 MEETING_AUTH_USER_HEADER=X-Meeting-User
 MEETING_AUTH_DEFAULT_ROLE=viewer
+MEETING_AUTH_TRUSTED_PROXY_NETWORKS=127.0.0.0/8,::1/128
 MAX_UPLOAD_MB=500
 CORS_ALLOWED_ORIGINS=http://127.0.0.1:8001,http://localhost:8001
 MEETING_ASSISTANT_TRUST_LOCAL_NETWORK=1
@@ -91,6 +92,8 @@ MEETING_OUTPUT_DIR=./output
 MEETING_SOURCE_AUDIO_DIR=./output/source_audio
 MEETING_ATTACHMENT_DIR=./output/attachments
 MEETING_BACKUP_DIR=./backups
+MEETING_OFFSITE_BACKUP_DIR=
+FULL_SNAPSHOT_MIN_INTERVAL_HOURS=24
 MEETING_DOCX_TEMPLATE_PATH=./4-QA-005 V01 會議紀錄.docx
 DB_BACKUP_KEEP=5
 JOB_RETENTION_DAYS=30
@@ -157,7 +160,7 @@ TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MAX_SPAN_SECONDS=30
 
 安全預設：`/line-webhook` 可公開給 LINE 呼叫；Web 介面與管理 API 允許本機與信任本機網段存取。若要透過 ngrok 或其他公開網路管理，請使用 `APP_API_KEY`。
 
-帳號、角色、稽核紀錄與中央路由權限政策已完成，但 `MEETING_AUTH_ENABLED` 預設為 `0`，因此不會改變既有同網段 / API key 使用方式。啟用前請先建立同仁帳號、角色配置與可信任的身分 header 來源；啟用後所有 jobs、meetings、source-media 與 admin 路由都依最小權限檢查，系統只從 `app_users` 讀取角色，HTTP header 只提供使用者身分，不可用來授權角色。未啟用時 `/admin/users` 與 `/admin/audit-logs` 會回傳 404。
+帳號、角色、稽核紀錄與中央路由權限政策已完成，但 `MEETING_AUTH_ENABLED` 預設為 `0`，因此不會改變既有同網段 / API key 使用方式。啟用前請先建立同仁帳號、角色配置與可信任的身分 header 來源；只有 `MEETING_AUTH_TRUSTED_PROXY_NETWORKS` 內的代理可以提供身分 header，外部用戶端直接偽造會被拒絕。啟用後所有 jobs、meetings、source-media 與 admin 路由都依最小權限檢查，系統只從 `app_users` 讀取角色。未啟用時 `/admin/users` 與 `/admin/audit-logs` 會回傳 404。
 
 > 資安提醒：不要提交 `.env`、`meetings.db*`、`temp/`、`output/`、`backups/`、`logs/`、原始錄音、會議記錄或匯出的文件。若金鑰曾暴露，請立即到對應平台輪換 `GEMINI_API_KEY`、`APP_API_KEY`、LINE token 與 ngrok token。
 
@@ -253,12 +256,16 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `MEETING_OUTPUT_DIR` | `./output` | 生成 Markdown 會議記錄的輸出資料夾。 |
 | `MEETING_SOURCE_AUDIO_DIR` | `./output/source_audio` | 已上傳原始錄音/錄影的保留資料夾，處理完成後不會自動刪除。 |
 | `MEETING_ATTACHMENT_DIR` | `./output/attachments` | 會議補充資料、截圖、PDF、文件的保存位置。 |
-| `MEETING_BACKUP_DIR` | `./backups` | 啟動維護時保存一致性 SQLite 備份與 DB＋Markdown＋附件記錄快照的位置。 |
+| `MEETING_BACKUP_DIR` | `./backups` | 啟動維護時保存一致性 SQLite 備份與 v2 完整記錄快照的位置。 |
+| `MEETING_OFFSITE_BACKUP_DIR` | 空白 | 可選的不同磁碟或網路分享路徑；設定後會原子複製 v2 快照、再驗證 SHA-256/ZIP/SQLite。不可與本機備份目錄相同。 |
+| `FULL_SNAPSHOT_MIN_INTERVAL_HOURS` | `24` | 已有新鮮且含原始媒體的 v2 快照時，重啟可沿用；SQLite online backup 仍會每次建立，避免每次重啟重搬大型媒體。 |
 | `MEETING_DOCX_TEMPLATE_PATH` | `./4-QA-005 V01 會議紀錄.docx` | Word 匯出使用的本機範本路徑。公司表單範本請保留在本機，不提交到 Git。 |
 | `DB_BACKUP_KEEP` | `5` | 保留最近幾份資料庫備份。 |
 | `SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS` | `90` | 手動移除原始錄音/錄影後，`backups/source_media_deleted/` 備份保留天數；設為 `0` 可停用自動清理。 |
 | `JOB_RETENTION_DAYS` | `30` | 已完成、失敗或取消任務的保留天數。 |
 | `JOB_QUEUE_MAX_ATTEMPTS` | `5` | 自動處理任務最多嘗試次數；用於降低 503/暫時性服務忙碌造成的失敗。 |
+| `JOB_QUEUE_LEASE_SECONDS` | `90` | 全域 worker 與處理中任務 lease；多 Uvicorn 行程只能有一個有效 worker。 |
+| `JOB_QUEUE_HEARTBEAT_SECONDS` | `15` | worker/任務 lease 續約頻率；失去 fencing generation 的行程不可提交結果。 |
 | `JOB_QUEUE_TRANSIENT_RETRY_DELAY_SECONDS` | `30` | 偵測到 503、429、UNAVAILABLE、timeout 等暫時性錯誤時，第一次重試前等待秒數。 |
 | `JOB_QUEUE_TRANSIENT_RETRY_BACKOFF_MULTIPLIER` | `2` | 暫時性錯誤每次重試的等待倍數；預設依序為 30、60、120 秒。 |
 | `JOB_QUEUE_TRANSIENT_RETRY_MAX_DELAY_SECONDS` | `300` | 暫時性錯誤單次等待的上限秒數，避免等待時間無限增加。 |
@@ -341,6 +348,7 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `MEETING_AUTH_ENABLED` | `0` | 帳號/角色權限開關。預設停用；啟用後中央政策會保護所有業務路由，停用時維持現有 API key / 同網段行為。 |
 | `MEETING_AUTH_USER_HEADER` | `X-Meeting-User` | 啟用帳號權限時由可信任代理提供的使用者身分 header；角色必須先寫在 `app_users`。 |
 | `MEETING_AUTH_DEFAULT_ROLE` | `viewer` | 啟用帳號權限時，既有使用者資料缺少角色時的保守預設。 |
+| `MEETING_AUTH_TRUSTED_PROXY_NETWORKS` | `127.0.0.0/8,::1/128` | 允許提供身分 header 的反向代理網段；不可直接設成所有網路。 |
 | `MEETING_ASSISTANT_NGROK` | `1` | 一鍵啟動是否自動啟動 ngrok；設為 `0` / `false` / `no` 可停用。 |
 | `MEETING_ASSISTANT_NGROK_URL` | 空白 | 固定 ngrok 公開 URL，例如 `https://example.ngrok-free.app`。留空時會嘗試沿用 LINE Console 既有 Webhook URL 的網域。 |
 | `MEETING_ASSISTANT_NGROK_API_URL` | `http://127.0.0.1:4040/api/tunnels` | ngrok 本機狀態 API；後端 `/metrics` 會讀取它，前端維運面板會顯示 LINE/ngrok 狀態。 |
@@ -396,14 +404,16 @@ open http://127.0.0.1:8001/history
 open http://127.0.0.1:8001/docs
 ```
 
-`GET /health` 會回傳載入中的 Git commit、工作區 commit、程式碼指紋、`matches_workspace`、worker、schema、SQLite quick check、媒體工具與最新備份健康度。`GET /metrics` 會提供任務 p50/p90/p95、失敗分類、文件審查狀態及備份新鮮度。若修改程式後尚未重啟，`matches_workspace` 會變成 `false` 且狀態為 `degraded`；這只能表示服務載入版本過舊，不代表要在仍有執行中任務時直接重啟。
+`GET /livez` 只確認 API 程序存活；`GET /readyz` 驗證 schema 與全域 worker lease，未就緒時回 503。`GET /health` 回傳載入中的 Git commit、工作區 commit、程式碼指紋、`matches_workspace`、worker、schema、SQLite quick check、媒體工具、本機與異地備份健康度。`GET /metrics` 另提供 queue depth、attempt 分布、lease 到期狀態、任務 p50/p90/p95、失敗分類與文件審查狀態。若修改程式後尚未重啟，`matches_workspace` 會變成 `false` 且狀態為 `degraded`；這只能表示服務載入版本過舊，不代表要在仍有執行中任務時直接重啟。
 
-啟動維護會同時產生 `meetings_*.db` 與 `meeting_records_*.zip`。ZIP 包含一致性資料庫、當下可讀的 Markdown、補充附件及逐檔 SHA-256 manifest；原始錄音／錄影仍依既有 source-media 保存與封存政策管理，不會在每次啟動重複複製。可用下列命令驗證或在全新空目錄進行還原演練：
+啟動維護會同時產生 `meetings_*.db` 與 `meeting_records_*.zip`。v2 ZIP 包含一致性資料庫、Markdown、補充附件及已連結原始錄音／錄影；媒體以 SHA-256 內容定址去重，manifest 保存逐檔雜湊。還原工具只接受空目錄，並另建 `runtime/meetings.db`、`runtime/output/`、`runtime/evidence/`，重寫資料庫路徑後執行 integrity/FK 檢查：
 
 ```bash
 .venv/bin/python scripts/verify_record_snapshot.py backups/meeting_records_YYYYMMDD_HHMMSS.zip
 .venv/bin/python scripts/restore_record_snapshot.py backups/meeting_records_YYYYMMDD_HHMMSS.zip restore-drill
 ```
+
+部署依賴固定於 `requirements.lock` 並含套件雜湊；`.python-version`、Windows/Linux CI 均使用 Python 3.14。CI 另執行 `pip-audit` 與 `scripts/check_architecture.py`，阻擋已知相依弱點及既有大型模組繼續成長。
 
 ### B. 啟動桌面錄音 GUI（Phase 2）
 

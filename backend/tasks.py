@@ -37,6 +37,7 @@ from backend.database import (
     _repeated_transcript_turn_review_segments,
     get_meeting,
     is_job_cancel_requested,
+    job_lease_is_current,
     list_meetings,
     update_meeting_content_with_revision,
     update_meeting_quality_report,
@@ -672,6 +673,10 @@ class JobCancelled(RuntimeError):
     """Raised when a persisted job receives a cancellation request."""
 
 
+class JobLeaseLost(RuntimeError):
+    """Raised when a stale worker no longer owns the processing generation."""
+
+
 @dataclass(frozen=True)
 class AudioSlice:
     """Temporary audio segment with its absolute position in the meeting."""
@@ -684,6 +689,36 @@ class AudioSlice:
 def _raise_if_cancelled(job_id: str) -> None:
     if is_job_cancel_requested(job_id):
         raise JobCancelled("任務已取消")
+
+
+def _raise_if_job_lease_lost(
+    job_id: str,
+    worker_id: Optional[str],
+    worker_generation: Optional[int],
+) -> None:
+    if worker_id is None or worker_generation is None:
+        return
+    if not job_lease_is_current(job_id, worker_id, worker_generation):
+        raise JobLeaseLost(
+            f"worker 已失去任務 lease：{job_id} "
+            f"owner={worker_id} generation={worker_generation}"
+        )
+
+
+def _meeting_output_path(
+    output_dir: Path,
+    audio_path: Path,
+    job_id: str,
+) -> Path:
+    """Return the stable output path reused by every attempt of one job."""
+    deterministic_job_token = re.sub(
+        r"[^0-9A-Za-z_-]+",
+        "_",
+        str(job_id or "job"),
+    ).strip("_")[:24] or "job"
+    return Path(output_dir) / (
+        f"meeting_notes_{Path(audio_path).stem}_{deterministic_job_token}.md"
+    )
 
 
 def _prepend_tool_dir(tool_path: str) -> None:
@@ -8944,6 +8979,8 @@ def process_audio_task(
     summary_source_path: Optional[Path] = None,
     transcript_reuse_source_path: Optional[Path] = None,
     high_quality_summary: bool = False,
+    worker_id: Optional[str] = None,
+    worker_generation: Optional[int] = None,
 ) -> Optional[Path]:
     """
     主要背景任務函數：接收音檔路徑，執行完整的 AI 會議記錄生成流程。
@@ -8956,6 +8993,7 @@ def process_audio_task(
     client = None
     segment_paths: list[Path] = []
     temporary_segment_paths: list[Path] = []
+    pending_output_path: Optional[Path] = None
     audio_report: dict[str, Any] = {}
     segment_report: list[dict[str, Any]] = []
     existing_segment_transcripts: dict[int, str] = {}
@@ -10792,14 +10830,13 @@ def process_audio_task(
         # 步驟 6：儲存 Markdown 輸出檔案
         # ------------------------------------------------------------------
         _raise_if_cancelled(job_id)
+        _raise_if_job_lease_lost(job_id, worker_id, worker_generation)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         title = meeting_title or audio_path.stem
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         generated_at = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
         meeting_date_str = actual_meeting_date.strftime("%Y/%m/%d")
-        output_filename = f"meeting_notes_{audio_path.stem}_{timestamp}.md"
-        output_path = output_dir / output_filename
+        output_path = _meeting_output_path(output_dir, audio_path, job_id)
         if client_recording_warning:
             audio_report = dict(audio_report or {})
             audio_warnings = [
@@ -10863,12 +10900,18 @@ quality_label: {quality_report['label']}
             "quality_report": quality_report,
             "full_content": full_content,
         })
-        output_path.write_text(full_content, encoding="utf-8")
+        pending_output_path = output_path.with_name(
+            f".{output_path.name}.{uuid.uuid4().hex[:12]}.tmp"
+        )
+        pending_output_path.write_text(full_content, encoding="utf-8")
+        pending_output_path.replace(output_path)
+        pending_output_path = None
         logger.info(f"[{job_id}] 💾 Markdown 已儲存：{output_path}")
 
         # ------------------------------------------------------------------
         # 步驟 7：寫入 SQLite
         # ------------------------------------------------------------------
+        _raise_if_job_lease_lost(job_id, worker_id, worker_generation)
         summary_preview = _extract_summary_preview(meeting_content)
         save_meeting(
             title=title,
@@ -10893,6 +10936,10 @@ quality_label: {quality_report['label']}
         logger.info(f"[{job_id}] 🎉 任務完成")
         return output_path
 
+    except JobLeaseLost as exc:
+        logger.error("[%s] 🚫 放棄 stale worker 產出：%s", job_id, exc)
+        return None
+
     except JobCancelled:
         logger.info(f"[{job_id}] 🛑 任務已取消")
         update_job_status(
@@ -10914,6 +10961,15 @@ quality_label: {quality_report['label']}
         return None
 
     finally:
+        if pending_output_path is not None and pending_output_path.exists():
+            try:
+                pending_output_path.unlink()
+            except OSError:
+                logger.warning(
+                    "[%s] ⚠️ 無法清理未完成 Markdown 暫存檔：%s",
+                    job_id,
+                    pending_output_path,
+                )
         # 清理本地分段暫存音檔
         seen_temp_paths: set[Path] = set()
         for seg_path in [*segment_paths, *temporary_segment_paths]:

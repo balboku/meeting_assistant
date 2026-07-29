@@ -14,6 +14,7 @@ ReDoc：
 """
 
 import asyncio
+import hmac
 import hashlib
 import json
 import os
@@ -23,6 +24,7 @@ import subprocess
 import uuid
 import logging
 import ipaddress
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pathlib import Path
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -41,6 +43,7 @@ load_dotenv()
 from backend.exporter import content_with_quality_review_note, export_meeting_to_docx
 from backend.evidence import SUPPORTED_EVIDENCE_EXTENSIONS, analyze_and_append_evidence
 from backend.build_info import APP_VERSION, build_info_payload
+from backend.access_tokens import create_access_token, validate_access_token
 
 from backend.database import (
     DB_PATH,
@@ -54,6 +57,7 @@ from backend.database import (
     average_completed_job_seconds,
     completed_job_duration_percentiles,
     failed_job_class_counts,
+    queue_operational_metrics,
     list_recent_failed_jobs,
     request_job_cancel,
     requeue_failed_job,
@@ -77,6 +81,9 @@ from backend.database import (
     list_app_users,
     list_audit_logs,
     record_audit_log,
+    get_runtime_lease,
+    release_runtime_lease,
+    try_acquire_runtime_lease,
 )
 from backend.models import (
     JobResponse,
@@ -122,6 +129,7 @@ from backend.job_queue import (
     enqueue_meeting_quality_recheck_job,
     enqueue_meeting_semantic_review_job,
     job_worker,
+    local_worker_process_alive,
 )
 from backend import auth as auth_module
 from backend.auth import (
@@ -139,6 +147,7 @@ from backend.cleanup import (
 from backend.maintenance import (
     cleanup_source_media_archives,
     latest_backup_health,
+    latest_record_snapshot_health,
     run_startup_health_checks,
     run_startup_maintenance,
 )
@@ -181,8 +190,18 @@ TEMP_DIR   = Path(os.getenv("MEETING_TEMP_DIR") or ROOT_DIR / "temp")
 OUTPUT_DIR = Path(os.getenv("MEETING_OUTPUT_DIR") or ROOT_DIR / "output")
 SOURCE_AUDIO_DIR = Path(os.getenv("MEETING_SOURCE_AUDIO_DIR") or OUTPUT_DIR / "source_audio")
 BACKUP_DIR = Path(os.getenv("MEETING_BACKUP_DIR") or ROOT_DIR / "backups")
+_OFFSITE_BACKUP_DIR_VALUE = str(
+    os.getenv("MEETING_OFFSITE_BACKUP_DIR") or ""
+).strip()
+OFFSITE_BACKUP_DIR = (
+    Path(_OFFSITE_BACKUP_DIR_VALUE)
+    if _OFFSITE_BACKUP_DIR_VALUE
+    else None
+)
 APP_API_KEY = os.getenv("APP_API_KEY", "").strip()
 API_KEY_COOKIE_NAME = "meeting_assistant_api_key"
+API_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+API_BOOTSTRAP_TTL_SECONDS = 5 * 60
 TRUST_LOCAL_NETWORK = os.getenv(
     "MEETING_ASSISTANT_TRUST_LOCAL_NETWORK",
     "1",
@@ -226,6 +245,12 @@ def _positive_int_env(name: str, default: int) -> int:
         return max(1, int(os.getenv(name, str(default))))
     except (TypeError, ValueError):
         return default
+
+
+FULL_SNAPSHOT_MIN_INTERVAL_HOURS = _positive_int_env(
+    "FULL_SNAPSHOT_MIN_INTERVAL_HOURS",
+    24,
+)
 
 
 RECORDING_PROFILES = {
@@ -275,21 +300,46 @@ async def lifespan(app: FastAPI):
     """應用程式生命週期管理：啟動時初始化資料庫"""
     logger.info("🚀 AI 語音會議助理 Backend 啟動中...")
     init_db()
-    run_startup_maintenance(DB_PATH, BACKUP_DIR, backup_keep=DB_BACKUP_KEEP)
-    archive_cleanup = cleanup_source_media_archives(
-        BACKUP_DIR / "source_media_deleted",
-        retention_days=SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS,
+    maintenance_owner = f"startup:{os.getpid()}:{uuid.uuid4().hex[:12]}"
+    maintenance_generation = try_acquire_runtime_lease(
+        "meeting-assistant-startup-maintenance",
+        maintenance_owner,
+        lease_seconds=15 * 60,
     )
-    if int(archive_cleanup["deleted_files"]) > 0:
-        logger.info(
-            "🧹 已清理過期原始檔備份：%s 個日期目錄、%s 個檔案、%s bytes",
-            archive_cleanup["deleted_dirs"],
-            archive_cleanup["deleted_files"],
-            archive_cleanup["deleted_bytes"],
-        )
-    cleanup_stale_temp_files_for_jobs(TEMP_DIR)
-    cleanup_stale_source_audio_temp_segments(SOURCE_AUDIO_DIR)
-    cleanup_terminal_jobs(max_age_days=JOB_RETENTION_DAYS)
+    if maintenance_generation is None:
+        logger.info("↪️ 另一行程正在執行啟動維護，本行程略過重複維護")
+    else:
+        try:
+            run_startup_maintenance(
+                DB_PATH,
+                BACKUP_DIR,
+                source_media_dir=SOURCE_AUDIO_DIR,
+                offsite_backup_dir=OFFSITE_BACKUP_DIR,
+                backup_keep=DB_BACKUP_KEEP,
+                full_snapshot_min_interval_hours=(
+                    FULL_SNAPSHOT_MIN_INTERVAL_HOURS
+                ),
+            )
+            archive_cleanup = cleanup_source_media_archives(
+                BACKUP_DIR / "source_media_deleted",
+                retention_days=SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS,
+            )
+            if int(archive_cleanup["deleted_files"]) > 0:
+                logger.info(
+                    "🧹 已清理過期原始檔備份：%s 個日期目錄、%s 個檔案、%s bytes",
+                    archive_cleanup["deleted_dirs"],
+                    archive_cleanup["deleted_files"],
+                    archive_cleanup["deleted_bytes"],
+                )
+            cleanup_stale_temp_files_for_jobs(TEMP_DIR)
+            cleanup_stale_source_audio_temp_segments(SOURCE_AUDIO_DIR)
+            cleanup_terminal_jobs(max_age_days=JOB_RETENTION_DAYS)
+        finally:
+            release_runtime_lease(
+                "meeting-assistant-startup-maintenance",
+                maintenance_owner,
+                maintenance_generation,
+            )
     job_worker.start()
     logger.info("✅ 後端服務就緒")
     try:
@@ -378,15 +428,56 @@ def _request_from_trusted_local_network(request: Request) -> bool:
     return _request_source_matches(request, _is_trusted_local_network_host)
 
 
+def _api_session_token() -> str:
+    return create_access_token(
+        APP_API_KEY,
+        "session",
+        ttl_seconds=API_SESSION_TTL_SECONDS,
+    )
+
+
+def _valid_api_session(token: Optional[str]) -> bool:
+    return validate_access_token(token, APP_API_KEY, "session")
+
+
 def _valid_api_key(request: Request) -> bool:
     if not APP_API_KEY:
         return False
-    supplied = (
-        request.headers.get("x-api-key")
-        or request.query_params.get("api_key")
-        or request.cookies.get(API_KEY_COOKIE_NAME)
+    supplied = request.headers.get("x-api-key") or request.query_params.get("api_key")
+    if supplied and hmac.compare_digest(str(supplied), APP_API_KEY):
+        return True
+    if validate_access_token(
+        request.query_params.get("bootstrap_token"),
+        APP_API_KEY,
+        "bootstrap",
+    ):
+        return True
+    return _valid_api_session(request.cookies.get(API_KEY_COOKIE_NAME))
+
+
+def _url_without_api_key(request: Request) -> str:
+    parts = urlsplit(str(request.url))
+    query = urlencode([
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key not in {"api_key", "bootstrap_token"}
+    ])
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+
+
+def _set_api_session_cookie(response, request: Request) -> None:
+    forwarded_proto = (
+        request.headers.get("x-forwarded-proto") or request.url.scheme
+    ).split(",", 1)[0].strip().lower()
+    response.set_cookie(
+        API_KEY_COOKIE_NAME,
+        _api_session_token(),
+        httponly=True,
+        secure=forwarded_proto == "https",
+        samesite="lax",
+        max_age=API_SESSION_TTL_SECONDS,
+        path="/",
     )
-    return supplied == APP_API_KEY
 
 
 @app.middleware("http")
@@ -400,22 +491,67 @@ async def restrict_remote_access(request: Request, call_next):
         or _request_from_trusted_local_network(request)
         or _valid_api_key(request)
     ):
-        response = await call_next(request)
-        if APP_API_KEY and request.query_params.get("api_key") == APP_API_KEY:
-            response.set_cookie(
-                API_KEY_COOKIE_NAME,
-                APP_API_KEY,
-                httponly=True,
-                samesite="lax",
-                max_age=7 * 24 * 60 * 60,
-                path="/",
+        query_api_key = request.query_params.get("api_key")
+        valid_query_key = bool(
+            APP_API_KEY
+            and query_api_key
+            and hmac.compare_digest(str(query_api_key), APP_API_KEY)
+        )
+        valid_bootstrap_token = validate_access_token(
+            request.query_params.get("bootstrap_token"),
+            APP_API_KEY,
+            "bootstrap",
+        )
+        if (
+            (valid_query_key or valid_bootstrap_token)
+            and request.method in {"GET", "HEAD"}
+        ):
+            response = RedirectResponse(
+                url=_url_without_api_key(request),
+                status_code=307,
             )
+            _set_api_session_cookie(response, request)
+            return response
+        response = await call_next(request)
+        if valid_query_key or valid_bootstrap_token:
+            _set_api_session_cookie(response, request)
         return response
 
     return JSONResponse(
         status_code=403,
         content={"detail": "此端點只允許本機存取，或需提供有效的 X-API-Key。"},
     )
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(self), microphone=(self), display-capture=(self), "
+        "geolocation=(), payment=(), usb=()",
+    )
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; base-uri 'self'; object-src 'none'; "
+        "frame-ancestors 'none'; form-action 'self'; "
+        "img-src 'self' data: blob:; media-src 'self' blob:; "
+        "connect-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'",
+    )
+    if (
+        request.url.scheme == "https"
+        or (request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+        == "https"
+    ):
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        )
+    return response
 
 
 @app.middleware("http")
@@ -426,13 +562,76 @@ async def enforce_role_permissions(request: Request, call_next):
         try:
             actor = actor_from_request(request)
             require_permission(actor, permission)
+            request.state.auth_actor = actor
         except HTTPException as exc:
             return JSONResponse(
                 status_code=exc.status_code,
                 content={"detail": exc.detail},
                 headers=exc.headers,
             )
+    elif permission:
+        request.state.auth_actor = actor_from_request(request)
     return await call_next(request)
+
+
+_AUDITED_MUTATION_PREFIXES = (
+    "/upload-",
+    "/jobs",
+    "/meetings",
+    "/source-media",
+    "/admin",
+)
+
+
+@app.middleware("http")
+async def audit_mutating_requests(request: Request, call_next):
+    request_id = (
+        request.headers.get("x-request-id") or uuid.uuid4().hex
+    ).strip()[:128]
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers.setdefault("X-Request-ID", request_id)
+
+    should_audit = (
+        request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+        and request.url.path.startswith(_AUDITED_MUTATION_PREFIXES)
+        and request.url.hostname != "testserver"
+        and not getattr(request.state, "audit_recorded", False)
+    )
+    if not should_audit:
+        return response
+
+    actor = getattr(request.state, "auth_actor", None)
+    actor_email = (
+        actor.email
+        if actor is not None
+        else (
+            request.headers.get(auth_module.AUTH_USER_HEADER)
+            or "local-disabled-auth"
+        )
+    )
+    try:
+        record_audit_log(
+            action=f"http.{request.method.lower()}",
+            actor_user_id=getattr(actor, "user_id", None),
+            actor_email=str(actor_email or "unknown").strip().lower(),
+            resource_type=request.url.path.strip("/").split("/", 1)[0] or "root",
+            resource_id=request.url.path,
+            request_method=request.method,
+            request_path=request.url.path,
+            client_host=_request_client_host(request),
+            detail={
+                "status_code": response.status_code,
+                "request_id": request_id,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "⚠️ 無法寫入 mutation audit：%s %s",
+            request.method,
+            request.url.path,
+        )
+    return response
 
 
 allowed_origins = [
@@ -448,8 +647,8 @@ allowed_origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key", "X-Meeting-User", "X-Request-ID"],
 )
 
 
@@ -479,6 +678,79 @@ async def history_page():
 # 健康檢查端點
 # =============================================================================
 
+
+def _worker_readiness_snapshot() -> dict[str, object]:
+    """Combine this coordinator with the global fenced worker lease."""
+    coordinator = job_worker.status()
+    lease = get_runtime_lease("meeting-assistant-job-queue")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lease_current = bool(
+        lease
+        and str(lease.get("expires_at") or "") > now
+    )
+    owner_alive = (
+        local_worker_process_alive(lease.get("owner_id"))
+        if lease
+        else None
+    )
+    return {
+        "ready": (
+            bool(coordinator["running"])
+            and lease_current
+            and owner_alive is not False
+        ),
+        "coordinator": coordinator,
+        "global_lease": lease,
+        "lease_current": lease_current,
+        "lease_owner_alive": owner_alive,
+    }
+
+
+@app.get("/livez", summary="程序存活檢查", tags=["系統"])
+async def liveness_check():
+    """Cheap process-only probe; it intentionally does not touch dependencies."""
+    return {
+        "status": "ok",
+        "pid": os.getpid(),
+        "version": APP_VERSION,
+    }
+
+
+@app.get("/readyz", summary="服務就緒檢查", tags=["系統"])
+async def readiness_check():
+    """Check DB schema and the globally leased queue worker."""
+    failures: list[str] = []
+    try:
+        schema_version = get_schema_version()
+    except Exception as exc:
+        schema_version = None
+        failures.append(f"database: {exc}")
+    else:
+        if schema_version != SCHEMA_VERSION:
+            failures.append(
+                f"schema={schema_version}; expected={SCHEMA_VERSION}"
+            )
+    try:
+        worker = _worker_readiness_snapshot()
+    except Exception as exc:
+        worker = {"ready": False, "detail": str(exc)}
+        failures.append(f"worker: {exc}")
+    else:
+        if not worker["ready"]:
+            failures.append("global job worker lease is not ready")
+
+    payload = {
+        "status": "ready" if not failures else "not_ready",
+        "schema_version": schema_version,
+        "worker": worker,
+        "failures": failures,
+    }
+    return JSONResponse(
+        status_code=200 if not failures else 503,
+        content=payload,
+    )
+
+
 @app.get(
     "/health",
     response_model=HealthResponse,
@@ -496,6 +768,7 @@ async def health_check():
     )
     build = build_info_payload()
     schema_version = get_schema_version()
+    worker_readiness = _worker_readiness_snapshot()
     checks.extend([
         {
             "name": "runtime_build",
@@ -508,8 +781,12 @@ async def health_check():
         },
         {
             "name": "job_worker",
-            "status": "ok" if job_worker.is_running() else "error",
-            "detail": "任務 worker 執行中" if job_worker.is_running() else "任務 worker 未執行",
+            "status": "ok" if worker_readiness["ready"] else "error",
+            "detail": (
+                "任務 worker coordinator 與全域 lease 正常"
+                if worker_readiness["ready"]
+                else "任務 worker coordinator 或全域 lease 未就緒"
+            ),
         },
         {
             "name": "database_schema",
@@ -525,6 +802,16 @@ async def health_check():
             f"{backup_health.get('detail')}; age_hours={backup_health.get('age_hours')}"
         ),
     })
+    offsite_health = latest_record_snapshot_health(OFFSITE_BACKUP_DIR)
+    if OFFSITE_BACKUP_DIR is not None:
+        checks.append({
+            "name": "offsite_record_snapshot",
+            "status": "ok" if offsite_health["ok"] else "error",
+            "detail": (
+                f"{offsite_health.get('detail')}; "
+                f"age_hours={offsite_health.get('age_hours')}"
+            ),
+        })
     status = "ok" if all(check["status"] == "ok" for check in checks) else "degraded"
     return HealthResponse(
         status=status,
@@ -539,9 +826,12 @@ async def health_check():
         build=build,
         runtime={
             "worker_running": job_worker.is_running(),
+            "worker": worker_readiness,
+            "queue": queue_operational_metrics(),
             "schema_version": schema_version,
             "segment_cache_version": SEGMENT_CACHE_VERSION,
             "backup": backup_health,
+            "offsite_backup": offsite_health,
         },
         checks=checks,
     )
@@ -1287,6 +1577,9 @@ async def metrics():
         },
         meeting_review_statuses=count_meetings_by_review_status(),
         backup=latest_backup_health(BACKUP_DIR),
+        offsite_backup=latest_record_snapshot_health(OFFSITE_BACKUP_DIR),
+        queue=queue_operational_metrics(),
+        worker=_worker_readiness_snapshot(),
         storage=_storage_metrics(),
         ngrok=get_ngrok_status(expected_port=SERVER_PORT),
     )
@@ -1498,6 +1791,7 @@ async def admin_upsert_app_user(
             "is_active": bool(user["is_active"]),
         },
     )
+    request.state.audit_recorded = True
     return user
 
 
@@ -1646,8 +1940,11 @@ async def upload_media(
             custom_vocabulary=custom_vocabulary_terms,
         )
     except Exception as e:
-        if created_new_source_audio and source_audio_path.exists():
-            source_audio_path.unlink()
+        if created_new_source_audio:
+            logger.warning(
+                "任務排入佇列失敗，保留內容定址原始媒體供復原：%s",
+                source_audio_path,
+            )
         raise HTTPException(status_code=500, detail=f"任務排入佇列失敗：{e}")
 
     logger.info(f"📥 已接收任務：{job_id}（檔案：{file.filename}，模型：{selected_model}）")
@@ -3218,6 +3515,7 @@ async def update_meeting_review(
             "approved_content_sha256": record.get("approved_content_sha256"),
         },
     )
+    request.state.audit_recorded = True
     return MeetingReviewResponse(
         status="success",
         meeting_id=meeting_id,
@@ -3275,6 +3573,7 @@ async def update_meeting_item_review(
             "meeting_review_status": item["meeting_review_status"],
         },
     )
+    request.state.audit_recorded = True
     return MeetingItemReviewResponse(
         status="success",
         meeting_id=meeting_id,

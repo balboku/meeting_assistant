@@ -25,6 +25,7 @@ function Invoke-Check {
 Invoke-Check "Unit tests" { & $Python -m unittest discover -v }
 Invoke-Check "Compile" { & $Python -m compileall -q backend gui tests meeting_assistant.py start.py test_regex.py test_gemini.py scripts }
 Invoke-Check "Security scan" { & $Python scripts/security_scan.py }
+Invoke-Check "Architecture guard" { & $Python scripts/check_architecture.py }
 Invoke-Check "Quality consistency audit" { & $Python scripts/audit_quality_consistency.py }
 
 Invoke-Check "Quality review backfill dry-run" {
@@ -58,6 +59,14 @@ Invoke-Check "Unsafe segment cache prune dry-run" {
 }
 
 Invoke-Check "Dependency check" { & $Python -m pip check }
+
+& $Python -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('pip_audit') else 1)"
+if ($LASTEXITCODE -eq 0) {
+    Invoke-Check "Dependency vulnerability audit" { & $Python -m pip_audit -r requirements.lock }
+}
+else {
+    Write-Host "pip-audit not installed; CI will run the locked dependency audit"
+}
 
 if (Get-Command node -ErrorAction SilentlyContinue) {
     Invoke-Check "Frontend JavaScript syntax" {

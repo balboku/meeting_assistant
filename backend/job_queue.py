@@ -8,20 +8,31 @@ be retried without asking the user to upload again.
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
+import socket
 import threading
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
 from backend.database import (
     claim_next_pending_job,
     create_job,
+    expire_abandoned_runtime_lease,
     find_line_job_by_message_id,
+    get_meeting_by_job_id,
     get_job,
+    get_runtime_lease,
     is_job_cancel_requested,
+    job_lease_is_current,
+    release_runtime_lease,
+    renew_job_lease,
+    renew_runtime_lease,
     retry_or_fail_job,
     requeue_interrupted_jobs,
+    try_acquire_runtime_lease,
     update_job_status,
 )
 from backend.tasks import (
@@ -40,6 +51,51 @@ logger = logging.getLogger("MeetingAssistant.JobQueue")
 
 POLL_INTERVAL_SECONDS = float(os.getenv("JOB_QUEUE_POLL_SECONDS", "2"))
 DEFAULT_MAX_ATTEMPTS = int(os.getenv("JOB_QUEUE_MAX_ATTEMPTS", "5"))
+WORKER_LEASE_NAME = os.getenv(
+    "JOB_QUEUE_LEASE_NAME",
+    "meeting-assistant-job-queue",
+).strip() or "meeting-assistant-job-queue"
+WORKER_LEASE_SECONDS = max(15, int(os.getenv("JOB_QUEUE_LEASE_SECONDS", "90")))
+WORKER_HEARTBEAT_SECONDS = max(
+    2,
+    min(
+        int(os.getenv("JOB_QUEUE_HEARTBEAT_SECONDS", "15")),
+        max(2, WORKER_LEASE_SECONDS // 3),
+    ),
+)
+
+
+def local_worker_process_alive(owner_id: object) -> Optional[bool]:
+    """Return local PID liveness; remote/legacy owner formats are unknown."""
+    parts = str(owner_id or "").split(":", 2)
+    if len(parts) != 3 or parts[0].casefold() != socket.gethostname().casefold():
+        return None
+    try:
+        process_id = int(parts[1])
+    except (TypeError, ValueError):
+        return None
+    if process_id <= 0:
+        return False
+    if process_id == os.getpid():
+        return True
+    if os.name == "nt":
+        process_query_limited_information = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(
+            process_query_limited_information,
+            False,
+            process_id,
+        )
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def enqueue_audio_job(
@@ -177,22 +233,37 @@ def enqueue_meeting_semantic_review_job(
 
 
 class JobQueueWorker:
-    """Small single-process polling worker for the SQLite job table."""
+    """Cross-process singleton worker with fenced leadership and job leases."""
 
-    def __init__(self, poll_interval: float = POLL_INTERVAL_SECONDS):
+    def __init__(
+        self,
+        poll_interval: float = POLL_INTERVAL_SECONDS,
+        *,
+        worker_id: Optional[str] = None,
+        lease_seconds: int = WORKER_LEASE_SECONDS,
+        heartbeat_interval: int = WORKER_HEARTBEAT_SECONDS,
+    ):
         self.poll_interval = poll_interval
+        self.worker_id = worker_id or (
+            f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
+        )
+        self.lease_seconds = max(15, int(lease_seconds))
+        self.heartbeat_interval = max(
+            2,
+            min(int(heartbeat_interval), max(2, self.lease_seconds // 3)),
+        )
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._heartbeat_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._leader_generation: Optional[int] = None
+        self._active_job_id: Optional[str] = None
 
     def start(self) -> None:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
-
-            requeued = requeue_interrupted_jobs()
-            if requeued:
-                logger.info("🔁 已重新排入 %s 個中斷任務", requeued)
 
             self._stop_event.clear()
             self._thread = threading.Thread(
@@ -200,32 +271,171 @@ class JobQueueWorker:
                 name="MeetingAssistantJobQueue",
                 daemon=True,
             )
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                name="MeetingAssistantJobHeartbeat",
+                daemon=True,
+            )
             self._thread.start()
-            logger.info("✅ 任務佇列 worker 已啟動")
+            self._heartbeat_thread.start()
+            logger.info("✅ 任務佇列 worker 協調器已啟動：%s", self.worker_id)
 
     def stop(self, timeout: float = 10) -> None:
         self._stop_event.set()
         thread = self._thread
         if thread and thread.is_alive():
             thread.join(timeout=timeout)
-        logger.info("👋 任務佇列 worker 已停止")
+        heartbeat_thread = self._heartbeat_thread
+        if heartbeat_thread and heartbeat_thread.is_alive():
+            heartbeat_thread.join(timeout=min(timeout, self.heartbeat_interval + 1))
+
+        with self._state_lock:
+            generation = self._leader_generation
+            active_job_id = self._active_job_id
+        if generation is not None and not active_job_id and not (thread and thread.is_alive()):
+            try:
+                release_runtime_lease(
+                    WORKER_LEASE_NAME,
+                    self.worker_id,
+                    generation,
+                )
+            except Exception:
+                logger.exception("⚠️ 無法釋放 worker leadership lease")
+        logger.info("👋 任務佇列 worker 已停止：%s", self.worker_id)
 
     def is_running(self) -> bool:
         thread = self._thread
         return bool(thread and thread.is_alive())
 
+    def is_leader(self) -> bool:
+        with self._state_lock:
+            return self._leader_generation is not None
+
+    def status(self) -> dict[str, Any]:
+        with self._state_lock:
+            return {
+                "running": self.is_running(),
+                "leader": self._leader_generation is not None,
+                "worker_id": self.worker_id,
+                "generation": self._leader_generation,
+                "active_job_id": self._active_job_id,
+                "lease_seconds": self.lease_seconds,
+                "heartbeat_seconds": self.heartbeat_interval,
+            }
+
+    def _ensure_leadership(self) -> Optional[int]:
+        with self._state_lock:
+            current = self._leader_generation
+        if current is not None:
+            return current
+
+        existing_lease = get_runtime_lease(WORKER_LEASE_NAME)
+        if (
+            existing_lease
+            and local_worker_process_alive(existing_lease.get("owner_id")) is False
+        ):
+            expired = expire_abandoned_runtime_lease(
+                WORKER_LEASE_NAME,
+                str(existing_lease["owner_id"]),
+                int(existing_lease["generation"]),
+            )
+            if expired:
+                logger.warning(
+                    "🧹 已確認同主機舊 worker PID 不存在，提前失效 lease：%s",
+                    existing_lease["owner_id"],
+                )
+
+        generation = try_acquire_runtime_lease(
+            WORKER_LEASE_NAME,
+            self.worker_id,
+            lease_seconds=self.lease_seconds,
+        )
+        if generation is None:
+            return None
+
+        with self._state_lock:
+            self._leader_generation = generation
+        requeued = requeue_interrupted_jobs(
+            legacy_grace_seconds=self.lease_seconds,
+        )
+        if requeued:
+            logger.info("🔁 已重新排入 %s 個 lease 過期任務", requeued)
+        logger.info(
+            "🗳️ 取得任務 worker leadership：%s generation=%s",
+            self.worker_id,
+            generation,
+        )
+        return generation
+
     def _run(self) -> None:
         while not self._stop_event.is_set():
             try:
-                job = claim_next_pending_job()
+                generation = self._ensure_leadership()
+                if generation is None:
+                    self._stop_event.wait(self.poll_interval)
+                    continue
+
+                job = claim_next_pending_job(
+                    worker_id=self.worker_id,
+                    worker_generation=generation,
+                    lease_seconds=self.lease_seconds,
+                )
                 if job is None:
                     self._stop_event.wait(self.poll_interval)
                     continue
 
-                self.process_job(job)
+                with self._state_lock:
+                    self._active_job_id = str(job["job_id"])
+                try:
+                    self.process_job(job)
+                finally:
+                    with self._state_lock:
+                        self._active_job_id = None
             except Exception:
                 logger.exception("❌ 任務佇列 worker 發生未預期錯誤")
                 self._stop_event.wait(self.poll_interval)
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop_event.wait(self.heartbeat_interval):
+            with self._state_lock:
+                generation = self._leader_generation
+                active_job_id = self._active_job_id
+            if generation is None:
+                continue
+            try:
+                renewed = renew_runtime_lease(
+                    WORKER_LEASE_NAME,
+                    self.worker_id,
+                    generation,
+                    lease_seconds=self.lease_seconds,
+                )
+                if not renewed:
+                    with self._state_lock:
+                        if self._leader_generation == generation:
+                            self._leader_generation = None
+                    logger.error(
+                        "🚫 worker leadership 已失效：%s generation=%s",
+                        self.worker_id,
+                        generation,
+                    )
+                    continue
+                if active_job_id:
+                    job_renewed = renew_job_lease(
+                        active_job_id,
+                        self.worker_id,
+                        generation,
+                        lease_seconds=self.lease_seconds,
+                    )
+                    if not job_renewed:
+                        logger.warning(
+                            "⚠️ 任務 lease 未續期，可能已完成或失去 ownership：%s",
+                            active_job_id,
+                        )
+            except Exception:
+                # Keep the current generation during a transient SQLite error.
+                # The fencing lease will expire naturally if renewals cannot
+                # recover before the configured deadline.
+                logger.exception("⚠️ worker heartbeat 更新失敗")
 
     def process_job(self, job: dict[str, Any]) -> None:
         job_id = job["job_id"]
@@ -262,6 +472,24 @@ class JobQueueWorker:
     def _process_audio_job(self, job: dict[str, Any]) -> None:
         job_id = job["job_id"]
         payload = job.get("payload") or {}
+        existing_meeting = get_meeting_by_job_id(job_id)
+        if existing_meeting:
+            existing_output_path = Path(
+                str(existing_meeting.get("output_path") or "")
+            )
+            if existing_output_path.is_file():
+                update_job_status(
+                    job_id,
+                    "done",
+                    "✅ 已找到此任務既有的會議結果，略過重複處理。",
+                    output_path=str(existing_output_path),
+                )
+                logger.info(
+                    "[%s] ↩️ 任務已有會議記錄 ID=%s，已冪等完成",
+                    job_id,
+                    existing_meeting.get("id"),
+                )
+                return
         audio_path = Path(payload["audio_path"])
         output_dir = Path(payload["output_dir"])
         model = payload.get("model") or GEMINI_MODEL
@@ -304,6 +532,8 @@ class JobQueueWorker:
                 Path(transcript_reuse_source_path) if transcript_reuse_source_path else None
             ),
             high_quality_summary=high_quality_summary,
+            worker_id=job.get("worker_id"),
+            worker_generation=job.get("worker_generation"),
         )
         if output_path is not None:
             self._log_source_audio_retention(job, "done")
@@ -313,6 +543,18 @@ class JobQueueWorker:
         current_status = current.get("status")
         if current_status == "cancelled":
             self._log_source_audio_retention(job, "cancelled")
+            return
+        claimed_worker_id = str(job.get("worker_id") or "")
+        claimed_generation = int(job.get("worker_generation") or 0)
+        if claimed_worker_id and not job_lease_is_current(
+            job_id,
+            claimed_worker_id,
+            claimed_generation,
+        ):
+            logger.warning(
+                "[%s] 🚫 原 worker 已失去 lease，不得覆寫 successor 狀態",
+                job_id,
+            )
             return
 
         detail = (

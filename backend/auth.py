@@ -7,6 +7,7 @@ MEETING_AUTH_ENABLED is set.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -24,6 +25,14 @@ def _env_flag(name: str, default: bool = False) -> bool:
 AUTH_FEATURE_ENABLED = _env_flag("MEETING_AUTH_ENABLED", default=False)
 AUTH_USER_HEADER = os.getenv("MEETING_AUTH_USER_HEADER", "X-Meeting-User").strip() or "X-Meeting-User"
 AUTH_DEFAULT_ROLE = os.getenv("MEETING_AUTH_DEFAULT_ROLE", "viewer").strip() or "viewer"
+AUTH_TRUSTED_PROXY_NETWORKS = tuple(
+    ipaddress.ip_network(value.strip())
+    for value in os.getenv(
+        "MEETING_AUTH_TRUSTED_PROXY_NETWORKS",
+        "127.0.0.0/8,::1/128",
+    ).split(",")
+    if value.strip()
+)
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
     "admin": {
@@ -89,6 +98,9 @@ def auth_config_payload() -> dict[str, Any]:
         "enabled": AUTH_FEATURE_ENABLED,
         "user_header": AUTH_USER_HEADER,
         "default_role": AUTH_DEFAULT_ROLE,
+        "trusted_proxy_networks": [
+            str(network) for network in AUTH_TRUSTED_PROXY_NETWORKS
+        ],
         "roles": {
             role: sorted(permissions)
             for role, permissions in ROLE_PERMISSIONS.items()
@@ -106,6 +118,22 @@ def actor_from_request(request: Request) -> AuthActor:
     """
     if not AUTH_FEATURE_ENABLED:
         return DISABLED_LOCAL_ACTOR
+
+    client_host = request.client.host if request.client else ""
+    try:
+        client_address = ipaddress.ip_address(str(client_host or "").strip())
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="無法驗證身分標頭來源。",
+        ) from exc
+    if not any(
+        client_address in network for network in AUTH_TRUSTED_PROXY_NETWORKS
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="使用者身分標頭只能由可信任反向代理提供。",
+        )
 
     email = (request.headers.get(AUTH_USER_HEADER) or "").strip().lower()
     if not email:
@@ -154,7 +182,16 @@ def permission_for_request(method: str, path: str) -> Optional[str]:
     verb = str(method or "GET").upper()
     route = "/" + str(path or "").lstrip("/")
     if (
-        route in {"/", "/history", "/favicon.ico", "/health", "/config", "/line-webhook"}
+        route in {
+            "/",
+            "/history",
+            "/favicon.ico",
+            "/health",
+            "/livez",
+            "/readyz",
+            "/config",
+            "/line-webhook",
+        }
         or route.startswith(("/static/", "/docs", "/redoc", "/openapi.json"))
     ):
         return None

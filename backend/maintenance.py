@@ -15,6 +15,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import uuid
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -170,14 +171,11 @@ def create_record_snapshot(
     backup_path: Path,
     backup_dir: Path,
     *,
+    source_media_dir: Path | None = None,
     now: datetime | None = None,
     keep: int = 5,
 ) -> Path:
-    """Bundle a consistent DB backup with referenced Markdown and attachments.
-
-    Retained source audio/video is intentionally inventoried in the database
-    quality metadata rather than duplicated into every startup snapshot.
-    """
+    """Bundle DB, Markdown, attachments, and referenced original media."""
     backup_path = Path(backup_path)
     verification = verify_database_backup(backup_path)
     if not verification["ok"]:
@@ -187,6 +185,7 @@ def create_record_snapshot(
     snapshot_path = Path(backup_dir) / f"meeting_records_{timestamp}.zip"
     entries: list[dict[str, object]] = []
     missing: list[dict[str, object]] = []
+    archived_source_media: dict[str, str] = {}
 
     conn = sqlite3.connect(str(backup_path))
     conn.row_factory = sqlite3.Row
@@ -254,6 +253,46 @@ def create_record_snapshot(
                     "meeting_id": int(row["id"]),
                     "source_path": str(output_path),
                 })
+
+            source_audio_value = str(row["source_audio"] or "").strip()
+            source_path: Path | None = None
+            if source_audio_value:
+                raw_source_path = Path(source_audio_value)
+                candidates = [raw_source_path]
+                if source_media_dir is not None:
+                    candidates.append(Path(source_media_dir) / raw_source_path.name)
+                candidates.append(output_path.parent / "source_audio" / raw_source_path.name)
+                source_path = next(
+                    (candidate for candidate in candidates if candidate.is_file()),
+                    None,
+                )
+            if source_path is not None:
+                digest = _sha256_file(source_path)
+                arcname = archived_source_media.get(digest)
+                if arcname is None:
+                    suffix = source_path.suffix.lower()
+                    arcname = f"source_media/{digest[:2]}/{digest}{suffix}"
+                    archive.write(source_path, arcname)
+                    archived_source_media[digest] = arcname
+                    entries.append({
+                        "category": "source_media",
+                        "archive_path": arcname,
+                        "source_path": str(source_path),
+                        "sha256": digest,
+                        "bytes": source_path.stat().st_size,
+                    })
+                meeting_entry.update({
+                    "source_media_included": True,
+                    "source_media_archive_path": arcname,
+                    "source_media_sha256": digest,
+                    "source_media_original_name": source_path.name,
+                })
+            elif source_audio_value:
+                missing.append({
+                    "category": "source_media",
+                    "meeting_id": int(row["id"]),
+                    "source_path": source_audio_value,
+                })
             meeting_manifest.append(meeting_entry)
 
         for row in evidence:
@@ -280,12 +319,10 @@ def create_record_snapshot(
                 })
 
         manifest = {
-            "format_version": 1,
+            "format_version": 2,
             "created_at": (now or datetime.now()).isoformat(timespec="seconds"),
             "database_verification": verification,
-            "source_media_policy": (
-                "原始媒體不重複納入啟動快照；依 output/source_audio 保留政策另行管理。"
-            ),
+            "source_media_policy": "已連結會議的原始媒體以 SHA-256 內容定址去重納入快照。",
             "meetings": meeting_manifest,
             "entries": entries,
             "missing": missing,
@@ -320,8 +357,27 @@ def verify_record_snapshot(snapshot_path: Path) -> dict[str, object]:
                     "detail": f"ZIP CRC 失敗：{bad_member}",
                 }
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+            if int(manifest.get("format_version") or 0) not in {1, 2}:
+                return {
+                    "ok": False,
+                    "path": str(path),
+                    "detail": "不支援的快照格式版本",
+                }
+            archive_names = set(archive.namelist())
+            if "database/meetings.db" not in archive_names:
+                return {
+                    "ok": False,
+                    "path": str(path),
+                    "detail": "快照缺少 database/meetings.db",
+                }
             for entry in manifest.get("entries") or []:
                 archive_path = str(entry.get("archive_path") or "")
+                if not archive_path or archive_path not in archive_names:
+                    return {
+                        "ok": False,
+                        "path": str(path),
+                        "detail": f"manifest 指向不存在的檔案：{archive_path}",
+                    }
                 expected = str(entry.get("sha256") or "")
                 actual = hashlib.sha256(archive.read(archive_path)).hexdigest()
                 if not expected or actual != expected:
@@ -342,6 +398,11 @@ def verify_record_snapshot(snapshot_path: Path) -> dict[str, object]:
         "detail": "ok" if database_check["ok"] else database_check["detail"],
         "entries": len(manifest.get("entries") or []),
         "missing": len(manifest.get("missing") or []),
+        "source_media": sum(
+            1
+            for entry in manifest.get("entries") or []
+            if entry.get("category") == "source_media"
+        ),
         "meetings": database_check.get("meetings"),
         "jobs": database_check.get("jobs"),
     }
@@ -367,26 +428,262 @@ def restore_record_snapshot(snapshot_path: Path, target_dir: Path) -> dict[str, 
             if target_root not in destination.parents and destination != target_root:
                 raise ValueError(f"快照包含不安全路徑：{member.filename}")
         archive.extractall(target)
+
+    manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
+    runtime_root = target / "runtime"
+    runtime_output = runtime_root / "output"
+    runtime_source_media = runtime_output / "source_audio"
+    runtime_evidence = runtime_root / "evidence"
+    runtime_output.mkdir(parents=True, exist_ok=True)
+    runtime_source_media.mkdir(parents=True, exist_ok=True)
+    runtime_evidence.mkdir(parents=True, exist_ok=True)
+    runtime_db = runtime_root / "meetings.db"
+    shutil.copy2(target / "database" / "meetings.db", runtime_db)
+
+    restored_files = 1
+    conn = sqlite3.connect(str(runtime_db))
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+        for meeting in manifest.get("meetings") or []:
+            meeting_id = int(meeting["id"])
+            job_id = str(meeting.get("job_id") or "").strip()
+            markdown_arcname = str(
+                meeting.get("markdown_archive_path") or ""
+            ).strip()
+            markdown_target: Path | None = None
+            if markdown_arcname:
+                markdown_source = target / markdown_arcname
+                markdown_target = (
+                    runtime_output
+                    / f"{meeting_id}_{markdown_source.name}"
+                )
+                shutil.copy2(markdown_source, markdown_target)
+                restored_files += 1
+                conn.execute(
+                    "UPDATE meetings SET output_path=? WHERE id=?",
+                    (str(markdown_target), meeting_id),
+                )
+
+            source_arcname = str(
+                meeting.get("source_media_archive_path") or ""
+            ).strip()
+            source_target: Path | None = None
+            if source_arcname:
+                source_file = target / source_arcname
+                source_target = runtime_source_media / source_file.name
+                if not source_target.exists():
+                    shutil.copy2(source_file, source_target)
+                    restored_files += 1
+                conn.execute(
+                    "UPDATE meetings SET source_audio=? WHERE id=?",
+                    (str(source_target), meeting_id),
+                )
+
+            if job_id:
+                job_row = conn.execute(
+                    "SELECT payload_json FROM jobs WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()
+                if job_row:
+                    try:
+                        payload = json.loads(job_row[0] or "{}")
+                    except json.JSONDecodeError:
+                        payload = {}
+                    if source_target is not None:
+                        payload["audio_path"] = str(source_target)
+                    payload["output_dir"] = str(runtime_output)
+                    conn.execute(
+                        """UPDATE jobs
+                              SET output_path=COALESCE(?, output_path),
+                                  payload_json=?
+                            WHERE job_id=?""",
+                        (
+                            str(markdown_target) if markdown_target else None,
+                            json.dumps(payload, ensure_ascii=False),
+                            job_id,
+                        ),
+                    )
+
+        for entry in manifest.get("entries") or []:
+            if entry.get("category") != "attachment":
+                continue
+            evidence_id = int(entry["evidence_id"])
+            archived = target / str(entry["archive_path"])
+            evidence_dir = runtime_evidence / str(entry.get("meeting_id") or "unknown")
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            destination = evidence_dir / archived.name
+            shutil.copy2(archived, destination)
+            restored_files += 1
+            conn.execute(
+                "UPDATE meeting_evidence SET stored_path=? WHERE id=?",
+                (str(destination), evidence_id),
+            )
+
+        integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
+        foreign_key_violations = conn.execute(
+            "PRAGMA foreign_key_check"
+        ).fetchall()
+        if integrity.lower() != "ok" or foreign_key_violations:
+            raise sqlite3.IntegrityError(
+                "還原後資料庫驗證失敗："
+                f"integrity={integrity}; foreign_keys={foreign_key_violations[:5]}"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = {
+        "snapshot": str(Path(snapshot_path)),
+        "runtime_database": str(runtime_db),
+        "runtime_output": str(runtime_output),
+        "restored_files": restored_files,
+        "missing": manifest.get("missing") or [],
+        "integrity": "ok",
+        "foreign_key_violations": 0,
+    }
+    (runtime_root / "restore_report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     return {
         "restored": True,
         "target": str(target),
+        "runtime": report,
         "verification": verification,
     }
 
 
-def maintain_database(db_path: Path) -> dict[str, bool]:
-    """Run lightweight SQLite maintenance commands."""
+def replicate_record_snapshot(
+    snapshot_path: Path,
+    offsite_dir: Path,
+    *,
+    keep: int = 5,
+) -> Path:
+    """Atomically replicate one verified snapshot to a distinct backup root."""
+    source = Path(snapshot_path)
+    verification = verify_record_snapshot(source)
+    if not verification["ok"]:
+        raise ValueError(f"本機快照驗證失敗：{verification['detail']}")
+    destination_root = Path(offsite_dir)
+    destination_root.mkdir(parents=True, exist_ok=True)
+    if source.parent.resolve() == destination_root.resolve():
+        raise ValueError("異地備份目錄不可與本機備份目錄相同")
+
+    destination = destination_root / source.name
+    temp_destination = destination_root / (
+        f".{source.name}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        shutil.copy2(source, temp_destination)
+        source_digest = _sha256_file(source)
+        copied_digest = _sha256_file(temp_destination)
+        if copied_digest != source_digest:
+            raise OSError("異地備份 SHA-256 驗證失敗")
+        temp_destination.replace(destination)
+        replicated_verification = verify_record_snapshot(destination)
+        if not replicated_verification["ok"]:
+            raise ValueError(
+                f"異地備份內容驗證失敗：{replicated_verification['detail']}"
+            )
+        destination.with_suffix(f"{destination.suffix}.sha256").write_text(
+            f"{source_digest}  {destination.name}\n",
+            encoding="ascii",
+        )
+    finally:
+        temp_destination.unlink(missing_ok=True)
+
+    snapshots = sorted(
+        destination_root.glob("meeting_records_*.zip"),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    for stale in snapshots[max(keep, 1):]:
+        stale.unlink()
+        stale.with_suffix(f"{stale.suffix}.sha256").unlink(missing_ok=True)
+    return destination
+
+
+def latest_record_snapshot_health(
+    snapshot_dir: Path | None,
+    *,
+    now: datetime | None = None,
+    max_age_hours: int = 48,
+) -> dict[str, object]:
+    """Verify freshness and content of the newest record snapshot."""
+    if snapshot_dir is None:
+        return {
+            "ok": False,
+            "configured": False,
+            "path": None,
+            "age_hours": None,
+            "detail": "未設定異地備份目錄",
+        }
+    root = Path(snapshot_dir)
+    snapshots = sorted(
+        root.glob("meeting_records_*.zip"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not snapshots:
+        return {
+            "ok": False,
+            "configured": True,
+            "path": None,
+            "age_hours": None,
+            "detail": "異地備份目錄尚無記錄快照",
+        }
+    latest = snapshots[0]
+    reference = now or datetime.now()
+    modified = datetime.fromtimestamp(latest.stat().st_mtime)
+    age_hours = max(0.0, (reference - modified).total_seconds() / 3600.0)
+    verification = verify_record_snapshot(latest)
+    fresh = age_hours <= max(1, max_age_hours)
+    return {
+        **verification,
+        "configured": True,
+        "ok": bool(verification["ok"]) and fresh,
+        "age_hours": round(age_hours, 2),
+        "detail": (
+            str(verification["detail"])
+            if fresh
+            else f"異地備份已超過 {max_age_hours} 小時"
+        ),
+    }
+
+
+def maintain_database(
+    db_path: Path,
+    *,
+    force_vacuum: bool = False,
+    vacuum_min_free_pages: int = 5000,
+    vacuum_free_ratio: float = 0.20,
+) -> dict[str, object]:
+    """Checkpoint WAL and vacuum only when reclaimable space justifies it."""
     if not db_path.exists():
         raise FileNotFoundError(f"找不到資料庫檔案：{db_path}")
 
     conn = sqlite3.connect(str(db_path))
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        conn.execute("VACUUM")
+        page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
+        free_pages = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+        free_ratio = free_pages / max(page_count, 1)
+        should_vacuum = bool(force_vacuum) or (
+            free_pages >= max(1, int(vacuum_min_free_pages))
+            and free_ratio >= max(0.0, float(vacuum_free_ratio))
+        )
+        if should_vacuum:
+            conn.execute("VACUUM")
     finally:
         conn.close()
 
-    return {"wal_checkpoint": True, "vacuum": True}
+    return {
+        "wal_checkpoint": True,
+        "vacuum": should_vacuum,
+        "page_count": page_count,
+        "free_pages": free_pages,
+        "free_ratio": round(free_ratio, 4),
+    }
 
 
 def cleanup_source_media_archives(
@@ -527,19 +824,53 @@ def run_startup_health_checks(
 def run_startup_maintenance(
     db_path: Path,
     backup_dir: Path,
+    source_media_dir: Path | None = None,
+    offsite_backup_dir: Path | None = None,
     backup_keep: int = 5,
+    full_snapshot_min_interval_hours: int = 24,
 ) -> dict[str, object]:
     """Back up and maintain the SQLite DB after init_db has ensured it exists."""
     backup_path = backup_database(db_path=db_path, backup_dir=backup_dir, keep=backup_keep)
-    snapshot_path = create_record_snapshot(
-        backup_path=backup_path,
-        backup_dir=backup_dir,
-        keep=backup_keep,
+    existing_snapshot = latest_record_snapshot_health(
+        backup_dir,
+        max_age_hours=max(1, int(full_snapshot_min_interval_hours)),
+    )
+    snapshot_reused = bool(
+        existing_snapshot.get("ok")
+        and existing_snapshot.get("path")
+        and (
+            int(existing_snapshot.get("source_media") or 0) > 0
+            or int(existing_snapshot.get("meetings") or 0) == 0
+        )
+    )
+    snapshot_path = (
+        Path(str(existing_snapshot["path"]))
+        if snapshot_reused
+        else create_record_snapshot(
+            backup_path=backup_path,
+            backup_dir=backup_dir,
+            source_media_dir=source_media_dir,
+            keep=backup_keep,
+        )
+    )
+    offsite_path = (
+        replicate_record_snapshot(
+            snapshot_path,
+            offsite_backup_dir,
+            keep=backup_keep,
+        )
+        if offsite_backup_dir is not None
+        else None
     )
     maintenance = maintain_database(db_path=db_path)
     return {
         "backup_path": str(backup_path),
         "snapshot_path": str(snapshot_path),
+        "snapshot_reused": snapshot_reused,
         "snapshot_verification": verify_record_snapshot(snapshot_path),
+        "offsite_snapshot_path": str(offsite_path) if offsite_path else None,
+        "offsite_snapshot_verification": (
+            verify_record_snapshot(offsite_path) if offsite_path else None
+        ),
         "maintenance": maintenance,
     }
