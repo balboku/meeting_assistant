@@ -48,7 +48,7 @@ jobs:
           python -c "import json; payload = json.load(open('segment-cache-prune.json', encoding='utf-8')); assert payload['would_delete'] == 0, payload"
 
       - name: Unit tests
-        run: python -m unittest discover -v
+        run: python scripts/run_ci_tests.py
 
       - name: Dependency check
         run: python -m pip check
