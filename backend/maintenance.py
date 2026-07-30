@@ -552,21 +552,32 @@ def verify_record_snapshot(snapshot_path: Path) -> dict[str, object]:
             "source_media_inventory_sha256"
         ),
     }
+    _remember_record_snapshot_verification(path, result)
+    return result
+
+
+def _remember_record_snapshot_verification(
+    snapshot_path: Path,
+    verification: dict[str, object],
+) -> None:
+    """Cache a verified immutable snapshot by resolved path, mtime, and size."""
+    path = Path(snapshot_path)
     try:
         stat = path.stat()
         cache_key = (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
-        with _SNAPSHOT_VERIFICATION_CACHE_LOCK:
-            for stale_key in tuple(_SNAPSHOT_VERIFICATION_CACHE):
-                if stale_key[0] == cache_key[0] and stale_key != cache_key:
-                    _SNAPSHOT_VERIFICATION_CACHE.pop(stale_key, None)
-            _SNAPSHOT_VERIFICATION_CACHE[cache_key] = dict(result)
-            while len(_SNAPSHOT_VERIFICATION_CACHE) > 16:
-                _SNAPSHOT_VERIFICATION_CACHE.pop(
-                    next(iter(_SNAPSHOT_VERIFICATION_CACHE))
-                )
     except OSError:
-        pass
-    return result
+        return
+    cached_result = dict(verification)
+    cached_result["path"] = str(path)
+    with _SNAPSHOT_VERIFICATION_CACHE_LOCK:
+        for stale_key in tuple(_SNAPSHOT_VERIFICATION_CACHE):
+            if stale_key[0] == cache_key[0] and stale_key != cache_key:
+                _SNAPSHOT_VERIFICATION_CACHE.pop(stale_key, None)
+        _SNAPSHOT_VERIFICATION_CACHE[cache_key] = cached_result
+        while len(_SNAPSHOT_VERIFICATION_CACHE) > 16:
+            _SNAPSHOT_VERIFICATION_CACHE.pop(
+                next(iter(_SNAPSHOT_VERIFICATION_CACHE))
+            )
 
 
 def _cached_record_snapshot_verification(snapshot_path: Path) -> dict[str, object]:
@@ -736,7 +747,7 @@ def replicate_record_snapshot(
 ) -> Path:
     """Atomically replicate one verified snapshot to a distinct backup root."""
     source = Path(snapshot_path)
-    verification = verify_record_snapshot(source)
+    verification = _cached_record_snapshot_verification(source)
     if not verification["ok"]:
         raise ValueError(f"本機快照驗證失敗：{verification['detail']}")
     destination_root = Path(offsite_dir)
@@ -745,22 +756,39 @@ def replicate_record_snapshot(
         raise ValueError("異地備份目錄不可與本機備份目錄相同")
 
     destination = destination_root / source.name
+    checksum_path = destination.with_suffix(f"{destination.suffix}.sha256")
     temp_destination = destination_root / (
         f".{source.name}.{uuid.uuid4().hex}.tmp"
     )
+    source_digest = _sha256_file(source)
     try:
-        shutil.copy2(source, temp_destination)
-        source_digest = _sha256_file(source)
-        copied_digest = _sha256_file(temp_destination)
-        if copied_digest != source_digest:
-            raise OSError("異地備份 SHA-256 驗證失敗")
-        temp_destination.replace(destination)
-        replicated_verification = verify_record_snapshot(destination)
-        if not replicated_verification["ok"]:
-            raise ValueError(
-                f"異地備份內容驗證失敗：{replicated_verification['detail']}"
-            )
-        destination.with_suffix(f"{destination.suffix}.sha256").write_text(
+        destination_matches = False
+        if destination.is_file() and destination.stat().st_size == source.stat().st_size:
+            try:
+                checksum_parts = checksum_path.read_text(
+                    encoding="ascii"
+                ).split(maxsplit=1)
+                recorded_digest = (
+                    checksum_parts[0].strip().lower()
+                    if checksum_parts
+                    else ""
+                )
+            except (OSError, UnicodeError):
+                recorded_digest = ""
+            if recorded_digest == source_digest:
+                destination_matches = _sha256_file(destination) == source_digest
+
+        if not destination_matches:
+            shutil.copy2(source, temp_destination)
+            copied_digest = _sha256_file(temp_destination)
+            if copied_digest != source_digest:
+                raise OSError("異地備份 SHA-256 驗證失敗")
+            temp_destination.replace(destination)
+
+        # Byte identity with the already fully verified source proves the
+        # replicated archive has the same manifest, members, and SQLite DB.
+        _remember_record_snapshot_verification(destination, verification)
+        checksum_path.write_text(
             f"{source_digest}  {destination.name}\n",
             encoding="ascii",
         )
@@ -1053,10 +1081,12 @@ def run_startup_maintenance(
         "backup_path": str(backup_path),
         "snapshot_path": str(snapshot_path),
         "snapshot_reused": snapshot_reused,
-        "snapshot_verification": verify_record_snapshot(snapshot_path),
+        "snapshot_verification": _cached_record_snapshot_verification(snapshot_path),
         "offsite_snapshot_path": str(offsite_path) if offsite_path else None,
         "offsite_snapshot_verification": (
-            verify_record_snapshot(offsite_path) if offsite_path else None
+            _cached_record_snapshot_verification(offsite_path)
+            if offsite_path
+            else None
         ),
         "maintenance": maintenance,
     }

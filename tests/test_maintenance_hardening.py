@@ -13,6 +13,7 @@ from backend.maintenance import (
     directory_inventory_fingerprint,
     latest_record_snapshot_health,
     record_state_fingerprint,
+    replicate_record_snapshot,
     run_startup_maintenance,
     verify_database_backup,
     verify_record_snapshot,
@@ -101,6 +102,36 @@ class MaintenanceHardeningTests(unittest.TestCase):
                 cached_health = latest_record_snapshot_health(backup_dir)
             self.assertFalse(cached_health["ok"])
             self.assertTrue(cached_health["container_valid"])
+
+    def test_replicating_unchanged_snapshot_reuses_verified_offsite_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            backup_dir = root / "backups"
+            offsite_dir = root / "offsite"
+            output = root / "meeting.md"
+            output.write_text("# meeting", encoding="utf-8")
+            with mock.patch.object(database, "DB_PATH", root / "meetings.db"):
+                database.init_db()
+                database.save_meeting(
+                    title="replication reuse",
+                    date="2026/07/30",
+                    source_audio="",
+                    output_path=str(output),
+                )
+                backup = backup_database(database.DB_PATH, backup_dir)
+                snapshot = create_record_snapshot(backup, backup_dir)
+
+            first = replicate_record_snapshot(snapshot, offsite_dir)
+            first_mtime = first.stat().st_mtime_ns
+            with mock.patch(
+                "backend.maintenance.shutil.copy2",
+                side_effect=AssertionError("unchanged snapshot must not be copied"),
+            ):
+                second = replicate_record_snapshot(snapshot, offsite_dir)
+
+            self.assertEqual(first, second)
+            self.assertEqual(second.stat().st_mtime_ns, first_mtime)
+            self.assertTrue(latest_record_snapshot_health(offsite_dir)["ok"])
 
     def test_startup_rebuilds_fresh_snapshot_when_record_counts_changed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
