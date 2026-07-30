@@ -117,6 +117,77 @@ class OperationalReliabilityTests(unittest.TestCase):
         self.assertIsNone(recovered["worker_id"])
         self.assertIsNone(recovered["lease_expires_at"])
 
+    def test_audio_worker_retries_after_task_records_failed_and_releases_lease(self) -> None:
+        import backend.job_queue as job_queue
+
+        audio_path = self.root / "recorded-failure.mp3"
+        audio_path.write_bytes(b"audio")
+        job_queue.enqueue_audio_job(
+            "worker-recorded-failure-job",
+            audio_path=audio_path,
+            output_dir=self.root,
+            model="test-model",
+            max_attempts=3,
+        )
+        worker = job_queue.JobQueueWorker(poll_interval=0.01)
+        claim = self.database.claim_next_pending_job()
+
+        def record_failure(**kwargs):
+            self.database.update_job_status(
+                kwargs["job_id"],
+                "failed",
+                "暫時失敗",
+                error_detail="503 UNAVAILABLE",
+            )
+            return None
+
+        with mock.patch.object(
+            job_queue,
+            "process_audio_task",
+            side_effect=record_failure,
+        ):
+            worker.process_job(claim)
+
+        job = self.database.get_job("worker-recorded-failure-job")
+        events = self.database.list_job_events("worker-recorded-failure-job")
+        self.assertEqual(job["status"], "pending")
+        self.assertEqual(job["attempts"], 1)
+        self.assertTrue(
+            any(event["event_type"] == "retry_scheduled" for event in events)
+        )
+        self.assertTrue(audio_path.exists())
+
+    def test_deterministic_quality_failure_has_lower_retry_ceiling(self) -> None:
+        database = self.database
+        database.create_job(
+            "quality-retry-job",
+            payload={
+                "audio_path": str(self.root / "audio.mp3"),
+                "output_dir": str(self.root),
+            },
+            max_attempts=5,
+        )
+
+        for expected_attempt in (1, 2):
+            database.claim_next_pending_job()
+            status = database.retry_or_fail_job(
+                "quality-retry-job",
+                "第 1/1 段轉錄不完整：文字密度偏低",
+            )
+            self.assertEqual(status, "pending")
+            self.assertEqual(
+                database.get_job("quality-retry-job")["attempts"],
+                expected_attempt,
+            )
+        database.claim_next_pending_job()
+        final_status = database.retry_or_fail_job(
+            "quality-retry-job",
+            "第 1/1 段轉錄不完整：文字密度偏低",
+        )
+
+        self.assertEqual(final_status, "failed")
+        self.assertEqual(database.get_job("quality-retry-job")["attempts"], 3)
+
     def test_only_one_embedded_worker_holds_leadership(self) -> None:
         import backend.job_queue as job_queue
 
@@ -335,6 +406,40 @@ class OperationalReliabilityTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 401)
         self.assertIn("可信任反向代理", str(raised.exception.detail))
 
+    def test_loopback_and_api_key_sessions_resolve_persisted_local_admin(self) -> None:
+        from starlette.requests import Request
+
+        import backend.auth as auth
+
+        local_email = "local-admin@meeting-assistant.local"
+        self.database.upsert_app_user(local_email, role="admin")
+        loopback = Request({
+            "type": "http",
+            "method": "GET",
+            "path": "/meetings",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+        })
+        api_key = Request({
+            "type": "http",
+            "method": "GET",
+            "path": "/meetings",
+            "headers": [(b"x-api-key", b"secret")],
+            "client": ("203.0.113.10", 12345),
+        })
+
+        with mock.patch.object(auth, "AUTH_FEATURE_ENABLED", True), \
+                mock.patch.object(auth, "AUTH_LOCAL_SESSION_USER", local_email), \
+                mock.patch.object(auth, "AUTH_API_KEY", "secret"):
+            local_actor = auth.actor_from_request(loopback)
+            remote_actor = auth.actor_from_request(api_key)
+
+        self.assertEqual(local_actor.email, local_email)
+        self.assertEqual(local_actor.role, "admin")
+        self.assertTrue(local_actor.enabled)
+        self.assertEqual(remote_actor.email, local_email)
+        self.assertEqual(remote_actor.role, "admin")
+
     def test_security_headers_and_generic_mutation_audit_are_applied(self) -> None:
         import backend.main as main
 
@@ -351,7 +456,10 @@ class OperationalReliabilityTests(unittest.TestCase):
                 deletion = await client.delete("/jobs/missing-job")
                 return health, deletion
 
-        health, deletion = asyncio.run(exercise())
+        with mock.patch.object(main.auth_module, "AUTH_FEATURE_ENABLED", False), \
+                mock.patch.object(main, "OFFSITE_BACKUP_DIR", None), \
+                mock.patch.object(main, "BACKUP_DIR", self.root / "backups"):
+            health, deletion = asyncio.run(exercise())
 
         self.assertEqual(
             health.headers.get("x-content-type-options"),
@@ -368,7 +476,7 @@ class OperationalReliabilityTests(unittest.TestCase):
         self.assertEqual(audits[0]["resource_id"], "/jobs/missing-job")
         self.assertEqual(audits[0]["detail"]["status_code"], 404)
 
-    def test_schema_v5_archives_orphan_events_and_enforces_foreign_keys(self) -> None:
+    def test_schema_v6_archives_orphan_events_and_enforces_foreign_keys(self) -> None:
         database = self.database
         with database.get_db(enforce_foreign_keys=False) as conn:
             conn.execute(
@@ -394,7 +502,15 @@ class OperationalReliabilityTests(unittest.TestCase):
                         "SELECT value FROM app_meta WHERE key='schema_version'"
                     ).fetchone()[0]
                 ),
-                5,
+                6,
+            )
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertIsNotNone(
+                conn.execute(
+                    """SELECT 1 FROM sqlite_master
+                        WHERE type='table'
+                          AND name='meeting_confirmation_tasks'"""
+                ).fetchone()
             )
             self.assertEqual(
                 conn.execute(
@@ -412,7 +528,7 @@ class OperationalReliabilityTests(unittest.TestCase):
                 )
 
         self.assertTrue(
-            any((backup_root / "schema_migrations").glob("schema_pre_v4_to_v5_*.db"))
+            any((backup_root / "schema_migrations").glob("schema_pre_v4_to_v6_*.db"))
         )
 
     def test_source_media_is_saved_under_content_addressed_name(self) -> None:

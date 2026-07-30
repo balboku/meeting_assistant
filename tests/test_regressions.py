@@ -125,17 +125,22 @@ class SecurityRegressionTests(unittest.TestCase):
 
         self.assertEqual(followup_response.status_code, 200)
 
-    def test_same_network_browser_requests_are_allowed_without_api_key(self):
-        from backend.main import app
+    def test_same_network_browser_requests_are_denied_without_explicit_trust(self):
+        import backend.main as main
 
-        for client_ip in ("192.168.1.50", "10.0.0.8", "100.84.193.112"):
-            response = asgi_request(
-                app,
-                "GET",
-                "/health",
-                headers={"X-Forwarded-For": client_ip},
-            )
-            self.assertEqual(response.status_code, 200, msg=client_ip)
+        original_trust = main.TRUST_LOCAL_NETWORK
+        main.TRUST_LOCAL_NETWORK = False
+        try:
+            for client_ip in ("192.168.1.50", "10.0.0.8", "100.84.193.112"):
+                response = asgi_request(
+                    main.app,
+                    "GET",
+                    "/health",
+                    headers={"X-Forwarded-For": client_ip},
+                )
+                self.assertEqual(response.status_code, 403, msg=client_ip)
+        finally:
+            main.TRUST_LOCAL_NETWORK = original_trust
 
     def test_forwarded_for_is_ignored_from_non_loopback_clients(self):
         from backend.main import app
@@ -150,17 +155,22 @@ class SecurityRegressionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
 
-    def test_direct_same_network_client_is_allowed_without_forwarded_header(self):
-        from backend.main import app
+    def test_direct_same_network_client_is_denied_without_explicit_trust(self):
+        import backend.main as main
 
-        response = asgi_request(
-            app,
-            "GET",
-            "/health",
-            asgi_client=("192.168.1.50", 456),
-        )
+        original_trust = main.TRUST_LOCAL_NETWORK
+        main.TRUST_LOCAL_NETWORK = False
+        try:
+            response = asgi_request(
+                main.app,
+                "GET",
+                "/health",
+                asgi_client=("192.168.1.50", 456),
+            )
+        finally:
+            main.TRUST_LOCAL_NETWORK = original_trust
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 403)
 
     def test_upload_rejects_files_larger_than_configured_limit(self):
         import backend.main as main
@@ -7883,16 +7893,17 @@ class MeetingEvidenceRegressionTests(unittest.TestCase):
         evidence_path = tmp_path / "quote.png"
         evidence_path.write_bytes(b"png-bytes")
 
-        with mock.patch.object(
-            evidence,
-            "generate_evidence_markdown",
-            return_value=(
-                "### 資料 1：quote.png\n"
-                "- 系統判斷：與採購決策高度相關\n"
-                "- 擷取重點：單價為 12,000 元\n"
-                "- 原始檔案：quote.png\n"
-            ),
-        ):
+        with mock.patch.object(evidence, "ATTACHMENT_DIR", tmp_path / "attachments"), \
+                mock.patch.object(
+                    evidence,
+                    "generate_evidence_markdown",
+                    return_value=(
+                        "### 資料 1：quote.png\n"
+                        "- 系統判斷：與採購決策高度相關\n"
+                        "- 擷取重點：單價為 12,000 元\n"
+                        "- 原始檔案：quote.png\n"
+                    ),
+                ):
             result = evidence.analyze_and_append_evidence(
                 meeting_id=meeting_id,
                 source_path=evidence_path,
@@ -10127,7 +10138,7 @@ class StartupScriptRegressionTests(unittest.TestCase):
         self.assertIn("terminate_existing_server(SERVER_PORT)", main_block)
         self.assertLess(
             main_block.index("terminate_existing_server(SERVER_PORT)"),
-            main_block.index("subprocess.run(["),
+            main_block.index("run_server_supervisor(["),
         )
 
     def test_startup_builds_mobile_history_url_with_short_lived_bootstrap_token(self):
@@ -10186,7 +10197,7 @@ class StartupScriptRegressionTests(unittest.TestCase):
         )
         self.assertLess(
             main_block.index("ensure_app_api_key()"),
-            main_block.index("subprocess.run(["),
+            main_block.index("run_server_supervisor(["),
         )
 
     def test_startup_main_prints_mobile_access_urls(self):
@@ -20085,7 +20096,7 @@ console.log('quality_type_filter_ok');
 
 class MeetingReviewWorkflowRegressionTests(unittest.TestCase):
     def test_structured_summary_review_and_revision_invalidation(self):
-        from backend import database
+        from backend import database, review_workflow
 
         structured = {
             "discussion_summary": [{"id": "D1", "summary": "討論內容", "evidence_timecodes": ["00:10"]}],
@@ -20111,7 +20122,7 @@ class MeetingReviewWorkflowRegressionTests(unittest.TestCase):
                 self.assertEqual(len(created["structured_items"]), 3)
                 self.assertEqual(created["structured_summary"]["action_items"][0]["id"], "A1")
 
-                reviewed = database.update_meeting_review_status(
+                reviewed = review_workflow.update_meeting_review_status(
                     meeting_id,
                     "reviewed",
                     reviewed_by="reviewer@example.com",
@@ -20119,19 +20130,19 @@ class MeetingReviewWorkflowRegressionTests(unittest.TestCase):
                 )
                 self.assertEqual(reviewed["review_status"], "reviewed")
                 with self.assertRaisesRegex(ValueError, "逐項複核"):
-                    database.update_meeting_review_status(
+                    review_workflow.update_meeting_review_status(
                         meeting_id,
                         "approved",
                         reviewed_by="reviewer@example.com",
                     )
                 for item_key in ("D1", "R1", "A1"):
-                    database.update_meeting_item_review_status(
+                    review_workflow.update_meeting_item_review_status(
                         meeting_id,
                         item_key,
                         "reviewed",
                         reviewed_by="reviewer@example.com",
                     )
-                approved = database.update_meeting_review_status(
+                approved = review_workflow.update_meeting_review_status(
                     meeting_id,
                     "approved",
                     reviewed_by="reviewer@example.com",
@@ -20153,7 +20164,7 @@ class MeetingReviewWorkflowRegressionTests(unittest.TestCase):
                 self.assertEqual(revised["structured_items"], [])
 
     def test_approval_rejects_delivery_blocking_segments(self):
-        from backend import database
+        from backend import database, review_workflow
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -20168,12 +20179,12 @@ class MeetingReviewWorkflowRegressionTests(unittest.TestCase):
                     output_path=str(markdown),
                     quality_report={"blocking_segment_indices": [1]},
                 )
-                database.update_meeting_review_status(meeting_id, "reviewed")
+                review_workflow.update_meeting_review_status(meeting_id, "reviewed")
                 with self.assertRaisesRegex(ValueError, "不能核准"):
-                    database.update_meeting_review_status(meeting_id, "approved")
+                    review_workflow.update_meeting_review_status(meeting_id, "approved")
 
     def test_evidence_creates_revision_metadata_hash_and_search_index(self):
-        from backend import database, evidence
+        from backend import database, evidence, review_workflow
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -20212,7 +20223,7 @@ class MeetingReviewWorkflowRegressionTests(unittest.TestCase):
                 self.assertEqual(matches[0]["id"], meeting_id)
 
     def test_item_review_rollup_and_evidence_links_are_persisted(self):
-        from backend import database, evidence
+        from backend import database, evidence, review_workflow
 
         structured = {
             "discussion_summary": [
@@ -20242,14 +20253,14 @@ class MeetingReviewWorkflowRegressionTests(unittest.TestCase):
                     output_path=str(markdown),
                     structured_summary=structured,
                 )
-                reviewed = database.update_meeting_item_review_status(
+                reviewed = review_workflow.update_meeting_item_review_status(
                     meeting_id,
                     "D1",
                     "reviewed",
                     reviewed_by="reviewer@example.com",
                 )
                 self.assertEqual(reviewed["meeting_review_status"], "reviewed")
-                approved = database.update_meeting_item_review_status(
+                approved = review_workflow.update_meeting_item_review_status(
                     meeting_id,
                     "D1",
                     "approved",

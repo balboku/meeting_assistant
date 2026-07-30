@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
+from backend.confirmation_schema import confirmation_tasks_sql
 
 JOBS_COLUMNS = (
     "job_id", "status", "message", "output_path", "error_detail",
@@ -407,6 +408,16 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> dict[str, int]:
     return {"archived_orphan_job_events": archived_events}
 
 
+def _migrate_to_v6(conn: sqlite3.Connection) -> dict[str, int]:
+    if not _table_exists(conn, "meeting_confirmation_tasks"):
+        conn.execute(confirmation_tasks_sql())
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_confirmation_tasks_status
+             ON meeting_confirmation_tasks(status, meeting_id, id)"""
+    )
+    return {"confirmation_tasks_created": 1}
+
+
 def apply_schema_migrations(
     conn: sqlite3.Connection,
     db_path: Path,
@@ -431,6 +442,7 @@ def apply_schema_migrations(
             f"資料庫 schema={current_version} 高於程式支援版本 {target_version}"
         )
     if current_version == target_version:
+        conn.execute(f"PRAGMA user_version={int(target_version)}")
         return {
             "from_version": current_version,
             "to_version": target_version,
@@ -455,6 +467,8 @@ def apply_schema_migrations(
         detail: dict[str, object] = {}
         if version == 5:
             detail = _migrate_to_v5(conn)
+        elif version == 6:
+            detail = _migrate_to_v6(conn)
         conn.execute(
             """INSERT OR REPLACE INTO schema_migrations (
                    version, applied_at, detail
@@ -475,6 +489,7 @@ def apply_schema_migrations(
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ),
     )
+    conn.execute(f"PRAGMA user_version={int(target_version)}")
     return {
         "from_version": current_version,
         "to_version": target_version,

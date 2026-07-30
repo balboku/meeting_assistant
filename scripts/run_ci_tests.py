@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import traceback
@@ -13,6 +14,29 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# The suite explicitly enables RBAC in focused tests. Keep general endpoint
+# fixtures independent from a developer machine's live .env configuration.
+os.environ["MEETING_AUTH_ENABLED"] = "0"
+os.environ["MEETING_OFFSITE_BACKUP_DIR"] = ""
+
+TEST_ATTACHMENT_SHA256 = (
+    "ea80334363eed145dfeee51ebae7dc3f1cd7d0c7879f8bfd2070c061d3c33f56"
+)
+
+
+def _leaked_test_attachments() -> set[Path]:
+    """Find the exact 9-byte fixture that once leaked into live attachments."""
+    attachment_root = ROOT / "output" / "attachments"
+    if not attachment_root.is_dir():
+        return set()
+    matches: set[Path] = set()
+    for path in attachment_root.rglob("quote*.png"):
+        if not path.is_file() or path.stat().st_size != 9:
+            continue
+        if hashlib.sha256(path.read_bytes()).hexdigest() == TEST_ATTACHMENT_SHA256:
+            matches.add(path.resolve())
+    return matches
 
 
 def _workflow_escape(value: str) -> str:
@@ -72,12 +96,28 @@ class AnnotatingTestResult(unittest.TextTestResult):
 
 
 def main() -> int:
+    leaked_before = _leaked_test_attachments()
     suite = unittest.defaultTestLoader.discover(str(ROOT))
     result = unittest.TextTestRunner(
         verbosity=2,
         resultclass=AnnotatingTestResult,
     ).run(suite)
-    return 0 if result.wasSuccessful() else 1
+    leaked_after = _leaked_test_attachments()
+    newly_leaked = sorted(leaked_after - leaked_before)
+    if newly_leaked:
+        detail = "\n".join(str(path.relative_to(ROOT)) for path in newly_leaked)
+        print(
+            "Workspace isolation failed: tests wrote fixture attachments into "
+            f"the live output directory:\n{detail}",
+            file=sys.stderr,
+        )
+        if os.getenv("GITHUB_ACTIONS", "").strip().lower() == "true":
+            print(
+                "::error title=Workspace isolation failure::"
+                f"{_workflow_escape(detail)}",
+                flush=True,
+            )
+    return 0 if result.wasSuccessful() and not newly_leaked else 1
 
 
 if __name__ == "__main__":

@@ -24,8 +24,18 @@ from backend.quality_segments import (
     review_segment_label,
     review_segment_label_sort_key,
 )
-from backend.auth import normalize_role
+from backend.confirmation_schema import (
+    enqueue_confirmation_tasks,
+    ensure_confirmation_tasks_table,
+    required_confirmation_fields,
+)
+from backend.security_policy import normalize_role
 from backend.schema_migrations import apply_schema_migrations
+from backend.retry_policy import (
+    effective_job_max_attempts as _effective_job_max_attempts,
+    is_transient_error as _is_transient_error,
+    transient_retry_delay_seconds as _transient_retry_delay_seconds,
+)
 
 logger = logging.getLogger("MeetingAssistant.DB")
 
@@ -34,20 +44,8 @@ DEFAULT_JOB_MAX_ATTEMPTS = int(os.getenv("JOB_QUEUE_MAX_ATTEMPTS", "5"))
 # can alter review locations. Older rechecks remain visible, but must not mask
 # current diagnostics until they have been refreshed locally.
 TRANSCRIPT_QUALITY_RECHECK_VERSION = 4
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 MEETING_REVIEW_STATUSES = frozenset({"generated", "needs_review", "reviewed", "approved"})
-TRANSIENT_RETRY_MARKERS = (
-    "503",
-    "429",
-    "unavailable",
-    "serviceunavailable",
-    "overloaded",
-    "temporarily",
-    "timeout",
-    "deadline exceeded",
-    "resource exhausted",
-    "rate limit",
-)
 
 # 資料庫檔案位置（預設放在專案根目錄，可用 DB_PATH 覆寫）
 DB_PATH = Path(os.getenv("DB_PATH") or Path(__file__).parent.parent / "meetings.db")
@@ -1158,40 +1156,6 @@ def _legacy_markdown_quality_warning_count(output_path: str) -> int:
     return len(_legacy_markdown_quality_warnings(output_path))
 
 
-def _transient_retry_delay_seconds(attempts: int = 1) -> int:
-    """Return a bounded exponential delay for transient upstream failures."""
-    try:
-        base_delay = max(0, int(os.getenv("JOB_QUEUE_TRANSIENT_RETRY_DELAY_SECONDS", "30")))
-    except ValueError:
-        base_delay = 30
-    if base_delay <= 0:
-        return 0
-
-    try:
-        multiplier = float(os.getenv("JOB_QUEUE_TRANSIENT_RETRY_BACKOFF_MULTIPLIER", "2"))
-    except ValueError:
-        multiplier = 2.0
-    multiplier = min(10.0, max(1.0, multiplier))
-
-    try:
-        max_delay = max(0, int(os.getenv("JOB_QUEUE_TRANSIENT_RETRY_MAX_DELAY_SECONDS", "300")))
-    except ValueError:
-        max_delay = 300
-    if max_delay <= 0:
-        return base_delay
-
-    try:
-        retry_number = max(1, int(attempts))
-    except (TypeError, ValueError):
-        retry_number = 1
-    return min(max_delay, round(base_delay * (multiplier ** (retry_number - 1))))
-
-
-def _is_transient_error(error_detail: str) -> bool:
-    normalized = (error_detail or "").lower().replace("_", "")
-    return any(marker in normalized for marker in TRANSIENT_RETRY_MARKERS)
-
-
 def _retry_queued_at(error_detail: str, attempts: int = 1) -> str:
     if not _is_transient_error(error_detail):
         return _now()
@@ -1530,6 +1494,7 @@ def _ensure_meeting_workflow_tables(
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_meeting_evidence_items_item ON meeting_evidence_items(meeting_item_id)"
     )
+    ensure_confirmation_tasks_table(conn)
 
 
 def _ensure_auth_tables(conn: sqlite3.Connection) -> None:
@@ -2581,7 +2546,10 @@ def retry_or_fail_job(job_id: str, error_detail: str) -> str:
             return "cancelled"
 
         attempts = int(row["attempts"] or 0)
-        max_attempts = int(row["max_attempts"] or 1)
+        max_attempts = _effective_job_max_attempts(
+            error_detail,
+            int(row["max_attempts"] or 1),
+        )
         if attempts < max_attempts:
             retry_at = _retry_queued_at(error_detail, attempts)
             retry_message = f"處理失敗，已重新排入佇列（第 {attempts}/{max_attempts} 次嘗試）。"
@@ -2873,11 +2841,6 @@ def is_job_cancel_requested(job_id: str) -> bool:
         return bool(row["cancel_requested"]) or row["status"] == "cancelled"
 
 
-# =============================================================================
-# Meetings CRUD（會議記錄管理）
-# =============================================================================
-
-
 def get_meeting_by_job_id(job_id: str) -> Optional[dict[str, Any]]:
     """Return the durable result for an idempotent processing job."""
     normalized_job_id = str(job_id or "").strip()
@@ -2930,7 +2893,10 @@ def _replace_meeting_items(
     conn.execute("DELETE FROM meeting_items WHERE meeting_id=?", (meeting_id,))
     now = _now()
     for item_type, item_key, position, payload, evidence in _structured_summary_items(structured_summary):
-        conn.execute(
+        confirmation_fields = required_confirmation_fields(item_type, payload, evidence)
+        if confirmation_fields:
+            payload["confirmation_required"] = confirmation_fields
+        cursor = conn.execute(
             """INSERT INTO meeting_items (
                    meeting_id, item_type, item_key, position, payload_json,
                    evidence_json, review_status, created_at, updated_at
@@ -2945,6 +2911,14 @@ def _replace_meeting_items(
                 now,
                 now,
             ),
+        )
+        enqueue_confirmation_tasks(
+            conn,
+            meeting_id=meeting_id,
+            meeting_item_id=int(cursor.lastrowid),
+            payload=payload,
+            field_names=confirmation_fields,
+            now=now,
         )
 
 
@@ -3904,44 +3878,6 @@ def update_meeting_content_with_revision(
 
     logger.info("✏️  會議記錄已人工修訂並保留版本（ID: %s，revision: %s）", meeting_id, revision_id)
     return revision_id
-
-
-def update_meeting_review_status(
-    meeting_id: int,
-    status: str,
-    *,
-    reviewed_by: Optional[str] = None,
-    note: Optional[str] = None,
-) -> dict[str, Any]:
-    """Compatibility wrapper for the extracted review domain service."""
-    from backend.review_workflow import update_meeting_review_status as update_review
-
-    return update_review(
-        meeting_id,
-        status,
-        reviewed_by=reviewed_by,
-        note=note,
-    )
-
-
-def update_meeting_item_review_status(
-    meeting_id: int,
-    item_key: str,
-    status: str,
-    *,
-    reviewed_by: Optional[str] = None,
-    note: Optional[str] = None,
-) -> dict[str, Any]:
-    """Compatibility wrapper for the extracted review domain service."""
-    from backend.review_workflow import update_meeting_item_review_status as update_item_review
-
-    return update_item_review(
-        meeting_id,
-        item_key,
-        status,
-        reviewed_by=reviewed_by,
-        note=note,
-    )
 
 
 def append_meeting_evidence_with_revision(

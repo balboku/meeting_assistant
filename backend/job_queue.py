@@ -544,6 +544,15 @@ class JobQueueWorker:
         if current_status == "cancelled":
             self._log_source_audio_retention(job, "cancelled")
             return
+        if current_status == "failed":
+            detail = (
+                current.get("error_detail")
+                or current.get("message")
+                or "任務未產生輸出檔案"
+            )
+            resulting_status = retry_or_fail_job(job_id, detail)
+            self._log_source_audio_retention(job, resulting_status)
+            return
         claimed_worker_id = str(job.get("worker_id") or "")
         claimed_generation = int(job.get("worker_generation") or 0)
         if claimed_worker_id and not job_lease_is_current(
@@ -557,11 +566,7 @@ class JobQueueWorker:
             )
             return
 
-        detail = (
-            current.get("error_detail")
-            or current.get("message")
-            or "任務未產生輸出檔案"
-        )
+        detail = current.get("message") or "任務未產生輸出檔案"
         resulting_status = retry_or_fail_job(job_id, detail)
         self._log_source_audio_retention(job, resulting_status)
 

@@ -15,11 +15,33 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import threading
 import uuid
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Mapping
+
+
+_SNAPSHOT_VERIFICATION_CACHE: dict[
+    tuple[str, int, int],
+    dict[str, object],
+] = {}
+_SNAPSHOT_VERIFICATION_CACHE_LOCK = threading.Lock()
+_RECORD_STATE_TABLES = (
+    "app_meta",
+    "jobs",
+    "job_events",
+    "orphan_job_events_archive",
+    "meetings",
+    "meeting_revisions",
+    "meeting_items",
+    "meeting_evidence",
+    "meeting_evidence_items",
+    "meeting_confirmation_tasks",
+    "app_users",
+    "audit_logs",
+)
 
 
 def _sha256_file(path: Path) -> str:
@@ -28,6 +50,29 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _sqlite_sidecar_paths(database_path: Path) -> tuple[Path, Path]:
+    path = Path(database_path)
+    return (
+        path.with_name(f"{path.name}-wal"),
+        path.with_name(f"{path.name}-shm"),
+    )
+
+
+def _remove_database_backup(database_path: Path) -> None:
+    path = Path(database_path)
+    path.unlink(missing_ok=True)
+    for sidecar in _sqlite_sidecar_paths(path):
+        sidecar.unlink(missing_ok=True)
+
+
+def _cleanup_backup_sidecars(backup_dir: Path) -> None:
+    """Remove obsolete journals from immutable, maintenance-owned DB copies."""
+    root = Path(backup_dir)
+    for pattern in ("meetings_*.db-wal", "meetings_*.db-shm"):
+        for sidecar in root.glob(pattern):
+            sidecar.unlink(missing_ok=True)
 
 
 def backup_database(
@@ -60,7 +105,7 @@ def backup_database(
     except Exception:
         destination.close()
         source.close()
-        backup_path.unlink(missing_ok=True)
+        _remove_database_backup(backup_path)
         raise
     else:
         destination.close()
@@ -72,7 +117,8 @@ def backup_database(
         reverse=True,
     )
     for stale in backups[max(keep, 1):]:
-        stale.unlink()
+        _remove_database_backup(stale)
+    _cleanup_backup_sidecars(backup_dir)
 
     return backup_path
 
@@ -89,7 +135,9 @@ def verify_database_backup(backup_path: Path) -> dict[str, object]:
             "jobs": None,
         }
 
-    uri = f"{path.resolve().as_uri()}?mode=ro"
+    # immutable=1 keeps verification read-only even on Windows and prevents
+    # SQLite from creating persistent -wal/-shm files next to backup copies.
+    uri = f"{path.resolve().as_uri()}?mode=ro&immutable=1"
     try:
         conn = sqlite3.connect(uri, uri=True)
         try:
@@ -128,6 +176,79 @@ def verify_database_backup(backup_path: Path) -> dict[str, object]:
         "meetings": meetings,
         "jobs": jobs,
     }
+
+
+def record_state_fingerprint(database_path: Path) -> str:
+    """Hash durable record state while excluding runtime leases and FTS caches."""
+    path = Path(database_path)
+    digest = hashlib.sha256()
+    uri = f"{path.resolve().as_uri()}?mode=ro&immutable=1"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        for table in _RECORD_STATE_TABLES:
+            if table not in tables:
+                continue
+            columns = [
+                str(row[1])
+                for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+            ]
+            digest.update(
+                json.dumps(
+                    [table, columns],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            for row in conn.execute(f'SELECT * FROM "{table}" ORDER BY rowid'):
+                digest.update(
+                    json.dumps(
+                        list(row),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=lambda value: {
+                            "__bytes__": bytes(value).hex()
+                        },
+                    ).encode("utf-8")
+                )
+    finally:
+        conn.close()
+    return digest.hexdigest()
+
+
+def directory_inventory_fingerprint(root: Path | None) -> str | None:
+    """Hash relative names, sizes, and mtimes without rereading large media."""
+    if root is None:
+        return None
+    directory = Path(root)
+    digest = hashlib.sha256()
+    if not directory.is_dir():
+        return digest.hexdigest()
+    for path in sorted(
+        (candidate for candidate in directory.rglob("*") if candidate.is_file()),
+        key=lambda candidate: candidate.relative_to(directory).as_posix(),
+    ):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        digest.update(
+            json.dumps(
+                [
+                    path.relative_to(directory).as_posix(),
+                    int(stat.st_size),
+                    int(stat.st_mtime_ns),
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+    return digest.hexdigest()
 
 
 def latest_backup_health(
@@ -322,6 +443,10 @@ def create_record_snapshot(
             "format_version": 2,
             "created_at": (now or datetime.now()).isoformat(timespec="seconds"),
             "database_verification": verification,
+            "record_state_sha256": record_state_fingerprint(backup_path),
+            "source_media_inventory_sha256": directory_inventory_fingerprint(
+                source_media_dir
+            ),
             "source_media_policy": "已連結會議的原始媒體以 SHA-256 內容定址去重納入快照。",
             "meetings": meeting_manifest,
             "entries": entries,
@@ -392,12 +517,29 @@ def verify_record_snapshot(snapshot_path: Path) -> dict[str, object]:
                 database_check = verify_database_backup(embedded_db)
     except (OSError, KeyError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
         return {"ok": False, "path": str(path), "detail": str(exc)}
-    return {
-        "ok": bool(database_check["ok"]),
+    missing_count = len(manifest.get("missing") or [])
+    container_valid = bool(database_check["ok"])
+    recoverability_complete = container_valid and missing_count == 0
+    result = {
+        # ``ok`` remains the container-integrity signal so an otherwise valid
+        # historical snapshot can still be inspected and restored.  Health
+        # reporting separately treats missing source records as degraded.
+        "ok": container_valid,
+        "container_valid": container_valid,
+        "recoverability_complete": recoverability_complete,
+        "status": "ok" if recoverability_complete else "degraded",
         "path": str(path),
-        "detail": "ok" if database_check["ok"] else database_check["detail"],
+        "detail": (
+            "ok"
+            if recoverability_complete
+            else (
+                f"快照可讀，但有 {missing_count} 個來源檔案缺漏"
+                if container_valid
+                else database_check["detail"]
+            )
+        ),
         "entries": len(manifest.get("entries") or []),
-        "missing": len(manifest.get("missing") or []),
+        "missing": missing_count,
         "source_media": sum(
             1
             for entry in manifest.get("entries") or []
@@ -405,7 +547,40 @@ def verify_record_snapshot(snapshot_path: Path) -> dict[str, object]:
         ),
         "meetings": database_check.get("meetings"),
         "jobs": database_check.get("jobs"),
+        "record_state_sha256": manifest.get("record_state_sha256"),
+        "source_media_inventory_sha256": manifest.get(
+            "source_media_inventory_sha256"
+        ),
     }
+    try:
+        stat = path.stat()
+        cache_key = (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+        with _SNAPSHOT_VERIFICATION_CACHE_LOCK:
+            for stale_key in tuple(_SNAPSHOT_VERIFICATION_CACHE):
+                if stale_key[0] == cache_key[0] and stale_key != cache_key:
+                    _SNAPSHOT_VERIFICATION_CACHE.pop(stale_key, None)
+            _SNAPSHOT_VERIFICATION_CACHE[cache_key] = dict(result)
+            while len(_SNAPSHOT_VERIFICATION_CACHE) > 16:
+                _SNAPSHOT_VERIFICATION_CACHE.pop(
+                    next(iter(_SNAPSHOT_VERIFICATION_CACHE))
+                )
+    except OSError:
+        pass
+    return result
+
+
+def _cached_record_snapshot_verification(snapshot_path: Path) -> dict[str, object]:
+    path = Path(snapshot_path)
+    try:
+        stat = path.stat()
+        cache_key = (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        return verify_record_snapshot(path)
+    with _SNAPSHOT_VERIFICATION_CACHE_LOCK:
+        cached = _SNAPSHOT_VERIFICATION_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+    return verify_record_snapshot(path)
 
 
 def restore_record_snapshot(snapshot_path: Path, target_dir: Path) -> dict[str, object]:
@@ -636,12 +811,13 @@ def latest_record_snapshot_health(
     reference = now or datetime.now()
     modified = datetime.fromtimestamp(latest.stat().st_mtime)
     age_hours = max(0.0, (reference - modified).total_seconds() / 3600.0)
-    verification = verify_record_snapshot(latest)
+    verification = _cached_record_snapshot_verification(latest)
     fresh = age_hours <= max(1, max_age_hours)
+    complete = bool(verification.get("recoverability_complete"))
     return {
         **verification,
         "configured": True,
-        "ok": bool(verification["ok"]) and fresh,
+        "ok": bool(verification["ok"]) and complete and fresh,
         "age_hours": round(age_hours, 2),
         "detail": (
             str(verification["detail"])
@@ -831,16 +1007,26 @@ def run_startup_maintenance(
 ) -> dict[str, object]:
     """Back up and maintain the SQLite DB after init_db has ensured it exists."""
     backup_path = backup_database(db_path=db_path, backup_dir=backup_dir, keep=backup_keep)
+    backup_verification = verify_database_backup(backup_path)
+    backup_record_state = record_state_fingerprint(backup_path)
+    source_media_inventory = directory_inventory_fingerprint(source_media_dir)
     existing_snapshot = latest_record_snapshot_health(
         backup_dir,
         max_age_hours=max(1, int(full_snapshot_min_interval_hours)),
     )
     snapshot_reused = bool(
-        existing_snapshot.get("ok")
+        existing_snapshot.get("container_valid")
         and existing_snapshot.get("path")
         and (
             int(existing_snapshot.get("source_media") or 0) > 0
             or int(existing_snapshot.get("meetings") or 0) == 0
+        )
+        and existing_snapshot.get("meetings") == backup_verification.get("meetings")
+        and existing_snapshot.get("jobs") == backup_verification.get("jobs")
+        and existing_snapshot.get("record_state_sha256") == backup_record_state
+        and (
+            existing_snapshot.get("source_media_inventory_sha256")
+            == source_media_inventory
         )
     )
     snapshot_path = (

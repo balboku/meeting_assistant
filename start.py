@@ -49,6 +49,7 @@ LINE_WEBHOOK_ENDPOINT_API = "https://api.line.me/v2/bot/channel/webhook/endpoint
 LINE_WEBHOOK_TEST_API = "https://api.line.me/v2/bot/channel/webhook/test"
 NGROK_PID_FILE = ROOT_DIR / "logs" / "ngrok.pid"
 NGROK_LOG_FILE = ROOT_DIR / "logs" / "ngrok.log"
+SUPERVISOR_TOKEN_FILE = ROOT_DIR / "logs" / "supervisor.token"
 PLACEHOLDER_APP_API_KEYS = {"change_me_to_a_long_random_value", "your_app_api_key_here"}
 
 
@@ -176,6 +177,39 @@ def _env_flag(name, default=True):
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _env_int(name, default, minimum=0, maximum=86400):
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = int(default)
+    return min(max(value, int(minimum)), int(maximum))
+
+
+def _rotate_log_file(path, max_bytes=None, keep=None):
+    target = Path(path)
+    maximum = max_bytes or _env_int(
+        "MEETING_ASSISTANT_LOG_MAX_BYTES",
+        20 * 1024 * 1024,
+        minimum=1024,
+        maximum=2 * 1024 * 1024 * 1024,
+    )
+    retained = keep or _env_int(
+        "MEETING_ASSISTANT_LOG_KEEP",
+        3,
+        minimum=1,
+        maximum=20,
+    )
+    if not target.is_file() or target.stat().st_size < maximum:
+        return False
+    target.with_name(f"{target.name}.{retained}").unlink(missing_ok=True)
+    for index in range(retained - 1, 0, -1):
+        source = target.with_name(f"{target.name}.{index}")
+        if source.exists():
+            source.replace(target.with_name(f"{target.name}.{index + 1}"))
+    target.replace(target.with_name(f"{target.name}.1"))
+    return True
+
+
 def ensure_app_api_key() -> str:
     """Ensure remote browser sessions have a usable API key for this launch."""
     configured = os.getenv("APP_API_KEY", "").strip()
@@ -234,7 +268,7 @@ def print_access_urls():
         print("手機 / 平板：無法自動判斷本機 Wi-Fi IP，請確認 Mac 與手機在同一個網路。")
         return
 
-    if _env_flag("MEETING_ASSISTANT_TRUST_LOCAL_NETWORK", default=True):
+    if _env_flag("MEETING_ASSISTANT_TRUST_LOCAL_NETWORK", default=False):
         print(f"手機 / 平板：{mobile_history_url(lan_ip, SERVER_PORT)}")
         print("同 Wi-Fi / 信任本機網段可直接開啟；ngrok 使用五分鐘有效的登入連結。")
     else:
@@ -389,6 +423,7 @@ def start_ngrok_tunnel(port, wait_for_status=True):
     command.extend(["--log=stdout", "--log-format=logfmt"])
 
     NGROK_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_log_file(NGROK_LOG_FILE)
     popen_kwargs = {
         "stdin": subprocess.DEVNULL,
         "stdout": None,
@@ -501,23 +536,105 @@ def open_browser():
     print(f"\n🌐 正在開啟瀏覽器前往網頁介面: {url}\n")
     webbrowser.open(url)
 
+
+def run_server_supervisor(
+    command,
+    *,
+    owns_supervisor=lambda: True,
+    process_factory=subprocess.Popen,
+    sleep=time.sleep,
+):
+    """Run Uvicorn with bounded restart/backoff while this launch owns the token."""
+    auto_restart = _env_flag("MEETING_ASSISTANT_AUTO_RESTART", default=True)
+    max_restarts = _env_int(
+        "MEETING_ASSISTANT_MAX_RESTARTS",
+        5,
+        minimum=0,
+        maximum=100,
+    )
+    base_delay = _env_int(
+        "MEETING_ASSISTANT_RESTART_DELAY_SECONDS",
+        2,
+        minimum=1,
+        maximum=60,
+    )
+    stable_seconds = _env_int(
+        "MEETING_ASSISTANT_RESTART_RESET_SECONDS",
+        300,
+        minimum=10,
+        maximum=86400,
+    )
+    restart_count = 0
+    while owns_supervisor():
+        started_at = time.monotonic()
+        process = process_factory(command)
+        try:
+            while True:
+                polled = process.poll()
+                if polled is not None:
+                    return_code = int(polled)
+                    break
+                if not owns_supervisor():
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    return 0
+                sleep(1)
+        except KeyboardInterrupt:
+            if process.poll() is None:
+                process.terminate()
+            raise
+        runtime_seconds = time.monotonic() - started_at
+        if return_code == 0 or not auto_restart or not owns_supervisor():
+            return return_code
+        if runtime_seconds >= stable_seconds:
+            restart_count = 0
+        if restart_count >= max_restarts:
+            print(f"❌ Uvicorn 已連續異常結束 {restart_count + 1} 次，停止自動重啟。")
+            return return_code
+        delay = min(60, base_delay * (2 ** restart_count))
+        restart_count += 1
+        print(
+            f"⚠️  Uvicorn 異常結束（code={return_code}），"
+            f"{delay} 秒後進行第 {restart_count}/{max_restarts} 次重啟。"
+        )
+        sleep(delay)
+    return 0
+
+
 if __name__ == "__main__":
     print("==================================================")
     print("🚀 啟動 AI 語音會議助理...")
     print("==================================================")
 
     ensure_app_api_key()
+    SUPERVISOR_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_token = secrets.token_hex(16)
+    SUPERVISOR_TOKEN_FILE.write_text(supervisor_token, encoding="ascii")
+
+    def owns_supervisor_token():
+        try:
+            return (
+                SUPERVISOR_TOKEN_FILE.read_text(encoding="ascii").strip()
+                == supervisor_token
+            )
+        except OSError:
+            return False
+
     terminate_existing_server(SERVER_PORT)
     ngrok_process = start_ngrok_tunnel(SERVER_PORT)
     print_access_urls()
 
-    # 啟動執行緒準備開啟瀏覽器
-    threading.Thread(target=open_browser, daemon=True).start()
+    # 互動啟動預設開啟瀏覽器；排程器/服務可設 0 避免桌面干擾。
+    if _env_flag("MEETING_ASSISTANT_OPEN_BROWSER", default=True):
+        threading.Thread(target=open_browser, daemon=True).start()
     threading.Thread(target=report_line_webhook_status, args=(SERVER_PORT,), daemon=True).start()
 
     # 在前景啟動 FastAPI 伺服器
     try:
-        subprocess.run([
+        run_server_supervisor([
             sys.executable,
             "-m",
             "uvicorn",
@@ -526,8 +643,10 @@ if __name__ == "__main__":
             SERVER_HOST,
             "--port",
             str(SERVER_PORT),
-        ], check=False)
+        ], owns_supervisor=owns_supervisor_token)
     except KeyboardInterrupt:
         print("\n伺服器已關閉。")
     finally:
         stop_started_ngrok(ngrok_process)
+        if owns_supervisor_token():
+            SUPERVISOR_TOKEN_FILE.unlink(missing_ok=True)

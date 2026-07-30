@@ -43,6 +43,7 @@ load_dotenv()
 from backend.exporter import content_with_quality_review_note, export_meeting_to_docx
 from backend.evidence import SUPPORTED_EVIDENCE_EXTENSIONS, analyze_and_append_evidence
 from backend.build_info import APP_VERSION, build_info_payload
+from backend.capacity import capacity_health_checks
 from backend.access_tokens import create_access_token, validate_access_token
 
 from backend.database import (
@@ -73,8 +74,6 @@ from backend.database import (
     delete_meeting,
     update_meeting_quality_report,
     update_meeting_content_with_revision,
-    update_meeting_review_status,
-    update_meeting_item_review_status,
     get_schema_version,
     list_meeting_revisions,
     upsert_app_user,
@@ -84,6 +83,10 @@ from backend.database import (
     get_runtime_lease,
     release_runtime_lease,
     try_acquire_runtime_lease,
+)
+from backend.review_workflow import (
+    update_meeting_item_review_status,
+    update_meeting_review_status,
 )
 from backend.models import (
     JobResponse,
@@ -138,6 +141,7 @@ from backend.auth import (
     permission_for_request,
     require_permission,
 )
+from backend.confirmation_api import router as confirmation_router
 from backend.cleanup import (
     SOURCE_AUDIO_TEMP_PREFIXES,
     cleanup_stale_source_audio_temp_segments,
@@ -182,9 +186,7 @@ from backend.tasks import (
 )
 from backend.logging_utils import configure_utf8_logging
 
-# =============================================================================
 # 路徑常數
-# =============================================================================
 ROOT_DIR   = Path(__file__).parent.parent
 TEMP_DIR   = Path(os.getenv("MEETING_TEMP_DIR") or ROOT_DIR / "temp")
 OUTPUT_DIR = Path(os.getenv("MEETING_OUTPUT_DIR") or ROOT_DIR / "output")
@@ -204,7 +206,7 @@ API_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 API_BOOTSTRAP_TTL_SECONDS = 5 * 60
 TRUST_LOCAL_NETWORK = os.getenv(
     "MEETING_ASSISTANT_TRUST_LOCAL_NETWORK",
-    "1",
+    "0",
 ).strip().lower() not in {"0", "false", "no", "off"}
 VIDEO_RECORDING_PROFILES = {"video_balanced"}
 AUDIO_RECORDING_PROFILES = {"audio_standard", "audio_compact"}
@@ -285,15 +287,11 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 SOURCE_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
-# =============================================================================
 # 日誌設定
-# =============================================================================
 configure_utf8_logging(level=logging.INFO)
 logger = logging.getLogger("MeetingAssistant.API")
 
-# =============================================================================
 # FastAPI 應用初始化（含 lifespan 啟動事件）
-# =============================================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -370,6 +368,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+app.include_router(confirmation_router)
 
 def _host_without_port(host: str) -> str:
     host = host.strip()
@@ -766,6 +765,11 @@ async def health_check():
         static_vendor_dir=STATIC_DIR / "vendor",
         db_path=DB_PATH,
     )
+    checks.extend(capacity_health_checks(
+        db_path=DB_PATH,
+        source_media_dir=SOURCE_AUDIO_DIR,
+        backup_dir=BACKUP_DIR,
+    ))
     build = build_info_payload()
     schema_version = get_schema_version()
     worker_readiness = _worker_readiness_snapshot()

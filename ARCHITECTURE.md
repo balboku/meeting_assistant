@@ -1,7 +1,7 @@
-# 🎙️ AI 語音會議助理 — 現行系統架構文件 v2.3
+# 🎙️ AI 語音會議助理 — 現行系統架構文件 v2.4
 
-> **文件版本**：2.3.0
-> **更新日期**：2026/07/29
+> **文件版本**：2.4.0
+> **更新日期**：2026/07/30
 > **現況**：FastAPI、SQLite 持久化佇列、Web/LINE/GUI、多段轉錄、品質閘門、人工複核與全文搜尋均為現行功能。
 
 ---
@@ -137,6 +137,7 @@ meeting_assistant/
 | `meeting_items` | 將 D/R/A 逐項保存成 JSON 索引，保留證據時間、逐項複核／核准狀態、複核者與備註。 |
 | `meeting_evidence` | 保存補充附件檔名、路徑、SHA-256、分析內容與對應 revision。 |
 | `meeting_evidence_items` | 將補充佐證關聯到一或多個 D/R/A 項目；關聯可與文件版本、附件雜湊一併稽核。 |
+| `meeting_confirmation_tasks` | schema v6 的人工確認佇列；保存缺少的負責人、期限或時間碼及 resolved/waived 證據。 |
 | `meeting_fts` | SQLite FTS5 虛擬表，索引 `title`、`source_audio`、`summary`、`output_path`，支援快速的欄位搜尋。 |
 | `meeting_content_fts` | SQLite FTS5 虛擬表，索引每筆會議的完整 Markdown 內容，支援逐字稿搜尋。 |
 | `meeting_revisions` | 保存人工修訂摘要或逐字稿前的完整舊版 Markdown，供回溯 AI 原稿與修改歷史。 |
@@ -155,7 +156,7 @@ Web 歷史頁可從 `/meetings/{id}/source-media` 串流保留的原始錄音或
 
 補充佐證經 `POST /meetings/{id}/evidence` 上傳後，Gemini 的同步 SDK 呼叫會放入工作執行緒，避免阻塞 FastAPI event loop。成功時附件、SHA-256、分析內容、D/R/A 關聯、revision 與全文索引一致更新；失敗時尚未入庫的附件會清理。`PUT /meetings/{id}/items/{item_key}/review` 提供逐項複核／核准，逐項狀態會回捲整份文件，但不會自動取代正式文件核准。
 
-`GET /livez` 是不碰依賴的程序探針；`GET /readyz` 檢查 schema v5 與全域 worker lease。`GET /health` 再加入載入 commit、工作區 commit、程式碼指紋、SQLite quick check、ffmpeg/ffprobe、本機與異地備份健康度。`GET /metrics` 額外提供 queue/task/status、attempt 分布、lease 到期、任務 p50/p90/p95、失敗分類與文件審查狀態。若服務仍載入舊程式碼，`matches_workspace=false` 且健康狀態降級。
+`GET /livez` 是不碰依賴的程序探針；`GET /readyz` 檢查 schema v6 與全域 worker lease。`GET /health` 再加入載入 commit、工作區 commit、程式碼指紋、SQLite quick check、ffmpeg/ffprobe、本機與異地備份健康度及 DB／媒體／備份／可用磁碟容量門檻。大型快照驗證以檔案 identity 快取，並以排除 runtime lease/FTS cache 的 durable record-state 指紋判斷能否重用；ZIP/SQLite 可讀但 manifest 有缺檔時明確標示復原不完整並降級。
 
 ### 5. 治理與維運模組邊界
 
@@ -165,20 +166,23 @@ Web 歷史頁可從 `/meetings/{id}/source-media` 串流保留的原始錄音或
 | `backend.review_workflow` | 文件與 D/R/A 逐項狀態轉換、回捲規則 | 不處理 HTTP 或畫面 |
 | `backend.evidence` | 附件複製、分析與提交 | 未完成資料庫交易前不得留下孤兒附件 |
 | `backend.maintenance` | 一致性備份、記錄快照、驗證與安全還原 | 還原不得覆寫非空目錄 |
-| `backend.database` | schema、交易、查詢與相容 wrapper | 不承擔路由授權判斷 |
+| `backend.confirmation_queue` / `confirmation_api` | 歷史 D/R/A 回填後的缺漏確認、解決與 UI API | 不猜測負責人、期限或時間碼 |
+| `backend.structured_minutes` | 規則式解析既有標準 Markdown D/R/A | 只回填原文存在的欄位 |
+| `backend.capacity` | DB、媒體、備份與磁碟容量健康門檻 | 不做自動刪除 |
+| `backend.database` | schema、交易與查詢 | 不反向依賴 review domain 或路由授權 |
 | `backend.schema_migrations` | 可回滾 schema 升級、FK/CHECK 與孤兒事件封存 | 不反向依賴 API 或 database facade |
 | `backend.access_tokens` | 短效 bootstrap 與簽章 session capability | URL/cookie 不保存原始 API key |
 
 營運查詢都有明確上限：任務延遲與錯誤分類最多讀取最近 1,000 筆，API 清單維持分頁上限；若長期工作量超過單機 SQLite／單 worker 的容量，再以觀測到的 p95 與 queue depth 作為升級外部佇列或 PostgreSQL 的依據。
 
-### 6. P0～P3 驗收矩陣（2026/07/29）
+### 6. P0～P3 驗收矩陣（2026/07/30）
 
 | 優先級 | 驗收範圍 | 完成證據 |
 | --- | --- | --- |
-| **P0** | 資料完整性、任務血緣、備份一致性、權限邊界 | schema v5 FK/CHECK、原子 meeting/job commit、generation fencing、短效登入、可信代理 RBAC、全 mutation audit |
-| **P1** | 結構化逐項審查與佐證鏈 | D/R/A 逐項 API/UI、狀態回捲、`meeting_evidence_items`、逐項稽核紀錄 |
-| **P2** | 可觀測性與還原能力 | live/readiness 分離、queue/attempt/lease 指標；v2 DB＋Markdown＋附件＋原始媒體快照、異地複寫與可執行 runtime 還原 |
-| **P3** | 維護邊界與容量限制 | review/auth/maintenance/evidence/migration 分層、架構行數與依賴守門、Python 3.14 hash lock、Windows/Linux CI、依賴弱點掃描 |
+| **P0** | 資料完整性、任務血緣、備份一致性、權限邊界 | schema v6 FK/CHECK、原子 meeting/job commit、generation fencing、本機/API session RBAC、全 mutation audit |
+| **P1** | 結構化逐項審查與佐證鏈 | 28 筆歷史 D/R/A 回填、逐項 API/UI、`meeting_confirmation_tasks`、`meeting_evidence_items` |
+| **P2** | 可觀測性與還原能力 | live/readiness 分離、queue/attempt/lease 指標；本機＋異地 v2 快照、缺檔降級語意、可執行 runtime 還原 |
+| **P3** | 維護邊界與容量限制 | review/database 循環移除、全 backend cycle guard、函式／行數守門、容量門檻、bounded restart、依賴弱點掃描 |
 
 ---
 
@@ -240,5 +244,5 @@ sequenceDiagram
 
 ---
 
-*AI 語音會議助理 · 系統架構文件 v2.3 · 2026/07/29*
+*AI 語音會議助理 · 系統架構文件 v2.4 · 2026/07/30*
     WEB --> FASTAPI

@@ -1,18 +1,21 @@
-"""Disabled-by-default account, role, and audit helpers.
-
-The current product still uses local-network/API-key access.  This module keeps
-the future RBAC surface explicit without changing runtime behavior until
-MEETING_AUTH_ENABLED is set.
-"""
+"""Feature-gated persisted account, role, and audit helpers."""
 
 from __future__ import annotations
 
+import hmac
 import ipaddress
 import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from fastapi import HTTPException, Request
+
+from backend.access_tokens import validate_access_token
+from backend.security_policy import (
+    ROLE_PERMISSIONS,
+    normalize_role,
+    permission_for_request,
+)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -25,6 +28,14 @@ def _env_flag(name: str, default: bool = False) -> bool:
 AUTH_FEATURE_ENABLED = _env_flag("MEETING_AUTH_ENABLED", default=False)
 AUTH_USER_HEADER = os.getenv("MEETING_AUTH_USER_HEADER", "X-Meeting-User").strip() or "X-Meeting-User"
 AUTH_DEFAULT_ROLE = os.getenv("MEETING_AUTH_DEFAULT_ROLE", "viewer").strip() or "viewer"
+AUTH_LOCAL_SESSION_USER = (
+    os.getenv(
+        "MEETING_AUTH_LOCAL_SESSION_USER",
+        "local-admin@meeting-assistant.local",
+    ).strip().lower()
+)
+AUTH_API_KEY = os.getenv("APP_API_KEY", "").strip()
+AUTH_API_KEY_COOKIE_NAME = "meeting_assistant_api_key"
 AUTH_TRUSTED_PROXY_NETWORKS = tuple(
     ipaddress.ip_network(value.strip())
     for value in os.getenv(
@@ -33,40 +44,6 @@ AUTH_TRUSTED_PROXY_NETWORKS = tuple(
     ).split(",")
     if value.strip()
 )
-
-ROLE_PERMISSIONS: dict[str, set[str]] = {
-    "admin": {
-        "meeting:read",
-        "meeting:write",
-        "meeting:delete",
-        "meeting:rerun",
-        "meeting:export",
-        "job:read",
-        "job:manage",
-        "user:manage",
-        "audit:read",
-    },
-    "editor": {
-        "meeting:read",
-        "meeting:write",
-        "meeting:rerun",
-        "meeting:export",
-        "job:read",
-        "job:manage",
-    },
-    "viewer": {
-        "meeting:read",
-        "meeting:export",
-        "job:read",
-    },
-}
-
-
-def normalize_role(role: Optional[str], *, default: Optional[str] = None) -> str:
-    normalized = str(role or default or "").strip().lower()
-    if normalized not in ROLE_PERMISSIONS:
-        raise ValueError(f"unknown role: {normalized or '<empty>'}")
-    return normalized
 
 
 @dataclass(frozen=True)
@@ -97,6 +74,7 @@ def auth_config_payload() -> dict[str, Any]:
     return {
         "enabled": AUTH_FEATURE_ENABLED,
         "user_header": AUTH_USER_HEADER,
+        "local_session_user": AUTH_LOCAL_SESSION_USER,
         "default_role": AUTH_DEFAULT_ROLE,
         "trusted_proxy_networks": [
             str(network) for network in AUTH_TRUSTED_PROXY_NETWORKS
@@ -108,36 +86,71 @@ def auth_config_payload() -> dict[str, Any]:
     }
 
 
-def actor_from_request(request: Request) -> AuthActor:
-    """Build an actor from the configured user header when RBAC is enabled.
+def _request_has_local_access_credential(request: Request) -> bool:
+    """Accept loopback or a valid API/bootstrap/session credential."""
+    client_host = request.client.host if request.client else ""
+    try:
+        if ipaddress.ip_address(str(client_host or "").strip()).is_loopback:
+            return True
+    except ValueError:
+        pass
+    if not AUTH_API_KEY:
+        return False
+    supplied = (
+        request.headers.get("x-api-key")
+        or request.query_params.get("api_key")
+    )
+    if supplied and hmac.compare_digest(str(supplied), AUTH_API_KEY):
+        return True
+    if validate_access_token(
+        request.query_params.get("bootstrap_token"),
+        AUTH_API_KEY,
+        "bootstrap",
+    ):
+        return True
+    return validate_access_token(
+        request.cookies.get(AUTH_API_KEY_COOKIE_NAME),
+        AUTH_API_KEY,
+        "session",
+    )
 
-    This is intentionally not wired into request enforcement while the feature
-    flag is false, preserving the current local-network/API-key behavior.
-    Roles are loaded from app_users so clients cannot grant themselves access
-    by sending a role header.
+
+def actor_from_request(request: Request) -> AuthActor:
+    """Build an actor from a trusted header or local/API session.
+
+    Roles are always loaded from app_users so clients cannot grant themselves
+    access by sending a role header.
     """
     if not AUTH_FEATURE_ENABLED:
         return DISABLED_LOCAL_ACTOR
 
-    client_host = request.client.host if request.client else ""
-    try:
-        client_address = ipaddress.ip_address(str(client_host or "").strip())
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=401,
-            detail="無法驗證身分標頭來源。",
-        ) from exc
-    if not any(
-        client_address in network for network in AUTH_TRUSTED_PROXY_NETWORKS
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="使用者身分標頭只能由可信任反向代理提供。",
-        )
-
-    email = (request.headers.get(AUTH_USER_HEADER) or "").strip().lower()
-    if not email:
-        raise HTTPException(status_code=401, detail="缺少使用者身分標頭。")
+    header_email = (request.headers.get(AUTH_USER_HEADER) or "").strip().lower()
+    if header_email:
+        client_host = request.client.host if request.client else ""
+        try:
+            client_address = ipaddress.ip_address(str(client_host or "").strip())
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=401,
+                detail="無法驗證身分標頭來源。",
+            ) from exc
+        if not any(
+            client_address in network for network in AUTH_TRUSTED_PROXY_NETWORKS
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="使用者身分標頭只能由可信任反向代理提供。",
+            )
+        email = header_email
+    else:
+        if not AUTH_LOCAL_SESSION_USER:
+            raise HTTPException(status_code=401, detail="缺少使用者身分標頭。")
+        if not _request_has_local_access_credential(request):
+            raise HTTPException(
+                status_code=401,
+                detail="缺少有效的本機或 API session 身分憑證。",
+            )
+        email = AUTH_LOCAL_SESSION_USER
 
     from backend.database import get_app_user_by_email
 
@@ -165,70 +178,8 @@ def actor_from_request(request: Request) -> AuthActor:
 
 
 def require_permission(actor: AuthActor, permission: str) -> None:
-    """Future RBAC guard. No-op for the disabled local actor."""
+    """Enforce one permission; no-op only while the feature flag is disabled."""
     if not actor.enabled:
         return
     if not actor.can(permission):
         raise HTTPException(status_code=403, detail=f"角色 {actor.role} 缺少權限：{permission}")
-
-
-def permission_for_request(method: str, path: str) -> Optional[str]:
-    """Return the least privilege required for one HTTP operation.
-
-    Public application-shell and webhook paths return ``None``.  Keeping this
-    policy in one place prevents newly added business routes from accidentally
-    bypassing RBAC when the feature flag is enabled.
-    """
-    verb = str(method or "GET").upper()
-    route = "/" + str(path or "").lstrip("/")
-    if (
-        route in {
-            "/",
-            "/history",
-            "/favicon.ico",
-            "/health",
-            "/livez",
-            "/readyz",
-            "/config",
-            "/line-webhook",
-        }
-        or route.startswith(("/static/", "/docs", "/redoc", "/openapi.json"))
-    ):
-        return None
-
-    if route.startswith("/admin/users"):
-        return "user:manage"
-    if route.startswith("/admin/audit-logs"):
-        return "audit:read"
-    if route == "/metrics":
-        return "job:read"
-    if route in {"/upload-media", "/upload-audio"}:
-        return "meeting:write"
-    if route.startswith("/status/"):
-        return "job:read"
-    if route == "/jobs" or route.startswith("/jobs/"):
-        return "job:read" if verb in {"GET", "HEAD"} else "job:manage"
-
-    if route.startswith("/source-media"):
-        if verb in {"GET", "HEAD"}:
-            return "meeting:read"
-        if verb == "DELETE" or route.endswith("/archive-unlinked"):
-            return "meeting:delete"
-        return "meeting:write"
-
-    if route == "/meetings" or route.startswith("/meetings/"):
-        if verb in {"GET", "HEAD"}:
-            return "meeting:export" if "/export/" in route else "meeting:read"
-        if verb == "DELETE":
-            return "meeting:delete"
-        if (
-            route.endswith("/rerun")
-            or "/quality/" in route
-            or route == "/meetings/quality/recheck-all"
-        ):
-            return "meeting:rerun"
-        return "meeting:write"
-
-    # Unknown API routes still pass through FastAPI and normally become 404.
-    # Default-deny only affects known business namespaces above.
-    return None

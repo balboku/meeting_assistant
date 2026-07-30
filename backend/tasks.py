@@ -45,6 +45,7 @@ from backend.database import (
     save_meeting
 )
 from backend.exporter import content_with_quality_review_note
+from backend.recovery_policy import SEGMENT_RECOVERY_SPLIT_SECONDS, TRANSCRIPT_RECOVERY_MAX_DEPTH, next_recovery_chunk_seconds as _next_recovery_chunk_seconds, next_smaller_recovery_chunk_seconds as _next_smaller_recovery_chunk_seconds, recovery_subsegment_path, strictly_shrinking_export_bounds
 
 # 載入 .env 環境變數
 load_dotenv(dotenv_path=ROOT_DIR / ".env")
@@ -329,19 +330,9 @@ SEGMENT_TIMESTAMP_BOUNDARY_TOLERANCE_SECONDS = max(
     0,
     int(os.getenv("SEGMENT_TIMESTAMP_BOUNDARY_TOLERANCE_SECONDS", "5")),
 )
-TRANSCRIPT_CROSS_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS = max(
-    SEGMENT_OVERLAP_SECONDS + 3,
-    int(os.getenv("TRANSCRIPT_CROSS_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS", "10")),
-)
-TRANSCRIPT_INTRA_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS = min(
-    120,
-    max(
-        0,
-        int(os.getenv("TRANSCRIPT_INTRA_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS", "15")),
-    ),
-)
+TRANSCRIPT_CROSS_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS = max(SEGMENT_OVERLAP_SECONDS + 3, int(os.getenv("TRANSCRIPT_CROSS_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS", "10")))
+TRANSCRIPT_INTRA_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS = min(120, max(0, int(os.getenv("TRANSCRIPT_INTRA_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS", "15"))))
 TRANSCRIPT_TIMESTAMP_ORDER_ISSUE_MARKER = "分段時間序倒退"
-SEGMENT_RECOVERY_SPLIT_SECONDS = (300, 180, 120, 60, 30, 15, 10, 5)
 TRANSCRIPT_SECTION_HEADING = "## 📝 四、完整逐字稿 (Verbatim Transcript)"
 TRANSCRIPT_SECTION_PATTERN = re.compile(
     r"^##\s*[^\n]*(?:Verbatim Transcript|完整逐字稿|逐字稿|蝔)[^\n]*\n",
@@ -6105,10 +6096,7 @@ def _recovery_subsegment_boundaries(audio, chunk_ms: int) -> list[int]:
 
 
 def _recovery_subsegment_overlap_seconds(chunk_seconds: int) -> int:
-    """Use extra boundary context only for the shortest severe recovery chunks."""
-    if chunk_seconds <= RECOVERY_SHORT_SUBSEGMENT_MAX_SECONDS:
-        return RECOVERY_SHORT_SUBSEGMENT_OVERLAP_SECONDS
-    return RECOVERY_SUBSEGMENT_OVERLAP_SECONDS
+    return RECOVERY_SHORT_SUBSEGMENT_OVERLAP_SECONDS if chunk_seconds <= RECOVERY_SHORT_SUBSEGMENT_MAX_SECONDS else RECOVERY_SUBSEGMENT_OVERLAP_SECONDS
 
 
 def _split_audio_to_subsegments(audio_path: Path, chunk_seconds: int) -> list[tuple[Path, int, int]]:
@@ -6123,7 +6111,11 @@ def _split_audio_to_subsegments(audio_path: Path, chunk_seconds: int) -> list[tu
     if ffmpeg_path and Path(ffmpeg_path).is_file():
         AudioSegment.converter = ffmpeg_path
 
-    audio = AudioSegment.from_file(str(audio_path))
+    with audio_path.open("rb") as source_handle:
+        audio = AudioSegment.from_file(
+            source_handle,
+            format=audio_path.suffix.lstrip(".") or None,
+        )
     duration_ms = len(audio)
     chunk_ms = max(1, chunk_seconds) * 1000
     if duration_ms <= chunk_ms:
@@ -6138,9 +6130,30 @@ def _split_audio_to_subsegments(audio_path: Path, chunk_seconds: int) -> list[tu
     for i, (start_ms, end_ms) in enumerate(zip(boundaries, boundaries[1:])):
         export_start_ms = max(0, start_ms - overlap_ms) if i else start_ms
         export_end_ms = min(duration_ms, end_ms + overlap_ms) if i < len(boundaries) - 2 else end_ms
+        # Every recovery child must be shorter than its parent.
+        export_start_ms, export_end_ms = strictly_shrinking_export_bounds(
+            duration_ms,
+            start_ms,
+            end_ms,
+            export_start_ms,
+            export_end_ms,
+        )
         chunk = audio[export_start_ms:export_end_ms]
-        sub_path = audio_path.parent / f"_sub_{audio_path.stem}_{chunk_seconds}s_{i:03d}.{export_format}"
-        chunk.export(str(sub_path), format=export_format, parameters=export_parameters)
+        sub_path = recovery_subsegment_path(
+            audio_path,
+            chunk_seconds,
+            i,
+            export_start_ms,
+            export_end_ms,
+            export_format,
+        )
+        export_handle = chunk.export(
+            str(sub_path),
+            format=export_format,
+            parameters=export_parameters,
+        )
+        if export_handle is not None:
+            export_handle.close()
         start_seconds = max(0, int(round(export_start_ms / 1000)))
         end_seconds = max(start_seconds + 1, int(round(export_end_ms / 1000)))
         subsegments.append((sub_path, start_seconds, end_seconds))
@@ -6153,28 +6166,6 @@ def _split_audio_to_subsegments(audio_path: Path, chunk_seconds: int) -> list[tu
         overlap_seconds,
     )
     return subsegments
-
-
-def _next_recovery_chunk_seconds(
-    duration_seconds: int,
-    preferred_chunk_seconds: Optional[int] = None,
-) -> Optional[int]:
-    if preferred_chunk_seconds is not None:
-        preferred_chunk_seconds = max(1, int(preferred_chunk_seconds))
-    for chunk_seconds in SEGMENT_RECOVERY_SPLIT_SECONDS:
-        if preferred_chunk_seconds is not None and chunk_seconds > preferred_chunk_seconds:
-            continue
-        if chunk_seconds < duration_seconds:
-            return chunk_seconds
-    return None
-
-
-def _next_smaller_recovery_chunk_seconds(chunk_seconds: int) -> Optional[int]:
-    """Return the next stable retry size below the pass that just failed."""
-    for candidate in SEGMENT_RECOVERY_SPLIT_SECONDS:
-        if candidate < chunk_seconds:
-            return candidate
-    return None
 
 
 def _transcribe_segment_with_recovery(
@@ -6202,7 +6193,10 @@ def _transcribe_segment_with_recovery(
     recovery_plan_context: Optional[dict[str, Any]] = None,
     transient_fallback_models: Optional[list[str]] = None,
     response_models: Optional[list[str]] = None,
+    recovery_depth: int = 0,
 ) -> str:
+    if recovery_depth >= TRANSCRIPT_RECOVERY_MAX_DEPTH:
+        raise RuntimeError(f"補救遞迴已達安全上限（{TRANSCRIPT_RECOVERY_MAX_DEPTH} 層）")
     quality_error: Optional[RuntimeError] = None
     if not direct_recovery:
         transcript = _transcribe_segment(
@@ -6664,6 +6658,7 @@ def _transcribe_segment_with_recovery(
                 recovery_cache_source_sha256=recovery_cache_source_sha256,
                 transient_fallback_models=transient_fallback_models,
                 response_models=child_response_models,
+                recovery_depth=recovery_depth + 1,
             )
             if response_models is not None:
                 response_models.extend(child_response_models)
