@@ -1,6 +1,6 @@
 # 🎙️ AI 語音會議助理 — 現行系統架構文件 v2.7
 
-> **文件版本**：2.7.0
+> **文件版本**：2.7.1
 > **更新日期**：2026/07/30
 > **現況**：FastAPI、SQLite 持久化佇列、Web/GUI、多段轉錄、品質閘門、人工複核與全文搜尋均為現行功能；LINE webhook 與 ngrok 自動 tunnel 已移除。
 
@@ -160,7 +160,7 @@ Web 歷史頁可從 `/meetings/{id}/source-media` 串流保留的原始錄音或
 
 補充佐證經 `POST /meetings/{id}/evidence` 上傳後，Gemini 的同步 SDK 呼叫會放入工作執行緒，避免阻塞 FastAPI event loop。成功時附件、SHA-256、分析內容、D/R/A 關聯、revision 與全文索引一致更新；失敗時尚未入庫的附件會清理。`PUT /meetings/{id}/items/{item_key}/review` 提供逐項複核／核准，逐項狀態會回捲整份文件，但不會自動取代正式文件核准。
 
-`GET /livez` 是不碰依賴的程序探針；`GET /readyz` 檢查 schema v6 與全域 worker lease。`GET /health` 再加入載入 commit、工作區 commit、程式碼指紋、SQLite quick check、ffmpeg/ffprobe、本機與異地備份健康度及 DB／媒體／備份／可用磁碟容量門檻。大型快照驗證以檔案 identity 快取，並以排除 runtime lease/FTS cache 的 durable record-state 指紋判斷能否重用；ZIP/SQLite 可讀但 manifest 有缺檔時明確標示復原不完整並降級。
+`GET /livez` 是不碰依賴的程序探針；`GET /readyz` 檢查 schema v6 與全域 worker lease。`GET /health` 再加入載入 commit、工作區 commit、程式碼指紋、SQLite quick check、ffmpeg/ffprobe、本機與異地備份健康度及 DB／媒體／備份／可用磁碟容量門檻。大型快照驗證以檔案 identity 快取，並以排除 runtime lease/FTS cache 的 durable record-state 指紋判斷能否重用；備份採 7 天且狀態有變更才新增、各保留 4 份，超齡但狀態未變的驗證備份仍為健康。ZIP/SQLite 可讀但 manifest 有缺檔時明確標示復原不完整並降級；手動強制備份與 schema migration 前備份不受週期限制。
 
 ### 5. 治理與維運模組邊界
 

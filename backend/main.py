@@ -149,8 +149,7 @@ from backend.cleanup import (
 )
 from backend.maintenance import (
     cleanup_source_media_archives,
-    latest_backup_health,
-    latest_record_snapshot_health,
+    runtime_backup_health,
     run_startup_health_checks,
     run_startup_maintenance,
 )
@@ -247,7 +246,7 @@ def _nonnegative_int_env(name: str, default: int) -> int:
 
 
 JOB_RETENTION_DAYS = int(os.getenv("JOB_RETENTION_DAYS", "30"))
-DB_BACKUP_KEEP = int(os.getenv("DB_BACKUP_KEEP", "5"))
+DB_BACKUP_KEEP = int(os.getenv("DB_BACKUP_KEEP", "4"))
 SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS = _nonnegative_int_env("SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS", 90)
 
 
@@ -258,9 +257,9 @@ def _positive_int_env(name: str, default: int) -> int:
         return default
 
 
-FULL_SNAPSHOT_MIN_INTERVAL_HOURS = _positive_int_env(
-    "FULL_SNAPSHOT_MIN_INTERVAL_HOURS",
-    24,
+BACKUP_MIN_INTERVAL_HOURS = _positive_int_env(
+    "BACKUP_MIN_INTERVAL_HOURS",
+    _positive_int_env("FULL_SNAPSHOT_MIN_INTERVAL_HOURS", 168),
 )
 
 
@@ -325,9 +324,7 @@ async def lifespan(app: FastAPI):
                 previous_minutes_dir=PREVIOUS_MINUTES_DIR,
                 offsite_backup_dir=OFFSITE_BACKUP_DIR,
                 backup_keep=DB_BACKUP_KEEP,
-                full_snapshot_min_interval_hours=(
-                    FULL_SNAPSHOT_MIN_INTERVAL_HOURS
-                ),
+                backup_min_interval_hours=BACKUP_MIN_INTERVAL_HOURS,
             )
             archive_cleanup = cleanup_source_media_archives(
                 BACKUP_DIR / "source_media_deleted",
@@ -809,7 +806,7 @@ async def health_check():
             "detail": f"schema={schema_version}；expected={SCHEMA_VERSION}",
         },
     ])
-    backup_health = latest_backup_health(BACKUP_DIR)
+    backup_health, offsite_health = runtime_backup_health(DB_PATH, BACKUP_DIR, SOURCE_AUDIO_DIR, PREVIOUS_MINUTES_DIR, OFFSITE_BACKUP_DIR, max_age_hours=BACKUP_MIN_INTERVAL_HOURS + 24)
     checks.append({
         "name": "database_backup",
         "status": "ok" if backup_health["ok"] else "error",
@@ -817,7 +814,6 @@ async def health_check():
             f"{backup_health.get('detail')}; age_hours={backup_health.get('age_hours')}"
         ),
     })
-    offsite_health = latest_record_snapshot_health(OFFSITE_BACKUP_DIR)
     if OFFSITE_BACKUP_DIR is not None:
         checks.append({
             "name": "offsite_record_snapshot",
@@ -1571,6 +1567,7 @@ def _storage_metrics() -> StorageMetrics:
 async def metrics():
     """回傳本機維運用的任務與會議統計。"""
     by_status = count_jobs_by_status()
+    backup_health, offsite_health = runtime_backup_health(DB_PATH, BACKUP_DIR, SOURCE_AUDIO_DIR, PREVIOUS_MINUTES_DIR, OFFSITE_BACKUP_DIR, max_age_hours=BACKUP_MIN_INTERVAL_HOURS + 24)
     return MetricsResponse(
         generated_at=datetime.now(),
         jobs=JobMetrics(
@@ -1591,8 +1588,8 @@ async def metrics():
             "quality_other": count_meetings(quality_type="other"),
         },
         meeting_review_statuses=count_meetings_by_review_status(),
-        backup=latest_backup_health(BACKUP_DIR),
-        offsite_backup=latest_record_snapshot_health(OFFSITE_BACKUP_DIR),
+        backup=backup_health,
+        offsite_backup=offsite_health,
         queue=queue_operational_metrics(),
         worker=_worker_readiness_snapshot(),
         storage=_storage_metrics(),

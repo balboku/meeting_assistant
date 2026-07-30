@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -10,7 +12,9 @@ from backend import database
 from backend.maintenance import (
     backup_database,
     create_record_snapshot,
+    current_backup_state,
     directory_inventory_fingerprint,
+    latest_backup_health,
     latest_record_snapshot_health,
     record_state_fingerprint,
     replicate_record_snapshot,
@@ -133,58 +137,139 @@ class MaintenanceHardeningTests(unittest.TestCase):
             self.assertEqual(second.stat().st_mtime_ns, first_mtime)
             self.assertTrue(latest_record_snapshot_health(offsite_dir)["ok"])
 
-    def test_startup_rebuilds_fresh_snapshot_when_record_counts_changed(self) -> None:
+    def test_recent_changed_state_waits_for_weekly_backup_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            backup = root / "meetings_backup.db"
-            conn = sqlite3.connect(backup)
-            try:
-                conn.execute("CREATE TABLE meetings (id INTEGER PRIMARY KEY)")
-                conn.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY)")
-                conn.executemany(
-                    "INSERT INTO meetings(id) VALUES (?)",
-                    [(1,), (2,)],
+            db_path = root / "meetings.db"
+            backup_dir = root / "backups"
+            with mock.patch.object(database, "DB_PATH", db_path):
+                database.init_db()
+                meeting_id = database.save_meeting(
+                    title="before",
+                    date="2026/07/30",
+                    source_audio="",
+                    output_path="",
                 )
-                conn.executemany(
-                    "INSERT INTO jobs(id) VALUES (?)",
-                    [(1,), (2,), (3,)],
-                )
-                conn.commit()
-            finally:
-                conn.close()
-            replacement = root / "meeting_records_new.zip"
-            replacement.write_bytes(b"new")
-
-            with mock.patch(
-                "backend.maintenance.backup_database",
-                return_value=backup,
-            ), mock.patch(
-                "backend.maintenance.latest_record_snapshot_health",
-                return_value={
-                    "container_valid": True,
-                    "path": str(root / "meeting_records_old.zip"),
-                    "source_media": 1,
-                    "meetings": 1,
-                    "jobs": 3,
-                },
-            ), mock.patch(
-                "backend.maintenance.create_record_snapshot",
-                return_value=replacement,
-            ) as create_snapshot, mock.patch(
-                "backend.maintenance.verify_record_snapshot",
-                return_value={"ok": True},
-            ), mock.patch(
-                "backend.maintenance.maintain_database",
-                return_value={"ok": True},
-            ):
+                backup = backup_database(db_path, backup_dir)
+                snapshot = create_record_snapshot(backup, backup_dir)
+                with database.get_db() as conn:
+                    conn.execute(
+                        "UPDATE meetings SET title='after' WHERE id=?",
+                        (meeting_id,),
+                    )
                 result = run_startup_maintenance(
-                    db_path=root / "meetings.db",
-                    backup_dir=root / "backups",
+                    db_path,
+                    backup_dir,
+                    backup_min_interval_hours=168,
                 )
 
+            self.assertFalse(result["backup_created"])
+            self.assertTrue(result["snapshot_reused"])
+            self.assertTrue(result["data_changed"])
+            self.assertFalse(result["interval_due"])
+            self.assertEqual(Path(result["backup_path"]), backup)
+            self.assertEqual(Path(result["snapshot_path"]), snapshot)
+
+    def test_old_changed_state_creates_weekly_backup_and_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            db_path = root / "meetings.db"
+            backup_dir = root / "backups"
+            old = datetime.now() - timedelta(days=8)
+            with mock.patch.object(database, "DB_PATH", db_path):
+                database.init_db()
+                meeting_id = database.save_meeting(
+                    title="before",
+                    date="2026/07/30",
+                    source_audio="",
+                    output_path="",
+                )
+                backup = backup_database(db_path, backup_dir, now=old)
+                snapshot = create_record_snapshot(
+                    backup,
+                    backup_dir,
+                    now=old,
+                )
+                for path in (backup, snapshot):
+                    os.utime(path, (old.timestamp(), old.timestamp()))
+                with database.get_db() as conn:
+                    conn.execute(
+                        "UPDATE meetings SET title='after' WHERE id=?",
+                        (meeting_id,),
+                    )
+                result = run_startup_maintenance(
+                    db_path,
+                    backup_dir,
+                    backup_min_interval_hours=168,
+                )
+
+            self.assertTrue(result["backup_created"])
             self.assertFalse(result["snapshot_reused"])
-            self.assertEqual(result["snapshot_path"], str(replacement))
-            create_snapshot.assert_called_once()
+            self.assertTrue(result["data_changed"])
+            self.assertTrue(result["interval_due"])
+            self.assertNotEqual(Path(result["backup_path"]), backup)
+            self.assertNotEqual(Path(result["snapshot_path"]), snapshot)
+
+    def test_stale_unchanged_backups_remain_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            db_path = root / "meetings.db"
+            backup_dir = root / "backups"
+            old = datetime.now() - timedelta(days=9)
+            with mock.patch.object(database, "DB_PATH", db_path):
+                database.init_db()
+                backup = backup_database(db_path, backup_dir, now=old)
+                snapshot = create_record_snapshot(backup, backup_dir, now=old)
+            for path in (backup, snapshot):
+                os.utime(path, (old.timestamp(), old.timestamp()))
+            state = current_backup_state(db_path)
+
+            database_health = latest_backup_health(
+                backup_dir,
+                max_age_hours=192,
+                current_state=state,
+            )
+            snapshot_health = latest_record_snapshot_health(
+                backup_dir,
+                max_age_hours=192,
+                current_state=state,
+            )
+
+            self.assertFalse(database_health["fresh"])
+            self.assertTrue(database_health["state_current"])
+            self.assertTrue(database_health["ok"])
+            self.assertFalse(snapshot_health["fresh"])
+            self.assertTrue(snapshot_health["state_current"])
+            self.assertTrue(snapshot_health["ok"])
+
+    def test_force_backup_ignores_recent_unchanged_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            db_path = root / "meetings.db"
+            backup_dir = root / "backups"
+            with mock.patch.object(database, "DB_PATH", db_path):
+                database.init_db()
+                backup = backup_database(
+                    db_path,
+                    backup_dir,
+                    now=datetime(2025, 1, 1),
+                )
+                snapshot = create_record_snapshot(
+                    backup,
+                    backup_dir,
+                    now=datetime(2025, 1, 1),
+                )
+                result = run_startup_maintenance(
+                    db_path,
+                    backup_dir,
+                    force_backup=True,
+                )
+
+            self.assertTrue(result["backup_created"])
+            self.assertFalse(result["snapshot_reused"])
+            self.assertTrue(result["force_backup"])
+            self.assertNotEqual(Path(result["backup_path"]), backup)
+            self.assertNotEqual(Path(result["snapshot_path"]), snapshot)
 
     def test_record_fingerprint_tracks_content_but_not_runtime_lease(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -133,6 +133,7 @@ def verify_database_backup(backup_path: Path) -> dict[str, object]:
             "detail": "找不到備份檔案",
             "meetings": None,
             "jobs": None,
+            "record_state_sha256": None,
         }
 
     # immutable=1 keeps verification read-only even on Windows and prevents
@@ -159,6 +160,7 @@ def verify_database_backup(backup_path: Path) -> dict[str, object]:
                 if "jobs" in tables
                 else 0
             )
+            record_state_sha256 = _record_state_fingerprint_from_connection(conn)
         finally:
             conn.close()
     except (OSError, sqlite3.Error) as exc:
@@ -168,6 +170,7 @@ def verify_database_backup(backup_path: Path) -> dict[str, object]:
             "detail": str(exc),
             "meetings": None,
             "jobs": None,
+            "record_state_sha256": None,
         }
     return {
         "ok": integrity.lower() == "ok",
@@ -175,50 +178,61 @@ def verify_database_backup(backup_path: Path) -> dict[str, object]:
         "detail": integrity,
         "meetings": meetings,
         "jobs": jobs,
+        "record_state_sha256": record_state_sha256,
     }
 
 
-def record_state_fingerprint(database_path: Path) -> str:
+def _record_state_fingerprint_from_connection(conn: sqlite3.Connection) -> str:
     """Hash durable record state while excluding runtime leases and FTS caches."""
-    path = Path(database_path)
     digest = hashlib.sha256()
-    uri = f"{path.resolve().as_uri()}?mode=ro&immutable=1"
-    conn = sqlite3.connect(uri, uri=True)
-    try:
-        tables = {
-            str(row[0])
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-        for table in _RECORD_STATE_TABLES:
-            if table not in tables:
-                continue
-            columns = [
-                str(row[1])
-                for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
-            ]
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    for table in _RECORD_STATE_TABLES:
+        if table not in tables:
+            continue
+        columns = [
+            str(row[1])
+            for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+        ]
+        digest.update(
+            json.dumps(
+                [table, columns],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        for row in conn.execute(f'SELECT * FROM "{table}" ORDER BY rowid'):
             digest.update(
                 json.dumps(
-                    [table, columns],
+                    list(row),
                     ensure_ascii=False,
                     separators=(",", ":"),
+                    default=lambda value: {
+                        "__bytes__": bytes(value).hex()
+                    },
                 ).encode("utf-8")
             )
-            for row in conn.execute(f'SELECT * FROM "{table}" ORDER BY rowid'):
-                digest.update(
-                    json.dumps(
-                        list(row),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                        default=lambda value: {
-                            "__bytes__": bytes(value).hex()
-                        },
-                    ).encode("utf-8")
-                )
+    return digest.hexdigest()
+
+
+def record_state_fingerprint(
+    database_path: Path,
+    *,
+    immutable: bool = True,
+) -> str:
+    """Hash durable record state; live reads include committed WAL content."""
+    path = Path(database_path)
+    query = "mode=ro&immutable=1" if immutable else "mode=ro"
+    uri = f"{path.resolve().as_uri()}?{query}"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        return _record_state_fingerprint_from_connection(conn)
     finally:
         conn.close()
-    return digest.hexdigest()
 
 
 def directory_inventory_fingerprint(root: Path | None) -> str | None:
@@ -251,11 +265,32 @@ def directory_inventory_fingerprint(root: Path | None) -> str | None:
     return digest.hexdigest()
 
 
+def current_backup_state(
+    db_path: Path,
+    source_media_dir: Path | None = None,
+    previous_minutes_dir: Path | None = None,
+) -> dict[str, str | None]:
+    """Return the durable DB and file-inventory state used by backup policy."""
+    return {
+        "record_state_sha256": record_state_fingerprint(
+            db_path,
+            immutable=False,
+        ),
+        "source_media_inventory_sha256": directory_inventory_fingerprint(
+            source_media_dir
+        ),
+        "previous_minutes_inventory_sha256": directory_inventory_fingerprint(
+            previous_minutes_dir
+        ),
+    }
+
+
 def latest_backup_health(
     backup_dir: Path,
     *,
     now: datetime | None = None,
     max_age_hours: int = 48,
+    current_state: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Verify the newest database backup and report whether it is fresh."""
     backups = sorted(
@@ -268,6 +303,9 @@ def latest_backup_health(
             "ok": False,
             "path": None,
             "age_hours": None,
+            "fresh": False,
+            "container_valid": False,
+            "state_current": False,
             "detail": "尚無資料庫備份",
         }
     latest = backups[0]
@@ -276,14 +314,26 @@ def latest_backup_health(
     age_hours = max(0.0, (reference - modified).total_seconds() / 3600.0)
     verification = verify_database_backup(latest)
     fresh = age_hours <= max(1, max_age_hours)
+    state_current = bool(
+        current_state is not None
+        and verification.get("record_state_sha256")
+        == current_state.get("record_state_sha256")
+    )
     return {
         **verification,
-        "ok": bool(verification["ok"]) and fresh,
+        "ok": bool(verification["ok"]) and (fresh or state_current),
+        "container_valid": bool(verification["ok"]),
+        "fresh": fresh,
+        "state_current": state_current,
         "age_hours": round(age_hours, 2),
         "detail": (
             str(verification["detail"])
             if fresh
-            else f"備份已超過 {max_age_hours} 小時"
+            else (
+                "資料未變更，沿用已驗證的資料庫備份"
+                if state_current
+                else f"備份已超過 {max_age_hours} 小時"
+            )
         ),
     }
 
@@ -919,6 +969,7 @@ def latest_record_snapshot_health(
     *,
     now: datetime | None = None,
     max_age_hours: int = 48,
+    current_state: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Verify freshness and content of the newest record snapshot."""
     if snapshot_dir is None:
@@ -927,6 +978,8 @@ def latest_record_snapshot_health(
             "configured": False,
             "path": None,
             "age_hours": None,
+            "fresh": False,
+            "state_current": False,
             "detail": "未設定異地備份目錄",
         }
     root = Path(snapshot_dir)
@@ -941,6 +994,8 @@ def latest_record_snapshot_health(
             "configured": True,
             "path": None,
             "age_hours": None,
+            "fresh": False,
+            "state_current": False,
             "detail": "異地備份目錄尚無記錄快照",
         }
     latest = snapshots[0]
@@ -950,17 +1005,79 @@ def latest_record_snapshot_health(
     verification = _cached_record_snapshot_verification(latest)
     fresh = age_hours <= max(1, max_age_hours)
     complete = bool(verification.get("recoverability_complete"))
+    state_current = bool(
+        current_state is not None
+        and verification.get("record_state_sha256")
+        == current_state.get("record_state_sha256")
+        and verification.get("source_media_inventory_sha256")
+        == current_state.get("source_media_inventory_sha256")
+        and verification.get("previous_minutes_inventory_sha256")
+        == current_state.get("previous_minutes_inventory_sha256")
+    )
     return {
         **verification,
         "configured": True,
-        "ok": bool(verification["ok"]) and complete and fresh,
+        "ok": (
+            bool(verification["ok"])
+            and complete
+            and (fresh or state_current)
+        ),
+        "fresh": fresh,
+        "state_current": state_current,
         "age_hours": round(age_hours, 2),
         "detail": (
             str(verification["detail"])
-            if fresh
-            else f"異地備份已超過 {max_age_hours} 小時"
+            if fresh or not complete
+            else (
+                "資料未變更，沿用已驗證的完整記錄快照"
+                if state_current
+                else f"記錄快照已超過 {max_age_hours} 小時"
+            )
         ),
     }
+
+
+def runtime_backup_health(
+    db_path: Path,
+    backup_dir: Path,
+    source_media_dir: Path | None,
+    previous_minutes_dir: Path | None,
+    offsite_backup_dir: Path | None,
+    *,
+    max_age_hours: int,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Check backup health and prove unchanged state only after age expiry."""
+    database_health = latest_backup_health(
+        backup_dir,
+        max_age_hours=max_age_hours,
+    )
+    snapshot_health = latest_record_snapshot_health(
+        offsite_backup_dir,
+        max_age_hours=max_age_hours,
+    )
+    needs_state_check = any(
+        health.get("path") and not health.get("fresh")
+        for health in (database_health, snapshot_health)
+    )
+    if not needs_state_check:
+        return database_health, snapshot_health
+    state = current_backup_state(
+        db_path,
+        source_media_dir,
+        previous_minutes_dir,
+    )
+    return (
+        latest_backup_health(
+            backup_dir,
+            max_age_hours=max_age_hours,
+            current_state=state,
+        ),
+        latest_record_snapshot_health(
+            offsite_backup_dir,
+            max_age_hours=max_age_hours,
+            current_state=state,
+        ),
+    )
 
 
 def maintain_database(
@@ -1139,37 +1256,53 @@ def run_startup_maintenance(
     source_media_dir: Path | None = None,
     previous_minutes_dir: Path | None = None,
     offsite_backup_dir: Path | None = None,
-    backup_keep: int = 5,
-    full_snapshot_min_interval_hours: int = 24,
+    backup_keep: int = 4,
+    backup_min_interval_hours: int = 168,
+    force_backup: bool = False,
 ) -> dict[str, object]:
-    """Back up and maintain the SQLite DB after init_db has ensured it exists."""
-    backup_path = backup_database(db_path=db_path, backup_dir=backup_dir, keep=backup_keep)
-    backup_verification = verify_database_backup(backup_path)
-    backup_record_state = record_state_fingerprint(backup_path)
-    source_media_inventory = directory_inventory_fingerprint(source_media_dir)
-    previous_minutes_inventory = directory_inventory_fingerprint(previous_minutes_dir)
+    """Run weekly changed-only backup policy, replication, and DB maintenance."""
+    interval_hours = max(1, int(backup_min_interval_hours))
+    state = current_backup_state(
+        db_path,
+        source_media_dir,
+        previous_minutes_dir,
+    )
+    existing_backup = latest_backup_health(
+        backup_dir,
+        max_age_hours=interval_hours,
+        current_state=state,
+    )
     existing_snapshot = latest_record_snapshot_health(
         backup_dir,
-        max_age_hours=max(1, int(full_snapshot_min_interval_hours)),
+        max_age_hours=interval_hours,
+        current_state=state,
     )
-    snapshot_reused = bool(
+    backup_usable = bool(
+        existing_backup.get("container_valid")
+        and existing_backup.get("path")
+    )
+    snapshot_usable = bool(
         existing_snapshot.get("container_valid")
         and existing_snapshot.get("path")
-        and (
-            int(existing_snapshot.get("source_media") or 0) > 0
-            or int(existing_snapshot.get("meetings") or 0) == 0
-        )
-        and existing_snapshot.get("meetings") == backup_verification.get("meetings")
-        and existing_snapshot.get("jobs") == backup_verification.get("jobs")
-        and existing_snapshot.get("record_state_sha256") == backup_record_state
-        and (
-            existing_snapshot.get("source_media_inventory_sha256")
-            == source_media_inventory
-        )
-        and (
-            existing_snapshot.get("previous_minutes_inventory_sha256")
-            == previous_minutes_inventory
-        )
+    )
+    data_changed = not bool(existing_snapshot.get("state_current"))
+    snapshot_age = existing_snapshot.get("age_hours")
+    interval_due = snapshot_age is None or float(snapshot_age) >= interval_hours
+    backup_created = bool(
+        force_backup
+        or not backup_usable
+        or not snapshot_usable
+        or (data_changed and interval_due)
+    )
+    backup_path = (
+        backup_database(db_path=db_path, backup_dir=backup_dir, keep=backup_keep)
+        if backup_created
+        else Path(str(existing_backup["path"]))
+    )
+    snapshot_reused = not bool(
+        force_backup
+        or not snapshot_usable
+        or (data_changed and backup_created)
     )
     snapshot_path = (
         Path(str(existing_snapshot["path"]))
@@ -1194,8 +1327,12 @@ def run_startup_maintenance(
     maintenance = maintain_database(db_path=db_path)
     return {
         "backup_path": str(backup_path),
+        "backup_created": backup_created,
         "snapshot_path": str(snapshot_path),
         "snapshot_reused": snapshot_reused,
+        "data_changed": data_changed,
+        "interval_due": interval_due,
+        "force_backup": bool(force_backup),
         "snapshot_verification": _cached_record_snapshot_verification(snapshot_path),
         "offsite_snapshot_path": str(offsite_path) if offsite_path else None,
         "offsite_snapshot_verification": (

@@ -92,9 +92,9 @@ MEETING_PREVIOUS_MINUTES_DIR=./output/previous_minutes
 MEETING_ATTACHMENT_DIR=./output/attachments
 MEETING_BACKUP_DIR=./backups
 MEETING_OFFSITE_BACKUP_DIR=
-FULL_SNAPSHOT_MIN_INTERVAL_HOURS=24
+BACKUP_MIN_INTERVAL_HOURS=168
 MEETING_DOCX_TEMPLATE_PATH=./4-QA-005 V01 會議紀錄.docx
-DB_BACKUP_KEEP=5
+DB_BACKUP_KEEP=4
 JOB_RETENTION_DAYS=30
 JOB_QUEUE_MAX_ATTEMPTS=5
 JOB_QUEUE_QUALITY_MAX_ATTEMPTS=3
@@ -265,9 +265,10 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `MEETING_SOURCE_MEDIA_MAX_BYTES` | `21474836480` | 原始媒體容量健康門檻。 |
 | `MEETING_BACKUP_MAX_BYTES` | `21474836480` | 本機備份容量健康門檻。 |
 | `MEETING_MIN_FREE_DISK_BYTES` | `5368709120` | 本機資料磁碟的最低可用空間。 |
-| `FULL_SNAPSHOT_MIN_INTERVAL_HOURS` | `24` | 已有新鮮、含原始媒體，且 durable record-state 與媒體 inventory 指紋都未變的 v2 快照時可沿用；否則重建。SQLite online backup 仍會每次建立。 |
+| `BACKUP_MIN_INTERVAL_HOURS` | `168` | 啟動維護只有在資料／媒體狀態已變更且距前份快照至少 7 天時，才新增一致性 SQLite 備份與 v2 快照；損壞或缺少備份會立即修復。 |
+| `FULL_SNAPSHOT_MIN_INTERVAL_HOURS` | 未設定 | 舊版相容別名；只有未設定 `BACKUP_MIN_INTERVAL_HOURS` 時才採用，建議改用新名稱。 |
 | `MEETING_DOCX_TEMPLATE_PATH` | `./4-QA-005 V01 會議紀錄.docx` | Word 匯出使用的本機範本路徑。公司表單範本請保留在本機，不提交到 Git。 |
-| `DB_BACKUP_KEEP` | `5` | 保留最近幾份資料庫備份。 |
+| `DB_BACKUP_KEEP` | `4` | 本機 SQLite、完整記錄快照與異地快照各保留最近 4 份。 |
 | `SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS` | `90` | 手動移除原始錄音/錄影後，`backups/source_media_deleted/` 備份保留天數；設為 `0` 可停用自動清理。 |
 | `JOB_RETENTION_DAYS` | `30` | 已完成、失敗或取消任務的保留天數。 |
 | `JOB_QUEUE_MAX_ATTEMPTS` | `5` | 自動處理任務最多嘗試次數；用於降低 503/暫時性服務忙碌造成的失敗。 |
@@ -415,9 +416,17 @@ open http://127.0.0.1:8001/history
 open http://127.0.0.1:8001/docs
 ```
 
-`GET /livez` 只確認 API 程序存活；`GET /readyz` 驗證 schema 與全域 worker lease，未就緒時回 503。`GET /health` 回傳載入中的 Git commit、工作區 commit、程式碼指紋、`matches_workspace`、worker、schema、SQLite quick check、媒體工具、本機／異地備份與容量門檻。大型快照的完整驗證依路徑、大小與修改時間快取，檔案變更即失效。快照可讀但 manifest 有缺檔時會回報 `container_valid=true`、`recoverability_complete=false` 並降級。
+`GET /livez` 只確認 API 程序存活；`GET /readyz` 驗證 schema 與全域 worker lease，未就緒時回 503。`GET /health` 回傳載入中的 Git commit、工作區 commit、程式碼指紋、`matches_workspace`、worker、schema、SQLite quick check、媒體工具、本機／異地備份與容量門檻。大型快照的完整驗證依路徑、大小與修改時間快取，檔案變更即失效。超過 8 天的備份若 durable record-state 與媒體 inventory 仍和現況相同，會標示 `state_current=true` 並維持健康；快照可讀但 manifest 有缺檔時仍會回報 `container_valid=true`、`recoverability_complete=false` 並降級。
 
-啟動維護會同時產生 `meetings_*.db` 與 `meeting_records_*.zip`。v2 ZIP 包含一致性資料庫、Markdown、補充附件及已連結原始錄音／錄影；媒體以 SHA-256 內容定址去重，manifest 保存逐檔雜湊。還原工具只接受空目錄，並另建 `runtime/meetings.db`、`runtime/output/`、`runtime/evidence/`，重寫資料庫路徑後執行 integrity/FK 檢查：
+啟動維護每次都會驗證現有備份；只有資料或媒體狀態已變更且距前份快照至少 7 天，才新增 `meetings_*.db` 與 `meeting_records_*.zip`，各保留 4 份。損壞／缺少備份會立即補建，未變更的已驗證備份可長期沿用；異地路徑缺檔時會從本機快照補同步。v2 ZIP 包含一致性資料庫、Markdown、補充附件及已連結原始錄音／錄影；媒體以 SHA-256 內容定址去重，manifest 保存逐檔雜湊。
+
+高風險操作前或需要立即建立備份時，先確認沒有 pending／processing 任務，再執行手動強制備份；此命令不受 7 天週期限制：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_backup.py
+```
+
+還原工具只接受空目錄，並另建 `runtime/meetings.db`、`runtime/output/`、`runtime/evidence/`，重寫資料庫路徑後執行 integrity/FK 檢查：
 
 ```bash
 .venv/bin/python scripts/verify_record_snapshot.py backups/meeting_records_YYYYMMDD_HHMMSS.zip

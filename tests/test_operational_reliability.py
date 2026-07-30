@@ -625,7 +625,7 @@ class OperationalReliabilityTests(unittest.TestCase):
         self.assertEqual(metrics["attempt_distribution"]["1"], 1)
         self.assertEqual(metrics["leader"]["owner_id"], "worker-observable")
 
-    def test_startup_reuses_fresh_full_snapshot_but_still_backs_up_database(self) -> None:
+    def test_startup_reuses_recent_unchanged_database_and_full_snapshot(self) -> None:
         from backend.maintenance import (
             backup_database,
             create_record_snapshot,
@@ -659,12 +659,13 @@ class OperationalReliabilityTests(unittest.TestCase):
             self.database.DB_PATH,
             backup_dir,
             source_media_dir=source_dir,
-            full_snapshot_min_interval_hours=24,
+            backup_min_interval_hours=168,
         )
 
+        self.assertFalse(result["backup_created"])
         self.assertTrue(result["snapshot_reused"])
         self.assertEqual(Path(result["snapshot_path"]), existing_snapshot)
-        self.assertTrue(Path(result["backup_path"]).is_file())
+        self.assertEqual(Path(result["backup_path"]), database_backup)
 
 
 if __name__ == "__main__":
