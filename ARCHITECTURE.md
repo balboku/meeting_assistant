@@ -1,8 +1,8 @@
-# 🎙️ AI 語音會議助理 — 現行系統架構文件 v2.4
+# 🎙️ AI 語音會議助理 — 現行系統架構文件 v2.5
 
-> **文件版本**：2.4.0
+> **文件版本**：2.5.0
 > **更新日期**：2026/07/30
-> **現況**：FastAPI、SQLite 持久化佇列、Web/LINE/GUI、多段轉錄、品質閘門、人工複核與全文搜尋均為現行功能。
+> **現況**：FastAPI、SQLite 持久化佇列、Web/GUI、多段轉錄、品質閘門、人工複核與全文搜尋均為現行功能；LINE webhook 與 ngrok 自動 tunnel 已移除。
 
 ---
 
@@ -12,7 +12,6 @@
 graph TB
     subgraph CLIENT["🖥️ 1. 使用者介面層 (Client)"]
         WEB["🌐 Web 歷史與複核介面"]
-        LINE["📱 LINE Bot\n(手機端 · Webhook)"]
         GUI["💻 桌面錄音工具\n(Python GUI · sounddevice)"]
     end
 
@@ -36,7 +35,6 @@ graph TB
     end
 
     WEB --> FASTAPI
-    LINE -- "音檔 Webhook" --> FASTAPI
     GUI -- "HTTP POST /upload-media" --> FASTAPI
     FASTAPI --> PREPROCESS
     FASTAPI --> SOURCE
@@ -50,7 +48,6 @@ graph TB
     QUEUE -- "metadata + structured items" --> SQLITE
     FASTAPI --> ATTACH
     ATTACH --> SQLITE
-    QUEUE -- "Push Message" --> LINE
     QUEUE -- "結果通知" --> GUI
 ```
 
@@ -60,7 +57,7 @@ graph TB
 
 | 層級名稱 | 負責模組與技術堆疊 | 主要任務 |
 | --- | --- | --- |
-| **1. 使用者介面層 (Client)** | 手機端：LINE Bot (Webhook)<br>電腦端：Python GUI (Tkinter/PyQt) + `sounddevice` | 收集音訊或影片來源（實體錄音 / 線上擷取 / 螢幕錄製），並向後端發送請求，最後展示結果給使用者。 |
+| **1. 使用者介面層 (Client)** | Web 歷史與複核介面<br>Python GUI (Tkinter/PyQt) + `sounddevice` | 收集音訊或影片來源（實體錄音 / 線上擷取 / 螢幕錄製），並向後端發送請求，最後展示結果給使用者。 |
 | **2. 核心後端層 (Backend)** | Python + FastAPI<br>SQLite 持久化佇列 + 單一 Worker | 接收媒體檔、驗證、排程、重試、取消、處理品質閘門，並提供審查與維運 API。 |
 | **3. AI 服務層 (AI Services)** | Gemini 轉錄模型 + 摘要/查核模型 | 先產生可追溯逐字稿，再以 JSON contract 產生 D/R/A；高品質模式增加第二模型證據查核。 |
 | **4. 資料儲存層 (Storage)** | 本地檔案 + SQLite/FTS5 | 保存原始媒體、Markdown、附件、任務事件、結構化 D/R/A、人工審查狀態與修訂歷史。 |
@@ -71,12 +68,12 @@ graph TB
 
 ### 1. 使用者介面層 (Client)
 
-針對 50% 實體、50% 線上的需求，設計兩個輕量級入口：
+針對實體與線上會議，保留 Web 上傳與桌面錄音兩個受控入口。
 
-#### 📱 實體會議入口 (LINE Bot)
-- **情境**：在外開會，手機直接錄音。
-- **功能**：使用者將 `.m4a` 或 `.mp3` 傳送到指定的 LINE 官方帳號。
-- **運作**：LINE Server 觸發 Webhook 送到後端，處理完後 Bot 直接 Push Message 完整會議記錄。
+#### 🌐 實體會議入口 (Web)
+- **情境**：使用手機或錄音設備完成錄音後，從受控 Web 介面上傳。
+- **功能**：支援音訊與影片檔案，上傳後可在同一介面追蹤任務與複核結果。
+- **運作**：loopback 可直接使用；區網來源須透過短效 bootstrap/API session。
 
 #### 💻 線上會議入口 (桌面錄音小工具)
 - **情境**：在電腦前開 Google Meet、Teams 或 Zoom。
@@ -91,7 +88,7 @@ graph TB
 
 | 子模組 | 技術 | 功能 |
 |--------|------|------|
-| **API 網關** | FastAPI | 開出 `/upload-media`（桌面端上傳；`/upload-audio` 保留相容）與 `/line-webhook`（LINE 傳遞）端點 |
+| **API 網關** | FastAPI | 開出 `/upload-media`（Web／桌面端上傳；`/upload-audio` 保留相容）及審查、搜尋、匯出與維運端點 |
 | **媒體預處理** | Pydub | 必要時抽取/轉換音訊並切割，保留原始音訊或影片作為證據檔 |
 | **任務佇列** | SQLite `jobs` + 單一 Worker | 跨服務重啟保留任務，支援 retry/backoff、取消、進度與事件時間線。 |
 
@@ -198,7 +195,6 @@ sequenceDiagram
     participant TX as Gemini 轉錄
     participant SUM as 摘要模型
     participant DB as 儲存層
-    participant LINE as LINE Bot
 
     U->>API: POST /upload-media (媒體檔)
     API-->>U: {"status": "processing"} 立即回應
@@ -211,7 +207,6 @@ sequenceDiagram
     PROC->>DB: 寫入 Markdown + SQLite + FTS
     PROC->>PROC: 刪除 Temp 媒體檔
     PROC-->>U: 推播「處理完成」通知
-    PROC-->>LINE: Push Message（會議記錄）
 ```
 
 ---
@@ -223,7 +218,7 @@ sequenceDiagram
 | **Phase 0** | 單檔處理 CLI 腳本（MVP） | ✅ **已完成並驗證** |
 | **Phase 1** | FastAPI 後端 + `/upload-media` 端點（`/upload-audio` 相容舊整合） | ✅ **已完成** |
 | **Phase 2** | 桌面錄音 GUI（sounddevice + Tkinter） | ✅ **已完成** |
-| **Phase 3** | LINE Bot Webhook 整合 | ✅ **已完成** |
+| **Phase 3** | LINE Bot Webhook 整合 | 🗑️ **已移除（v2.5）** |
 | **Phase 4** | SQLite 歷史記錄 + 搜尋功能 | ✅ **已完成** |
 | **Phase 5** | 雲端部署（Render / Fly.io） | 🔲 待開發 |
 
@@ -238,11 +233,9 @@ sequenceDiagram
 | 音訊擷取 | `sounddevice` / `pyaudio` | 麥克風 / 系統聲音擷取 |
 | 音訊格式 | `pydub` + `ffmpeg` | 格式轉換、切割 |
 | GUI | `tkinter` / `PyQt6` | 桌面錄音視窗 |
-| LINE 整合 | `line-bot-sdk` | Webhook + Push Message |
 | 資料庫 | `sqlite3`（標準庫，免安裝） | 會議記錄元資料 |
 | 環境管理 | `python-dotenv` | API Key 管理 |
 
 ---
 
-*AI 語音會議助理 · 系統架構文件 v2.4 · 2026/07/30*
-    WEB --> FASTAPI
+*AI 語音會議助理 · 系統架構文件 v2.5 · 2026/07/30*

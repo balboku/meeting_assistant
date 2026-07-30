@@ -1835,11 +1835,6 @@
       <div class="ops-label">維運狀態</div>
       <div class="ops-value" id="ops-health">載入中</div>
     </div>
-    <div class="ops-tile" id="ops-ngrok-tile" title="載入中">
-      <div class="ops-label">LINE/ngrok</div>
-      <div class="ops-value" id="ops-ngrok">載入中</div>
-      <div class="ops-detail" id="ops-ngrok-detail">–</div>
-    </div>
     <div class="ops-tile">
       <div class="ops-label">任務總數</div>
       <div class="ops-value" id="ops-total-jobs">–</div>
@@ -3785,7 +3780,7 @@ async function loadMeetings(query = '') {
         ? (query
           ? `找不到包含「${safeQuery}」且符合${qualityTypeLabelText || '需複核'}的會議記錄`
           : `目前沒有${qualityTypeLabelText || '需複核'}的會議記錄`)
-        : (query ? `找不到包含「${safeQuery}」的會議記錄` : '尚無會議記錄<br>請先透過 LINE Bot、上傳音訊/影片或桌面 GUI 建立一筆記錄');
+        : (query ? `找不到包含「${safeQuery}」的會議記錄` : '尚無會議記錄<br>請先上傳音訊/影片或使用桌面 GUI 建立一筆記錄');
       listEl.innerHTML = `
         <div class="empty-state">
           <div class="icon">🗂</div>
@@ -6269,10 +6264,7 @@ async function loadMetrics() {
   const sourceStorageEl = document.getElementById('ops-source-storage');
   const sourceStorageTile = document.getElementById('ops-source-storage-tile');
   const averageEl = document.getElementById('ops-average-seconds');
-  const ngrokEl = document.getElementById('ops-ngrok');
-  const ngrokDetailEl = document.getElementById('ops-ngrok-detail');
-  const ngrokTile = document.getElementById('ops-ngrok-tile');
-  if (!healthEl || !totalEl || !failedEl || !needsReviewEl || !qualitySummaryEl || !qualityRecordingEl || !qualityTranscriptEl || !qualityRerunnableEl || !sourceStorageEl || !sourceStorageTile || !averageEl || !ngrokEl || !ngrokDetailEl || !ngrokTile) return;
+  if (!healthEl || !totalEl || !failedEl || !needsReviewEl || !qualitySummaryEl || !qualityRecordingEl || !qualityTranscriptEl || !qualityRerunnableEl || !sourceStorageEl || !sourceStorageTile || !averageEl) return;
 
   try {
     const [metricsRes, healthRes] = await Promise.all([
@@ -6323,25 +6315,14 @@ async function loadMetrics() {
     averageEl.textContent = data.jobs?.average_completed_seconds == null
       ? '–'
       : `${data.jobs.average_completed_seconds}s`;
-
-    const ngrok = data.ngrok || {};
-    ngrokEl.textContent = ngrok.running ? '已連線' : '未連線';
-    ngrokEl.classList.toggle('warn', !ngrok.running);
-    const ngrokDetail = ngrok.webhook_url || ngrok.message || '尚無 tunnel 資訊';
-    ngrokDetailEl.textContent = ngrokDetail;
-    ngrokTile.title = ngrokDetail;
   } catch (err) {
     healthEl.textContent = '載入失敗';
     healthEl.classList.add('warn');
-    ngrokEl.textContent = '載入失敗';
-    ngrokEl.classList.add('warn');
     needsReviewEl.textContent = '–';
     needsReviewEl.classList.remove('attention');
     sourceStorageEl.textContent = '–';
     sourceStorageEl.classList.remove('attention');
     sourceStorageTile.title = '無法讀取 /metrics';
-    ngrokDetailEl.textContent = '無法讀取 /metrics';
-    ngrokTile.title = '無法讀取 /metrics';
   }
 }
 

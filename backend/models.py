@@ -111,16 +111,6 @@ class JobMetrics(BaseModel):
     failed_by_class: dict[str, int] = Field(default_factory=dict)
 
 
-class NgrokStatus(BaseModel):
-    """本機 ngrok tunnel 狀態摘要"""
-    running: bool
-    public_url: Optional[str] = None
-    webhook_url: Optional[str] = None
-    message: str
-    error: Optional[str] = None
-    api_url: Optional[str] = None
-
-
 class StorageFileMetric(BaseModel):
     """單一檔案容量摘要"""
     name: str
@@ -249,7 +239,6 @@ class MetricsResponse(BaseModel):
     queue: dict[str, Any] = Field(default_factory=dict)
     worker: dict[str, Any] = Field(default_factory=dict)
     storage: StorageMetrics
-    ngrok: NgrokStatus
 
 
 class AppConfigResponse(BaseModel):
@@ -469,7 +458,7 @@ class MeetingEvidenceResponse(BaseModel):
 class HealthResponse(BaseModel):
     """GET /health 的回應格式"""
     status: str = "ok"
-    version: str = "2.4.0"
+    version: str = "2.5.0"
     model: str
     transcription_model: str
     summary_model: str

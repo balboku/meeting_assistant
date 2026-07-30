@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 import start
@@ -87,20 +85,6 @@ class StartSupervisorTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertTrue(process.terminated)
-
-    def test_log_rotation_preserves_bounded_generations(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "ngrok.log"
-            path.write_bytes(b"0123456789")
-            (Path(tmpdir) / "ngrok.log.1").write_bytes(b"older")
-
-            rotated = start._rotate_log_file(path, max_bytes=5, keep=2)
-
-            self.assertTrue(rotated)
-            self.assertFalse(path.exists())
-            self.assertEqual((Path(tmpdir) / "ngrok.log.1").read_bytes(), b"0123456789")
-            self.assertEqual((Path(tmpdir) / "ngrok.log.2").read_bytes(), b"older")
-
 
 if __name__ == "__main__":
     unittest.main()

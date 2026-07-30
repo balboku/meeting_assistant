@@ -53,7 +53,6 @@ def permission_for_request(method: str, path: str) -> Optional[str]:
             "/livez",
             "/readyz",
             "/config",
-            "/line-webhook",
         }
         or route.startswith(("/static/", "/docs", "/redoc", "/openapi.json"))
     ):

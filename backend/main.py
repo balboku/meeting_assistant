@@ -32,7 +32,7 @@ from typing import Optional
 
 import aiofiles
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, UploadFile, BackgroundTasks, HTTPException, Header, Request, Query
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Header, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, RedirectResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -128,7 +128,6 @@ from backend.models import (
 )
 from backend.job_queue import (
     enqueue_audio_job,
-    enqueue_line_audio_job,
     enqueue_meeting_quality_recheck_job,
     enqueue_meeting_semantic_review_job,
     job_worker,
@@ -156,7 +155,6 @@ from backend.maintenance import (
     run_startup_maintenance,
 )
 from backend.media_validation import validate_media_magic
-from backend.ngrok_status import get_ngrok_status
 from backend.quality_segments import review_segment_details_from_text, review_segment_label
 from backend.source_audio import finalize_source_audio_upload, sha256_file
 from backend.tasks import (
@@ -481,8 +479,8 @@ def _set_api_session_cookie(response, request: Request) -> None:
 
 @app.middleware("http")
 async def restrict_remote_access(request: Request, call_next):
-    """Allow LINE publicly; protect management UI except local/trusted network."""
-    if request.url.path in {"/line-webhook", "/favicon.ico"}:
+    """Protect the management UI except for local or trusted-network access."""
+    if request.url.path == "/favicon.ico":
         return await call_next(request)
 
     if (
@@ -1585,7 +1583,6 @@ async def metrics():
         queue=queue_operational_metrics(),
         worker=_worker_readiness_snapshot(),
         storage=_storage_metrics(),
-        ngrok=get_ngrok_status(expected_port=SERVER_PORT),
     )
 
 
@@ -4281,165 +4278,3 @@ async def delete_meeting_record(meeting_id: int):
     if not success:
         raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
     return {"status": "success", "message": f"已刪除會議記錄 ID={meeting_id}"}
-
-
-# =============================================================================
-# LINE Bot Webhook 端點（Phase 3）
-# =============================================================================
-
-@app.post(
-    "/line-webhook",
-    summary="LINE Bot Webhook 接收端點",
-    tags=["LINE Bot"],
-    status_code=200,
-)
-async def line_webhook(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    x_line_signature: str = Header(..., alias="X-Line-Signature"),
-    model: Optional[str] = None,
-):
-    """
-    接收 LINE 平台的 Webhook 事件。
-    - 自動驗證訊息簽章，防止偽造請求
-    - 僅處理 **語音訊息（AudioMessage）**
-    - 收到後立即回覆確認，AI 分析在背景執行
-    """
-    from backend.line_handler import (
-        get_webhook_parser, get_line_api,
-        reply_text,
-        is_line_status_query,
-        build_line_status_reply,
-    )
-    from linebot.v3.exceptions import InvalidSignatureError
-    from linebot.v3.webhooks import MessageEvent, AudioMessageContent, FileMessageContent, TextMessageContent
-
-    # ── 檢查環境變數 ──────────────────────────────────────────────
-    parser = get_webhook_parser()
-    if parser is None:
-        raise HTTPException(
-            status_code=503,
-            detail="LINE Bot 尚未設定，請在 .env 中填入 LINE_CHANNEL_SECRET 與 LINE_CHANNEL_ACCESS_TOKEN。"
-        )
-
-    # ── 取得原始 body 進行簽章驗證 ───────────────────────────────
-    body = await request.body()
-    body_str = body.decode("utf-8")
-
-    try:
-        events = parser.parse(body_str, x_line_signature)
-    except InvalidSignatureError:
-        logger.warning("⚠️ LINE Webhook 簽章驗證失敗（可能為偽造請求）")
-        raise HTTPException(status_code=400, detail="Invalid LINE signature")
-
-    api = get_line_api()
-    selected_model = model or GEMINI_MODEL
-
-    # ── 遍歷並處理事件 ────────────────────────────────────────────
-    for event in events:
-        logger.info(f"🔍 收到 LINE 事件：{type(event)} - 內容：{event.to_dict() if hasattr(event, 'to_dict') else event}")
-
-        if not isinstance(event, MessageEvent):
-            logger.info("👉 這不是 MessageEvent，略過")
-            continue
-
-        user_id = event.source.user_id
-        reply_token = event.reply_token
-
-        logger.info(f"💬 訊息類型：{type(event.message)}")
-
-        # ── 文字訊息：一般聊天對話 ────────────────────────────────
-        if isinstance(event.message, TextMessageContent):
-            logger.info("👉 是 TextMessageContent")
-            user_text = event.message.text
-            if is_line_status_query(user_text):
-                if api:
-                    reply_text(api, reply_token, build_line_status_reply(user_id))
-                continue
-
-            if api:
-                # 為了避免超出 5 秒回應限制，先用 Reply API 給個快速回應
-                reply_text(api, reply_token, "💬 正在為您思考中...")
-
-            # 將使用者的文字丟給 AI 背景處理
-            from backend.line_handler import process_line_text_in_background
-            background_tasks.add_task(
-                process_line_text_in_background,
-                user_id=user_id,
-                text=user_text,
-                model=selected_model,
-            )
-            continue
-
-        # ── 語音訊息：觸發 AI 分析流程 ───────────────────────────
-        if isinstance(event.message, AudioMessageContent):
-            logger.info("👉 是 AudioMessageContent")
-            message_id = event.message.id
-            job_id = str(uuid.uuid4())
-
-            logger.info(f"📨 收到 LINE 語音訊息：user={user_id}, message_id={message_id}, job={job_id}")
-
-            # ① 立即回覆確認，避免 webhook 逾時並用掉一次性的 Reply Token。
-            if api:
-                reply_text(
-                    api, reply_token,
-                    f"✅ 已收到語音訊息！"
-                    f"\nGemini 正在分析中，完成後我會主動傳送會議記錄給您。"
-                    f"\n（任務 ID：{job_id[:8]}）"
-                )
-
-            # ② 寫入持久化佇列，由本機 worker 下載 + AI 分析 + 推送
-            enqueue_line_audio_job(
-                job_id=job_id,
-                message_id=message_id,
-                user_id=user_id,
-                model=selected_model,
-            )
-            continue
-
-        # ── 檔案訊息：支援使用者直接上傳 mp3/m4a 等媒體檔 ─────────
-        if isinstance(event.message, FileMessageContent):
-            logger.info("👉 是 FileMessageContent")
-            message_id = event.message.id
-            file_name = event.message.file_name
-            suffix = Path(file_name).suffix.lower()
-
-            if suffix not in SUPPORTED_MEDIA_FORMATS:
-                supported = ", ".join(sorted(SUPPORTED_MEDIA_FORMATS.keys()))
-                if api:
-                    reply_text(
-                        api,
-                        reply_token,
-                        f"❌ 不支援的檔案格式：{suffix or '無副檔名'}\n支援格式：{supported}",
-                    )
-                continue
-
-            job_id = str(uuid.uuid4())
-            logger.info(
-                f"📨 收到 LINE 檔案訊息：user={user_id}, file={file_name}, "
-                f"message_id={message_id}, job={job_id}"
-            )
-
-            if api:
-                reply_text(
-                    api,
-                    reply_token,
-                    f"✅ 已收到檔案：{file_name}"
-                    f"\nGemini 正在分析中，完成後我會主動傳送會議記錄給您。"
-                    f"\n（任務 ID：{job_id[:8]}）"
-                )
-
-            enqueue_line_audio_job(
-                job_id=job_id,
-                message_id=message_id,
-                user_id=user_id,
-                model=selected_model,
-                file_name=file_name,
-            )
-            continue
-
-        # ── 其他訊息類型：提示使用語音 ───────────────────────────
-        if api:
-            reply_text(api, reply_token, "請傳送語音訊息，我會幫您轉成會議記錄。")
-
-    return {"status": "ok"}

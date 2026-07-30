@@ -1321,8 +1321,6 @@ database.save_meeting(
             "DB_BACKUP_KEEP",
             "SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS",
             "JOB_RETENTION_DAYS",
-            "MEETING_ASSISTANT_NGROK",
-            "MEETING_ASSISTANT_NGROK_URL",
         ):
             self.assertIn(env_name, readme)
 
@@ -5484,25 +5482,6 @@ class MetricsRegressionTests(unittest.TestCase):
         self.assertEqual(archive_payload["total_bytes"], orphan_metadata_bytes)
         self.assertEqual(archive_payload["files"], [])
 
-    def test_metrics_endpoint_reports_ngrok_status(self):
-        self._isolated_database()
-        import backend.main as main
-
-        ngrok_status = {
-            "running": True,
-            "public_url": "https://example.ngrok-free.app",
-            "webhook_url": "https://example.ngrok-free.app/line-webhook",
-            "message": "ngrok tunnel is forwarding to local server",
-        }
-
-        with mock.patch.object(main, "get_ngrok_status", return_value=ngrok_status):
-            response = asgi_request(main.app, "GET", "/metrics")
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertTrue(payload["ngrok"]["running"])
-        self.assertEqual(payload["ngrok"]["webhook_url"], "https://example.ngrok-free.app/line-webhook")
-
 
 class SearchRegressionTests(unittest.TestCase):
     def test_review_segment_helpers_parse_and_sort_labels(self):
@@ -8635,321 +8614,6 @@ class JobQueueWorkerRegressionTests(unittest.TestCase):
         self.assertEqual(process_mock.call_args.kwargs["custom_vocabulary"], vocabulary)
 
 
-class LineRegressionTests(unittest.TestCase):
-    def test_enqueue_line_audio_job_is_idempotent_by_message_id(self):
-        import backend.database as database
-        import backend.job_queue as job_queue
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch.object(database, "DB_PATH", Path(tmpdir) / "meetings.db"):
-                database.init_db()
-
-                job_queue.enqueue_line_audio_job(
-                    job_id="line-job-first",
-                    message_id="same-line-message",
-                    user_id="user-id",
-                    model="test-model",
-                )
-                job_queue.enqueue_line_audio_job(
-                    job_id="line-job-duplicate",
-                    message_id="same-line-message",
-                    user_id="user-id",
-                    model="test-model",
-                )
-
-                jobs = database.list_jobs(limit=10)
-
-        self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0]["job_id"], "line-job-first")
-
-    def test_push_text_sends_long_outputs_in_five_message_batches(self):
-        import backend.line_handler as line_handler
-
-        class FakeLineApi:
-            def __init__(self):
-                self.requests = []
-
-            def push_message(self, request):
-                self.requests.append(request)
-
-        api = FakeLineApi()
-        line_handler.push_text(api, "user-id", "a" * (4900 * 6))
-
-        self.assertEqual(len(api.requests), 2)
-        self.assertEqual([len(request.messages) for request in api.requests], [5, 1])
-
-    def test_download_line_audio_waits_when_line_content_is_still_processing(self):
-        import backend.line_handler as line_handler
-
-        class FakeResponse:
-            def __init__(self, status_code, content=b"", payload=None):
-                self.status_code = status_code
-                self.content = content
-                self._payload = payload or {}
-
-            def raise_for_status(self):
-                if self.status_code >= 400:
-                    raise RuntimeError(f"HTTP {self.status_code}")
-
-            def json(self):
-                return self._payload
-
-        calls = []
-        content_calls = 0
-
-        def fake_get(url, **kwargs):
-            nonlocal content_calls
-            calls.append(url)
-            if url.endswith("/content/transcoding"):
-                return FakeResponse(200, payload={"status": "succeeded"})
-            content_calls += 1
-            if content_calls == 1:
-                return FakeResponse(202)
-            return FakeResponse(200, content=b"audio")
-
-        with mock.patch.object(line_handler.requests, "get", side_effect=fake_get):
-            audio = line_handler.download_line_audio("message-id")
-
-        self.assertEqual(audio, b"audio")
-        self.assertTrue(any(url.endswith("/content/transcoding") for url in calls))
-
-    def test_line_file_message_enqueues_supported_audio_file(self):
-        import backend.main as main
-        import backend.line_handler as line_handler
-        from linebot.v3.webhooks import (
-            DeliveryContext,
-            EventMode,
-            FileMessageContent,
-            MessageEvent,
-            UserSource,
-        )
-
-        event = MessageEvent(
-            source=UserSource(userId="user-id"),
-            timestamp=1,
-            mode=EventMode.ACTIVE,
-            webhookEventId="event-id",
-            deliveryContext=DeliveryContext(isRedelivery=False),
-            replyToken="reply-token",
-            message=FileMessageContent(
-                id="file-message-id",
-                fileName="meeting.mp3",
-                fileSize=1234,
-            ),
-        )
-
-        class FakeParser:
-            def parse(self, body, signature):
-                return [event]
-
-        enqueued = []
-
-        def fake_enqueue(**kwargs):
-            enqueued.append(kwargs)
-
-        with mock.patch.object(line_handler, "get_webhook_parser", return_value=FakeParser()), \
-             mock.patch.object(line_handler, "get_line_api", return_value=object()), \
-             mock.patch.object(line_handler, "reply_text"), \
-             mock.patch.object(main, "enqueue_line_audio_job", side_effect=fake_enqueue):
-            response = asgi_request(
-                main.app,
-                "POST",
-                "/line-webhook",
-                headers={"X-Line-Signature": "sig"},
-                content=b'{"events":[]}',
-            )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(enqueued[0]["message_id"], "file-message-id")
-        self.assertEqual(enqueued[0]["user_id"], "user-id")
-        self.assertEqual(enqueued[0]["file_name"], "meeting.mp3")
-
-    def test_line_text_status_query_replies_with_latest_user_job(self):
-        import backend.main as main
-        import backend.database as database
-        import backend.line_handler as line_handler
-        from linebot.v3.webhooks import (
-            DeliveryContext,
-            EventMode,
-            MessageEvent,
-            TextMessageContent,
-            UserSource,
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch.object(database, "DB_PATH", Path(tmpdir) / "meetings.db"):
-                database.init_db()
-                database.create_job(
-                    "line-status-job",
-                    task_type="line_audio_processing",
-                    source="line",
-                    payload={
-                        "message_id": "line-message-id",
-                        "user_id": "user-id",
-                        "model": "test-model",
-                    },
-                    message="LINE 媒體已接收，已排入可靠處理佇列。",
-                )
-                database.update_job_status(
-                    "line-status-job",
-                    "processing",
-                    "📝 正在轉錄第 1/2 段音訊...",
-                    progress_current=1,
-                    progress_total=2,
-                )
-
-                event = MessageEvent(
-                    source=UserSource(userId="user-id"),
-                    timestamp=1,
-                    mode=EventMode.ACTIVE,
-                    webhookEventId="event-id",
-                    deliveryContext=DeliveryContext(isRedelivery=False),
-                    replyToken="reply-token",
-                    message=TextMessageContent(id="text-message-id", text="狀態", quoteToken="quote-token"),
-                )
-
-                class FakeParser:
-                    def parse(self, body, signature):
-                        return [event]
-
-                replies = []
-                with mock.patch.object(line_handler, "get_webhook_parser", return_value=FakeParser()), \
-                     mock.patch.object(line_handler, "get_line_api", return_value=object()), \
-                     mock.patch.object(line_handler, "reply_text", side_effect=lambda api, token, text: replies.append(text)), \
-                     mock.patch.object(line_handler, "process_line_text_in_background") as chat_handler:
-                    response = asgi_request(
-                        main.app,
-                        "POST",
-                        "/line-webhook",
-                        headers={"X-Line-Signature": "sig"},
-                        content=b'{"events":[]}',
-                    )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertFalse(chat_handler.called)
-        self.assertTrue(any("line-sta" in reply for reply in replies))
-        self.assertTrue(any("處理中" in reply for reply in replies))
-        self.assertTrue(any("1/2" in reply for reply in replies))
-
-    def test_line_audio_flow_creates_job_and_pushes_returned_output_path(self):
-        import backend.database as database
-        import backend.line_handler as line_handler
-
-        job_id = "line-regression-job"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir_path = Path(tmpdir)
-            output_path = tmpdir_path / "meeting_notes_line.md"
-            output_path.write_text("會議記錄內容", encoding="utf-8")
-
-            pushed_messages = []
-
-            with mock.patch.object(database, "DB_PATH", tmpdir_path / "meetings.db"):
-                database.init_db()
-                with database.get_db() as conn:
-                    conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
-
-                with mock.patch.object(line_handler, "get_line_api", return_value=object()), \
-                     mock.patch.object(line_handler, "download_line_audio", return_value=b"audio"), \
-                     mock.patch.object(line_handler, "SOURCE_AUDIO_DIR", tmpdir_path), \
-                     mock.patch.object(line_handler, "process_audio_task", return_value=output_path) as process_mock, \
-                     mock.patch.object(line_handler, "push_text", side_effect=lambda api, user_id, text: pushed_messages.append(text)):
-                    line_handler.process_line_audio_in_background(
-                        job_id=job_id,
-                        message_id="message-id",
-                        user_id="user-id",
-                        model="gemini-3.1-flash-lite",
-                    )
-
-                digest = hashlib.sha256(b"audio").hexdigest()
-                saved_audio = list(tmpdir_path.glob(f"{digest}.m4a"))
-                self.assertEqual(len(saved_audio), 1)
-                self.assertEqual(saved_audio[0].read_bytes(), b"audio")
-                self.assertFalse(process_mock.call_args.kwargs["cleanup_source_audio"])
-
-                self.assertIsNotNone(database.get_job(job_id))
-                self.assertTrue(any("會議記錄內容" in msg for msg in pushed_messages))
-
-                with database.get_db() as conn:
-                    conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
-
-    def test_line_audio_flow_reuses_existing_audio_with_same_sha256(self):
-        import backend.database as database
-        import backend.line_handler as line_handler
-
-        job_id = "line-dedup-job"
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir_path = Path(tmpdir)
-            output_path = tmpdir_path / "meeting_notes_line.md"
-            output_path.write_text("line result", encoding="utf-8")
-            existing_audio = tmpdir_path / "existing-source.m4a"
-            existing_audio.write_bytes(b"audio")
-
-            with mock.patch.object(database, "DB_PATH", tmpdir_path / "meetings.db"):
-                database.init_db()
-                with database.get_db() as conn:
-                    conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
-
-                with mock.patch.object(line_handler, "get_line_api", return_value=object()), \
-                     mock.patch.object(line_handler, "download_line_audio", return_value=b"audio"), \
-                     mock.patch.object(line_handler, "SOURCE_AUDIO_DIR", tmpdir_path), \
-                     mock.patch.object(line_handler, "process_audio_task", return_value=output_path) as process_mock, \
-                     mock.patch.object(line_handler, "push_text"):
-                    line_handler.process_line_audio_in_background(
-                        job_id=job_id,
-                        message_id="message-id",
-                        user_id="user-id",
-                        model="gemini-3.1-flash-lite",
-                    )
-
-                digest = hashlib.sha256(b"audio").hexdigest()
-                content_addressed = tmpdir_path / f"{digest}.m4a"
-                self.assertEqual(
-                    process_mock.call_args.kwargs["audio_path"],
-                    content_addressed,
-                )
-                self.assertTrue(existing_audio.exists())
-                self.assertTrue(content_addressed.exists())
-                self.assertTrue(os.path.samefile(existing_audio, content_addressed))
-                self.assertFalse(list(tmpdir_path.glob(".upload_*")))
-
-                with database.get_db() as conn:
-                    conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
-
-    def test_line_delivery_message_excludes_full_transcript_and_points_to_output_path(self):
-        import backend.line_handler as line_handler
-
-        markdown = """---
-title: 會議記錄
----
-
-## 📋 一、討論摘要 (Discussion Summary)
-摘要內容。
-
-## ✅ 二、最終決議 (Final Decisions)
-決議內容。
-
-## 📌 三、待辦事項 (Action Items)
-| # | 任務描述 | 負責人 | 期限 | 優先級 |
-|---|---------|--------|------|--------|
-| 1 | 整理需求 | 王經理 | 下週 | 高 |
-
-## 📝 四、完整逐字稿 (Verbatim Transcript)
-[00:00] **[發言者 A]**：這是一大段完整逐字稿，不應該推回 LINE。
-"""
-
-        output_path = Path("/tmp/output/meeting_notes.md")
-        message = line_handler.build_line_meeting_delivery_message(
-            markdown,
-            output_path,
-        )
-
-        self.assertIn("摘要內容", message)
-        self.assertIn("決議內容", message)
-        self.assertIn("整理需求", message)
-        self.assertIn("完整逐字稿已保存", message)
-        self.assertIn(str(output_path), message)
-        self.assertNotIn("這是一大段完整逐字稿", message)
-
 
 class UiRegressionTests(unittest.TestCase):
     def test_regression_tests_do_not_import_deprecated_fastapi_testclient(self):
@@ -9363,11 +9027,10 @@ console.log('summary_editor_quality_note_ok');
         self.assertIn("function showNeedsReviewMeetings", html)
         self.assertIn("loadMeetings(search.value.trim())", html)
         self.assertIn("需複核", html)
-        self.assertIn('id="ops-ngrok"', html)
-        self.assertIn('id="ops-ngrok-tile"', html)
-        self.assertIn("ngrokTile.title = ngrokDetail", html)
-        self.assertIn("LINE/ngrok", html)
-        self.assertIn("data.ngrok", html)
+        self.assertNotIn('id="ops-ngrok"', html)
+        self.assertNotIn("LINE/ngrok", html)
+        self.assertNotIn("data.ngrok", html)
+        self.assertNotIn("LINE Bot", html)
 
     def test_web_ui_loads_runtime_config_and_prevents_oversized_uploads(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
@@ -10205,63 +9868,6 @@ class StartupScriptRegressionTests(unittest.TestCase):
         main_block = source[source.index('if __name__ == "__main__":') :]
 
         self.assertIn("print_access_urls()", main_block)
-
-    def test_startup_launches_ngrok_with_configured_static_url(self):
-        import start
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            pid_file = tmp_path / "ngrok.pid"
-            log_file = tmp_path / "ngrok.log"
-
-            process = mock.Mock()
-            process.pid = 321
-
-            with mock.patch.dict(
-                start.os.environ,
-                {
-                    "MEETING_ASSISTANT_NGROK": "1",
-                    "MEETING_ASSISTANT_NGROK_URL": "https://example.ngrok-free.app",
-                },
-                clear=False,
-            ), \
-                 mock.patch.object(start, "NGROK_PID_FILE", pid_file), \
-                 mock.patch.object(start, "NGROK_LOG_FILE", log_file), \
-                 mock.patch.object(start.shutil, "which", return_value="/usr/local/bin/ngrok"), \
-                 mock.patch.object(start, "terminate_existing_ngrok"), \
-                 mock.patch.object(start.subprocess, "Popen", return_value=process) as popen, \
-                 mock.patch("builtins.print"):
-                returned = start.start_ngrok_tunnel(8001, wait_for_status=False)
-                pid_text = pid_file.read_text(encoding="utf-8")
-
-        self.assertIs(returned, process)
-        command = popen.call_args.args[0]
-        self.assertEqual(command[:3], ["ngrok", "http", "8001"])
-        self.assertIn("--url=https://example.ngrok-free.app", command)
-        self.assertIn("--log=stdout", command)
-        self.assertEqual(pid_text, "321")
-
-    def test_startup_finds_winget_ngrok_when_not_on_path(self):
-        import start
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            local_app_data = Path(tmpdir)
-            ngrok_path = (
-                local_app_data
-                / "Microsoft"
-                / "WinGet"
-                / "Packages"
-                / "Ngrok.Ngrok_Microsoft.Winget.Source_8wekyb3d8bbwe"
-                / "ngrok.exe"
-            )
-            ngrok_path.parent.mkdir(parents=True)
-            ngrok_path.write_bytes(b"fake exe")
-
-            with mock.patch.dict(start.os.environ, {"LOCALAPPDATA": str(local_app_data)}, clear=False), \
-                 mock.patch.object(start.shutil, "which", return_value=None):
-                command = start._ngrok_command()
-
-        self.assertEqual(command, str(ngrok_path))
 
 
 class FreeOptimizationRegressionTests(unittest.TestCase):
@@ -20283,6 +19889,7 @@ class MeetingReviewWorkflowRegressionTests(unittest.TestCase):
 
     def test_central_permission_policy_covers_business_routes(self):
         from backend.auth import permission_for_request
+        import backend.main as main
 
         self.assertEqual(permission_for_request("GET", "/meetings/1"), "meeting:read")
         self.assertEqual(permission_for_request("PUT", "/meetings/1/summary"), "meeting:write")
@@ -20295,7 +19902,10 @@ class MeetingReviewWorkflowRegressionTests(unittest.TestCase):
             permission_for_request("POST", "/source-media/archive/restore"),
             "meeting:write",
         )
-        self.assertIsNone(permission_for_request("POST", "/line-webhook"))
+        self.assertNotIn(
+            "/line-webhook",
+            {getattr(route, "path", None) for route in main.app.routes},
+        )
 
     def test_review_endpoint_and_frontend_controls_are_exposed(self):
         from backend import database

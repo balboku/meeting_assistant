@@ -21,7 +21,6 @@ from backend.database import (
     claim_next_pending_job,
     create_job,
     expire_abandoned_runtime_lease,
-    find_line_job_by_message_id,
     get_meeting_by_job_id,
     get_job,
     get_runtime_lease,
@@ -151,42 +150,6 @@ def enqueue_audio_job(
         },
         max_attempts=max_attempts,
         message="媒體檔已接收，已排入可靠處理佇列。",
-    )
-
-
-def enqueue_line_audio_job(
-    job_id: str,
-    message_id: str,
-    user_id: str,
-    model: str = GEMINI_MODEL,
-    file_name: Optional[str] = None,
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-) -> None:
-    """Persist a LINE audio job for the local worker."""
-    existing_job = find_line_job_by_message_id(message_id)
-    if existing_job:
-        logger.info(
-            "↩️  LINE message_id=%s 已有任務 %s，略過重複排程",
-            message_id,
-            existing_job["job_id"],
-        )
-        return
-
-    payload = {
-        "message_id": message_id,
-        "user_id": user_id,
-        "model": model,
-    }
-    if file_name:
-        payload["file_name"] = file_name
-
-    create_job(
-        job_id,
-        task_type="line_audio_processing",
-        source="line",
-        payload=payload,
-        max_attempts=max_attempts,
-        message="LINE 媒體已接收，已排入可靠處理佇列。",
     )
 
 
@@ -451,10 +414,6 @@ class JobQueueWorker:
                 self._process_audio_job(job)
                 return
 
-            if task_type == "line_audio_processing":
-                self._process_line_audio_job(job)
-                return
-
             if task_type == "meeting_quality_recheck":
                 self._process_meeting_quality_recheck_job(job)
                 return
@@ -569,26 +528,6 @@ class JobQueueWorker:
         detail = current.get("message") or "任務未產生輸出檔案"
         resulting_status = retry_or_fail_job(job_id, detail)
         self._log_source_audio_retention(job, resulting_status)
-
-    def _process_line_audio_job(self, job: dict[str, Any]) -> None:
-        payload = job.get("payload") or {}
-
-        from backend.line_handler import process_line_audio_in_background
-
-        process_line_audio_in_background(
-            job_id=job["job_id"],
-            message_id=payload["message_id"],
-            user_id=payload["user_id"],
-            model=payload.get("model") or GEMINI_MODEL,
-            file_name=payload.get("file_name"),
-        )
-
-        current = get_job(job["job_id"]) or {}
-        if current.get("status") == "failed":
-            retry_or_fail_job(
-                job["job_id"],
-                current.get("error_detail") or current.get("message") or "LINE 任務失敗",
-            )
 
     def _process_meeting_quality_recheck_job(self, job: dict[str, Any]) -> None:
         payload = job.get("payload") or {}

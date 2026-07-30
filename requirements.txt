@@ -25,9 +25,6 @@ soundfile>=0.12.1
 numpy>=1.26.0
 requests>=2.31.0
 
-# ==== Phase 3 新增：LINE Bot Webhook 整合 ====
-line-bot-sdk>=3.21.0
-
 # ==== 長音訊處理 ====
 audioop-lts>=0.2.2; python_version >= "3.13"
 pydub>=0.25.1

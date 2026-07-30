@@ -1,6 +1,6 @@
 # 🎙️ AI 語音會議助理 (AI Voice Meeting Assistant)
 
-> 讀取本地音訊/影片或透過 **LINE Bot / 桌面 GUI** 傳送語音，利用 **Google Gemini API** 原生音訊處理能力，自動生成完整逐字稿與結構化會議記錄。
+> 讀取本地音訊/影片或透過 **Web／桌面 GUI** 傳送語音，利用 **Google Gemini API** 原生音訊處理能力，自動生成完整逐字稿與結構化會議記錄。
 
 ---
 
@@ -14,8 +14,7 @@ meeting_assistant/
 │   ├── database.py         #   SQLite 資料庫（歷史記錄、支援刪除）
 │   ├── tasks.py            #   Gemini AI 背景任務（含長音訊/影片自動切割處理）
 │   ├── evidence.py         #   補充資料 / 截圖判讀並追加到會議記錄
-│   ├── models.py           #   Pydantic 資料結構
-│   └── line_handler.py     #   Phase 3：LINE Bot 訊息處理
+│   └── models.py           #   Pydantic 資料結構
 ├── gui/                    # Phase 2：桌面錄音 GUI
 │   ├── app.py              #   Tkinter 主視窗（執行此檔案）
 │   ├── recorder.py         #   sounddevice 錄音封裝
@@ -73,8 +72,6 @@ RECORDING_COMPACT_AUDIO_BITRATE=32000
 RECORDING_COMPACT_AUDIO_SAMPLE_RATE=16000
 RECORDING_VIDEO_BITRATE=1000000
 RECORDING_VIDEO_FPS=15
-LINE_CHANNEL_SECRET=your_line_channel_secret_here
-LINE_CHANNEL_ACCESS_TOKEN=your_line_channel_access_token_here
 APP_API_KEY=change_me_to_a_long_random_value
 MEETING_AUTH_ENABLED=0
 MEETING_AUTH_USER_HEADER=X-Meeting-User
@@ -83,9 +80,6 @@ MEETING_AUTH_TRUSTED_PROXY_NETWORKS=127.0.0.0/8,::1/128
 MAX_UPLOAD_MB=500
 CORS_ALLOWED_ORIGINS=http://127.0.0.1:8001,http://localhost:8001
 MEETING_ASSISTANT_TRUST_LOCAL_NETWORK=0
-MEETING_ASSISTANT_NGROK=1
-MEETING_ASSISTANT_NGROK_URL=
-MEETING_ASSISTANT_NGROK_API_URL=http://127.0.0.1:4040/api/tunnels
 DB_PATH=./meetings.db
 MEETING_TEMP_DIR=./temp
 MEETING_OUTPUT_DIR=./output
@@ -159,11 +153,11 @@ TRANSCRIPT_SHORT_CYCLE_DUPLICATE_WINDOW_TURNS=4
 TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MAX_SPAN_SECONDS=30
 ```
 
-安全預設：`/line-webhook` 可公開給 LINE 呼叫並驗證 LINE 簽章；loopback 可由本機使用，區網與公開入口都必須先取得有效的 bootstrap/API session，不把「同 Wi-Fi」當成身分。
+安全預設：loopback 可由本機使用，區網入口必須先取得有效的 bootstrap/API session，不把「同 Wi-Fi」當成身分。
 
 帳號、角色、稽核紀錄與中央路由權限政策已完成。`MEETING_AUTH_ENABLED=1` 時，本機 loopback 或有效 API session 會映射到 `MEETING_AUTH_LOCAL_SESSION_USER`；其他區網來源若沒有有效 session 會被拒絕。只有 `MEETING_AUTH_TRUSTED_PROXY_NETWORKS` 內的代理可以提供身分 header，外部用戶端直接偽造會被拒絕。所有 jobs、meetings、source-media 與 admin 路由都依最小權限檢查，角色只從 `app_users` 讀取。
 
-> 資安提醒：不要提交 `.env`、`meetings.db*`、`temp/`、`output/`、`backups/`、`logs/`、原始錄音、會議記錄或匯出的文件。若金鑰曾暴露，請立即到對應平台輪換 `GEMINI_API_KEY`、`APP_API_KEY`、LINE token 與 ngrok token。
+> 資安提醒：不要提交 `.env`、`meetings.db*`、`temp/`、`output/`、`backups/`、`logs/`、原始錄音、會議記錄或匯出的文件。若金鑰曾暴露，請立即輪換 `GEMINI_API_KEY` 與 `APP_API_KEY`。
 
 ---
 
@@ -360,11 +354,6 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `MEETING_ASSISTANT_MAX_RESTARTS` | `5` | 連續異常退出的重啟上限。 |
 | `MEETING_ASSISTANT_RESTART_DELAY_SECONDS` | `2` | 指數退避的起始秒數。 |
 | `MEETING_ASSISTANT_RESTART_RESET_SECONDS` | `300` | Uvicorn 穩定運行達此秒數後重設連續失敗計數。 |
-| `MEETING_ASSISTANT_LOG_MAX_BYTES` | `20971520` | ngrok log 輪替門檻。 |
-| `MEETING_ASSISTANT_LOG_KEEP` | `3` | ngrok log 保留代數。 |
-| `MEETING_ASSISTANT_NGROK` | `1` | 一鍵啟動是否自動啟動 ngrok；設為 `0` / `false` / `no` 可停用。 |
-| `MEETING_ASSISTANT_NGROK_URL` | 空白 | 固定 ngrok 公開 URL，例如 `https://example.ngrok-free.app`。留空時會嘗試沿用 LINE Console 既有 Webhook URL 的網域。 |
-| `MEETING_ASSISTANT_NGROK_API_URL` | `http://127.0.0.1:4040/api/tunnels` | ngrok 本機狀態 API；後端 `/metrics` 會讀取它，前端維運面板會顯示 LINE/ngrok 狀態。 |
 
 ---
 
@@ -384,7 +373,7 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 .venv/bin/python start.py
 ```
 
-一鍵啟動也會自動嘗試啟動 ngrok，並在同一個終端機列出 tunnel / LINE webhook test 狀態。網頁介面的「維運狀態」列會顯示 `LINE/ngrok`、原始媒體容量與「待確認欄位」；後者會開啟 `meeting_confirmation_tasks` 佇列，可逐項補回負責人、期限或時間碼，或明確略過。未連結媒體的移除會先搬到 `backups/source_media_deleted/` 並保存 metadata，不會直接永久刪除；啟動維護再依 `SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS` 清理過期封存。ngrok log 與 PID 會放在 `logs/ngrok.log`、`logs/ngrok.pid`，log 超過門檻會輪替。
+網頁介面的「維運狀態」列會顯示原始媒體容量與「待確認欄位」；後者會開啟 `meeting_confirmation_tasks` 佇列，可逐項補回負責人、期限或時間碼，或明確略過。未連結媒體的移除會先搬到 `backups/source_media_deleted/` 並保存 metadata，不會直接永久刪除；啟動維護再依 `SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS` 清理過期封存。
 
 ### 手機 / 平板開啟 Web 介面
 
@@ -396,13 +385,10 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 
 請讓手機與執行後端的 Mac / PC 連到同一個 Wi-Fi，再開啟終端機列出的短效 bootstrap 網址；驗證成功後會換成不含金鑰的 session cookie。區網預設不匿名放行。
 
-若使用 ngrok，終端機的「LINE/ngrok 狀態」也會列出短效登入網址，可在非同 Wi-Fi 環境測試。該網址不可公開分享；若外流，請重新啟動以更換臨時 key，或在 `.env` 設定新的 `APP_API_KEY` 後重新啟動。
-
 如果手機仍無法開啟，請先確認：
 - 手機與 Mac / PC 在同一個 Wi-Fi，且不是訪客網路或 AP isolation 網路。
 - Mac / Windows 防火牆允許 Python / uvicorn 接受區域網路連線。
 - 一鍵啟動終端機仍在執行，且沒有顯示 port 被其他程式佔用。
-- 若使用 ngrok，網頁介面「LINE/ngrok」需顯示已連線。
 
 ### B. 手動啟動 FastAPI 後端與網頁介面（Phase 1 & 4）
 
@@ -443,133 +429,6 @@ open http://127.0.0.1:8001/docs
 
 ---
 
-## 📋 Phase 3：LINE Bot 設定指南
-
-> **目標**：讓您可以直接在 LINE App 傳送語音，自動獲得會議記錄。
-
-### Step 1：建立 LINE Developers 帳號與 Channel
-
-1. 前往 **[LINE Developers Console](https://developers.line.biz/)**，使用您的個人 LINE 帳號登入。
-
-2. 點擊 **「Create a new provider」**，輸入提供者名稱（例如：`MyCompany`），按「Create」。
-
-3. 在 Provider 頁面，點擊 **「Create a new channel」** → 選擇 **「Messaging API」**。
-
-4. 填寫 Channel 基本資訊：
-   - **Channel type**：Messaging API
-   - **Provider**：選擇上一步建立的 Provider
-   - **Channel name**：例如 `AI 會議助理`
-   - **Channel description**：任意填寫
-   - **Category / Subcategory**：任意選擇
-
-5. 勾選服務條款，點擊「Create」。
-
-### Step 2：取得 Channel Secret & Access Token
-
-**取得 Channel Secret（頻道密鑰）**：
-1. 進入剛建立的 Channel → 點擊 **「Basic settings」** 分頁
-2. 往下滑找到 **「Channel secret」** → 點擊「Issue」或複製現有值
-
-**取得 Channel Access Token（頻道存取令牌）**：
-1. 進入 Channel → 點擊 **「Messaging API」** 分頁
-2. 往下滑找到 **「Channel access token」** → 點擊「Issue」
-
-**填入 `.env`**：
-```
-LINE_CHANNEL_SECRET=<貼上 Channel secret>
-LINE_CHANNEL_ACCESS_TOKEN=<貼上 Channel access token>
-```
-
-### Step 3：安裝 ngrok（讓 LINE 能打到您的本機）
-
-> LINE 平台的 Webhook **只接受 HTTPS 公開網址**。ngrok 可將本機 localhost 暫時暴露為公開的 HTTPS URL。
-
-**安裝 ngrok（擇一）**：
-
-```bash
-# 方法一：使用 Homebrew（推薦 macOS 使用者）
-brew install ngrok
-
-# 方法二：前往 https://ngrok.com/download 下載解壓縮後加入 PATH
-```
-
-**免費注冊 ngrok 帳號取得 AuthToken**：
-1. 前往 [https://dashboard.ngrok.com/signup](https://dashboard.ngrok.com/signup) 免費註冊
-2. 登入後到 **「Your Authtoken」** 頁面複製 token
-3. 執行：`ngrok config add-authtoken <YOUR_TOKEN>`
-
-一鍵啟動會自動執行 ngrok；通常不需要另外開一個 ngrok 視窗。建議在 `.env` 設定固定網域，這樣 LINE Console 的 Webhook URL 不必每次重貼：
-
-```bash
-MEETING_ASSISTANT_NGROK=1
-MEETING_ASSISTANT_NGROK_URL=https://abc123de.ngrok-free.app
-```
-
-若 `MEETING_ASSISTANT_NGROK_URL` 留空，一鍵啟動會嘗試用 `LINE_CHANNEL_ACCESS_TOKEN` 讀取 LINE Console 目前設定的 Webhook URL，並沿用該 ngrok 網域啟動 tunnel。
-
-**手動啟動 ngrok（選用）**：
-
-```bash
-# 將本機 8001 Port 暴露為公開 HTTPS
-ngrok http 8001
-```
-
-啟動後會看到類似輸出：
-```
-Forwarding  https://abc123de.ngrok-free.app -> http://localhost:8001
-```
-
-如果沒有固定 ngrok 網域，請複製 `https://abc123de.ngrok-free.app` 這個 URL（每次啟動 ngrok 都可能變化），並更新 LINE Console。
-
-### Step 4：在 LINE 設定 Webhook URL
-
-1. 回到 LINE Developers Console → 您的 Channel → **「Messaging API」** 分頁
-2. 找到 **「Webhook URL」** → 點擊「Edit」
-3. 貼上：`https://abc123de.ngrok-free.app/line-webhook`（替換為您的 ngrok URL）
-4. 點擊「Verify」確認連線成功（應顯示「Success」）
-5. 確認 **「Use webhook」** 開關為 **ON**
-
-### Step 5：將 Bot 加為 LINE 好友
-
-1. 在 LINE Developers Console → **「Messaging API」** 分頁
-2. 掃描 **「Bot basic ID」** 下方的 QR Code，將 Bot 加為好友
-
-### Step 6：測試
-
-1. 執行一鍵啟動：`.venv/bin/python start.py`，或雙擊 `啟動會議助理.command` / `啟動會議助理.bat`
-2. 在終端機確認 `ngrok 已連線` 與 `LINE webhook test：✅ 成功`
-3. 在網頁介面確認「LINE/ngrok」顯示 `已連線`
-4. 打開 LINE，傳送一則 **語音訊息**，或直接傳送支援格式的音訊 / 影片檔案給 Bot
-5. 幾秒後 Bot 回覆「✅ 已收到語音訊息！Gemini 正在分析中...」
-6. 處理中可傳送「狀態」、「進度」或 `status` 查詢最近一筆 LINE 任務
-7. 約 30~60 秒後，Bot 主動推送摘要、決議與待辦事項；完整逐字稿會保存在 Web 歷史記錄與 Markdown 檔案中 🎉
-
----
-
-## 📱 LINE Bot 使用限制與系統因應
-
-LINE Messaging API 本身有幾個限制會影響會議助理的使用方式。本專案已在程式中處理可自動補救的限制，但仍建議依下列方式操作。
-
-| 限制 | 對系統的影響 | 目前處理方式 / 建議 |
-|------|--------------|---------------------|
-| Webhook 必須是公開 HTTPS，且 LINE 會把逾時列為 webhook 錯誤 | 本機服務需透過 ngrok 或正式 HTTPS 網域曝光 | README 的 ngrok 流程即為開發測試用；正式使用建議部署到穩定 HTTPS 主機 |
-| Reply Token 只能使用一次，且需很快使用 | AI 分析不可能在 Reply Token 期限內完成 | Webhook 只用 Reply API 快速回「已收到」，實際結果改用 Push Message 傳回 |
-| 使用者傳來的音訊 / 檔案只會暫存一段時間，保存時間不保證 | worker 太晚下載可能遇到 404/410，任務會失敗 | 請保持後端與 worker 持續運作；系統收到 LINE 事件後會先排入可靠佇列並盡快下載 |
-| 大型音訊 / 影片剛送出時可能尚未完成 LINE 端準備 | 立即呼叫 `Get content` 可能拿到 `202 Accepted` | 系統會輪詢 `/content/transcoding`，等 LINE 回報可下載後再抓檔；可用 `LINE_CONTENT_READY_TIMEOUT_SECONDS` 調整等待上限 |
-| 單則文字訊息上限 5000 UTF-16 code units，單次 Push/Reply 最多 5 則 message objects | 長逐字稿可能超過一次 Push request 上限，也會消耗大量 LINE 訊息額度 | LINE 完成通知只推摘要、決議與待辦事項；完整逐字稿保存在 Web 歷史記錄與 Markdown/Word 匯出 |
-| Push/API 訊息會受官方帳號方案額度影響 | 長會議紀錄會消耗較多訊息則數 | 台灣官方帳號常見方案額度為輕用量 200 則/月、中用量 3,000 則/月、高用量 6,000 則/月；實際以官方帳號後台為準。若常處理長會議，建議主要從 Web 歷史頁或 Word 匯出取完整紀錄 |
-| LINE 檔案訊息需要有可辨識副檔名 | 沒副檔名或不支援格式無法判斷媒體型別 | Bot 支援語音訊息，以及副檔名在本系統支援清單內的檔案，例如 `.mp3`、`.m4a`、`.wav`、`.mp4`、`.mov` |
-| Webhook redelivery 可能讓同一事件重送 | 極端情況可能產生重複任務 | 系統會用 LINE `message_id` 擋掉重複排程；仍建議在 LINE Developers Console 開啟 webhook error statistics 觀察錯誤 |
-
-相關官方文件：
-- [LINE Messaging API - Get content](https://developers.line.biz/en/reference/messaging-api/#get-content)
-- [LINE Messaging API - Send reply message](https://developers.line.biz/en/reference/messaging-api/#send-reply-message)
-- [LINE Messaging API - Send push message](https://developers.line.biz/en/reference/messaging-api/#send-push-message)
-- [LINE Webhook error statistics](https://developers.line.biz/en/docs/messaging-api/check-webhook-error-statistics/)
-- [LINE 官方帳號訊息費用說明](https://tw.linebiz.com/faq/oa-price/message-price-list/)
-
----
-
 ## 📄 輸出格式
 
 生成的 Markdown 檔案包含以下四個區塊：
@@ -581,8 +440,6 @@ LINE Messaging API 本身有幾個限制會影響會議助理的使用方式。�
 | 📌 **待辦事項** | 任務 / 負責人 / 期限（表格） |
 | 📝 **完整逐字稿** | 區分講者 + 時間戳記 |
 | 📎 **補充資料與佐證** | 使用者追加截圖 / 文件後，由 AI 判讀關聯性並補入；此區塊只有在上傳補充資料後出現 |
-
-LINE Bot 完成處理時只會推送前三個區塊與完整檔案位置，避免逐字稿過長造成 LINE 訊息爆量；完整逐字稿請從 Web 歷史記錄、Markdown 檔案或 Word 匯出查看。
 
 長音訊會先切成 10 分鐘分段轉錄，再合併為完整逐字稿。合併時會把分段內的 `[00:00]`、`[09:59]` 等相對時間戳轉成全會議時間，例如第二段會顯示為 `[10:00]`、`[19:59]`。
 
@@ -626,20 +483,9 @@ AI 會輸出「系統判斷」、「擷取重點」、「對會議記錄的影�
 ### Q：後端啟動失敗 `ImportError`
 確認已安裝所有套件：`pip3 install -r requirements.txt`
 
-### Q：LINE Webhook Verify 失敗
-- 在網頁介面查看「LINE/ngrok」是否為 `已連線`
-- 查看 `logs/ngrok.log` 或啟動終端機的 ngrok / LINE webhook test 訊息
-- 確認 ngrok URL 未過期，且 LINE Console 的 Webhook URL 是 `<ngrok 公開 URL>/line-webhook`
-- 確認後端正在執行（Port 8001）
-- 確認 `.env` 中的 `LINE_CHANNEL_SECRET` 正確
-
-### Q：Bot 沒有回應語音訊息
-- 確認「Use webhook」已開啟
-- 查看終端機後端 LOG 是否有收到 POST `/line-webhook`
-
 ### Q：媒體檔上傳逾時
 確認網路穩定，或在 `backend/tasks.py` 調大 `MAX_UPLOAD_WAIT_SECONDS`
 
 ---
 
-*Powered by Google Gemini API & LINE Messaging API | AI 語音會議助理 v2.0.0*
+*Powered by Google Gemini API | AI 語音會議助理*

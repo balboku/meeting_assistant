@@ -1199,8 +1199,6 @@ def _has_recoverable_payload(row: sqlite3.Row) -> bool:
     task_type = row["task_type"]
     if task_type == "audio_processing":
         return bool(payload.get("audio_path") and payload.get("output_dir"))
-    if task_type == "line_audio_processing":
-        return bool(payload.get("message_id") and payload.get("user_id"))
     if task_type == "meeting_semantic_review":
         try:
             return int(payload.get("meeting_id")) > 0
@@ -2025,45 +2023,6 @@ def get_job(job_id: str) -> Optional[dict]:
             "SELECT * FROM jobs WHERE job_id=?", (job_id,)
         ).fetchone()
         return _deserialize_job(row) if row else None
-
-
-def find_line_job_by_message_id(message_id: str) -> Optional[dict]:
-    """Return the existing LINE processing job for a LINE message ID, if any."""
-    with get_db() as conn:
-        rows = conn.execute(
-            """SELECT *
-                 FROM jobs
-                WHERE task_type='line_audio_processing'
-                ORDER BY created_at DESC, job_id DESC"""
-        ).fetchall()
-
-    for row in rows:
-        payload = _load_job_payload(row)
-        if payload.get("message_id") == message_id:
-            return _deserialize_job(row)
-    return None
-
-
-def list_line_jobs_for_user(user_id: str, limit: int = 3) -> list[dict]:
-    """Return recent LINE media jobs for one LINE user."""
-    matches: list[dict] = []
-    with get_db() as conn:
-        rows = conn.execute(
-            """SELECT *
-                 FROM jobs
-                WHERE task_type='line_audio_processing'
-                ORDER BY updated_at DESC, created_at DESC, job_id DESC"""
-        ).fetchall()
-
-    for row in rows:
-        payload = _load_job_payload(row)
-        if payload.get("user_id") != user_id:
-            continue
-        matches.append(_deserialize_job(row))
-        if len(matches) >= limit:
-            break
-
-    return matches
 
 
 def list_jobs(limit: int = 20, offset: int = 0, status: Optional[str] = None) -> list[dict]:
