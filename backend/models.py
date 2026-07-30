@@ -252,6 +252,8 @@ class AppConfigResponse(BaseModel):
     recording_profiles: dict[str, dict[str, Any]]
     max_upload_mb: int
     max_upload_bytes: int
+    previous_minutes_max_mb: int
+    previous_minutes_max_bytes: int
     supported_extensions: list[str]
     source_media_archive_retention_days: int
 
@@ -458,7 +460,7 @@ class MeetingEvidenceResponse(BaseModel):
 class HealthResponse(BaseModel):
     """GET /health 的回應格式"""
     status: str = "ok"
-    version: str = "2.5.0"
+    version: str = "2.6.0"
     model: str
     transcription_model: str
     summary_model: str

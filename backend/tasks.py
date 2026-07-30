@@ -45,6 +45,7 @@ from backend.database import (
     save_meeting
 )
 from backend.exporter import content_with_quality_review_note
+from backend.previous_minutes import build_summary_verification_prompt, normalize_previous_minutes_payload, previous_minutes_contract_addendum, previous_minutes_markdown, previous_minutes_metadata, previous_minutes_prompt_section, read_previous_minutes_context
 from backend.recovery_policy import SEGMENT_RECOVERY_SPLIT_SECONDS, TRANSCRIPT_RECOVERY_MAX_DEPTH, next_recovery_chunk_seconds as _next_recovery_chunk_seconds, next_smaller_recovery_chunk_seconds as _next_smaller_recovery_chunk_seconds, recovery_subsegment_path, strictly_shrinking_export_bounds
 
 # 載入 .env 環境變數
@@ -7757,9 +7758,8 @@ def _normalize_decision_status(item: dict[str, Any]) -> str:
 
 
 def _normalize_summary_payload(
-    payload: dict[str, Any],
-    transcript: str,
-    meeting_date: Optional[date] = None,
+    payload: dict[str, Any], transcript: str, meeting_date: Optional[date] = None,
+    previous_minutes_context: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Repair identifiers and evidence references locally without another model call."""
     discussions: list[Any] = []
@@ -7810,11 +7810,14 @@ def _normalize_summary_payload(
             item["due"] = _resolve_spoken_due(due_source, meeting_date)
         actions.append(item)
 
-    return {
+    normalized = {
         "discussion_summary": discussions,
         "final_decisions": decisions,
         "action_items": actions,
     }
+    normalized.update(normalize_previous_minutes_payload(
+        payload, transcript, previous_minutes_context, _validated_summary_timecodes))
+    return normalized
 
 
 def _summary_json_to_markdown(payload: dict[str, Any]) -> str:
@@ -7823,6 +7826,9 @@ def _summary_json_to_markdown(payload: dict[str, Any]) -> str:
     action_items = _coerce_summary_items(payload.get("action_items"))
 
     lines: list[str] = ["## 一、討論摘要 (Discussion Summary)", ""]
+    previous_section = previous_minutes_markdown(payload)
+    if previous_section:
+        lines.insert(0, previous_section)
     if discussion_items:
         for index, item in enumerate(discussion_items, start=1):
             discussion_id = _summary_item_id(item, "D", index)
@@ -7932,14 +7938,15 @@ def _summary_json_to_markdown(payload: dict[str, Any]) -> str:
 
 
 def _summary_response_to_markdown(
-    text: str,
-    full_transcript: str = "",
-    meeting_date: Optional[date] = None,
+    text: str, full_transcript: str = "", meeting_date: Optional[date] = None,
+    previous_minutes_context: Optional[dict[str, Any]] = None,
 ) -> str:
     payload = _extract_json_object(text)
     if payload:
         return _summary_json_to_markdown(
-            _normalize_summary_payload(payload, full_transcript, meeting_date)
+            _normalize_summary_payload(
+                payload, full_transcript, meeting_date, previous_minutes_context
+            )
         )
     cleaned = _normalize_domain_terms(clean_hallucinated_loops(text or ""))
     cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
@@ -7947,23 +7954,28 @@ def _summary_response_to_markdown(
 
 
 def _summary_response_to_payload_and_markdown(
-    text: str,
-    full_transcript: str = "",
-    meeting_date: Optional[date] = None,
+    text: str, full_transcript: str = "", meeting_date: Optional[date] = None,
+    previous_minutes_context: Optional[dict[str, Any]] = None,
 ) -> tuple[str, dict[str, Any]]:
     """Require the structured contract used for durable meeting records."""
     payload = _extract_json_object(text)
     if not payload:
         raise RuntimeError("摘要模型未回傳有效 JSON，保留任務以便自動重試。")
-    normalized = _normalize_summary_payload(payload, full_transcript, meeting_date)
+    normalized = _normalize_summary_payload(
+        payload, full_transcript, meeting_date, previous_minutes_context
+    )
     return _summary_json_to_markdown(normalized), normalized
 
 
-def _build_summary_prompt(full_transcript: str, meeting_date: Optional[date] = None) -> str:
+def _build_summary_prompt(
+    full_transcript: str, meeting_date: Optional[date] = None,
+    previous_minutes_context: Optional[dict[str, Any]] = None,
+) -> str:
     actual_meeting_date = meeting_date or datetime.now().date()
     weekday_names = "一二三四五六日"
     meeting_date_text = actual_meeting_date.strftime("%Y/%m/%d")
     meeting_weekday = weekday_names[actual_meeting_date.weekday()]
+    previous_minutes_section = previous_minutes_prompt_section(previous_minutes_context)
     prompt = f"""
 # 角色設定
 你是一位擁有 15 年經驗的國際企業專業高階秘書（Executive Secretary），
@@ -7971,7 +7983,9 @@ def _build_summary_prompt(full_transcript: str, meeting_date: Optional[date] = N
 
 實際會議日期：{meeting_date_text}（星期{meeting_weekday}）
 
-以下是一份完整的會議逐字稿（已分段），請根據逐字稿生成摘要、決議與待辦事項：
+{previous_minutes_section}
+
+以下是本次完整會議逐字稿（已分段）。本次決議、狀態與進度只能根據這份逐字稿判定：
 
 {full_transcript}
 
@@ -8073,7 +8087,7 @@ Rules:
 - If only month/day is spoken, use the actual meeting year above. Preserve relative wording in due_source; do not calculate it yourself.
 - `[聽不清]` and `[台語音訊不清晰]` mark source words that were not verified. Never infer, expand, or turn those words into a decision, owner, due date, number, or action item. When an important topic relies on one of these markers, keep it pending and identify it as requiring original-media review.
 - Do not use **bold** markers in JSON values.
-""".strip()
+""".strip() + previous_minutes_contract_addendum(previous_minutes_context)
 
 
 def _generate_meeting_content_from_transcript(
@@ -8085,6 +8099,7 @@ def _generate_meeting_content_from_transcript(
     summary_secondary_model: str,
     summary_verifier_model: Optional[str] = None,
     meeting_date: Optional[date] = None,
+    previous_minutes_context: Optional[dict[str, Any]] = None,
     high_quality: bool = False,
     return_structured: bool = False,
 ):
@@ -8100,7 +8115,7 @@ def _generate_meeting_content_from_transcript(
         summary_secondary_model,
     )
 
-    summary_prompt = _build_summary_prompt(full_transcript, meeting_date)
+    summary_prompt = _build_summary_prompt(full_transcript, meeting_date, previous_minutes_context)
     response, summary_model_used = _generate_text_with_fallback(
         client,
         primary_model=summary_primary_model,
@@ -8119,35 +8134,13 @@ def _generate_meeting_content_from_transcript(
         response.text or "",
         full_transcript,
         meeting_date,
+        previous_minutes_context,
     )
     if high_quality:
         update_job_status(job_id, "processing", "🔎 第二模型正在查核摘要證據與逐字稿完整性...")
-        verification_prompt = f"""
-# 角色
-你是第二階段會議紀錄稽核員。請以完整逐字稿為唯一事實來源，查核第一階段摘要並輸出修正版。
-
-# 完整逐字稿
-{full_transcript}
-
-# 第一階段摘要
-{summary_section}
-
-# 查核規則
-1. 每個重要討論主題都要有獨立 D 編號，不可把不同專案、文件、測試或決策合併。
-2. 每個 D、R、A 都必須能由時間戳附近的逐字稿支持；找不到證據就刪除或標為未提及。
-3. confirmed 只限明確同意、核准、選定或已完成並被會議接受的事實；暫定、預計、可能、待確認一律 pending。
-4. 「我會問品保」的負責人是當前發言者，不是品保。被詢問、通知或協作的對象不得自動列為負責人。
-5. 期限原句放在 due_source，不可自行猜測日期。
-6. 不可新增逐字稿沒有的姓名、文件、數字、日期、風險、決議或待辦。
-7. `[聽不清]` 或 `[台語音訊不清晰]` 是未驗證內容；不可補寫、推論或據此確認決議、負責人、期限、數字或待辦。關鍵內容依賴該標記時，保留 pending 並要求回查原始媒體。
-
-Return JSON only, without Markdown fences, using exactly these top-level keys:
-{{
-  "discussion_summary": [{{"id":"D1","topic":"主題","context":"背景","summary":"摘要","key_points":["重點"],"impact":"影響或未提及","open_questions":["待釐清或未提及"],"evidence_timecodes":["00:00"]}}],
-  "final_decisions": [{{"id":"R1","related_discussions":["D1"],"decision":"決議","basis":"逐字稿依據","status":"confirmed|pending","evidence_timecodes":["00:00"]}}],
-  "action_items": [{{"id":"A1","related_discussions":["D1"],"related_decisions":["R1"],"task":"可驗收任務","owner":"負責人或未提及","due":"期限或未提及","due_source":"期限原句或未提及","priority":"高|中|低","source_timecodes":["00:00"]}}]
-}}
-""".strip()
+        verification_prompt = build_summary_verification_prompt(
+            full_transcript, summary_section, previous_minutes_context
+        )
         verification_model_name = (summary_verifier_model or summary_secondary_model).strip()
         verification_response, verification_model = _generate_text_with_fallback(
             client,
@@ -8166,6 +8159,7 @@ Return JSON only, without Markdown fences, using exactly these top-level keys:
             verification_response.text or "",
             full_transcript,
             meeting_date,
+            previous_minutes_context,
         )
         summary_model_used = f"{summary_model_used}+verified:{verification_model}"
 
@@ -8973,6 +8967,9 @@ def process_audio_task(
     force_all_segments_full_rerun: bool = False,
     summary_source_path: Optional[Path] = None,
     transcript_reuse_source_path: Optional[Path] = None,
+    previous_minutes_path: Optional[Path] = None,
+    previous_minutes_filename: Optional[str] = None,
+    previous_minutes_sha256: Optional[str] = None,
     high_quality_summary: bool = False,
     worker_id: Optional[str] = None,
     worker_generation: Optional[int] = None,
@@ -9013,8 +9010,15 @@ def process_audio_task(
     summary_model_used = model
     structured_summary: Optional[dict[str, Any]] = None
     actual_meeting_date = _infer_meeting_date(meeting_title, audio_path)
+    previous_minutes_context: Optional[dict[str, Any]] = None
 
     try:
+        if previous_minutes_path is not None:
+            previous_minutes_context = read_previous_minutes_context(
+                previous_minutes_path,
+                original_filename=previous_minutes_filename,
+                expected_sha256=previous_minutes_sha256,
+            )
         # ------------------------------------------------------------------
         # 步驟 1：初始化 Gemini Client
         # ------------------------------------------------------------------
@@ -9187,6 +9191,7 @@ def process_audio_task(
                     summary_secondary_model=summary_secondary_model,
                     summary_verifier_model=summary_verifier_model,
                     meeting_date=actual_meeting_date,
+                    previous_minutes_context=previous_minutes_context,
                     high_quality=high_quality_summary,
                     return_structured=True,
                 )
@@ -10248,6 +10253,7 @@ def process_audio_task(
                     summary_secondary_model=summary_secondary_model,
                     summary_verifier_model=summary_verifier_model,
                     meeting_date=actual_meeting_date,
+                    previous_minutes_context=previous_minutes_context,
                     high_quality=high_quality_summary,
                     return_structured=True,
                 )
@@ -10799,6 +10805,7 @@ def process_audio_task(
                     summary_secondary_model=summary_secondary_model,
                     summary_verifier_model=summary_verifier_model,
                     meeting_date=actual_meeting_date,
+                    previous_minutes_context=previous_minutes_context,
                     high_quality=high_quality_summary,
                     return_structured=True,
                 )
@@ -10814,6 +10821,7 @@ def process_audio_task(
             job_id=job_id,
             fallback_model=repair_fallback_model,
         ))
+        meeting_content = previous_minutes_markdown(structured_summary or {}) + meeting_content if previous_minutes_context and "Previous Meeting Follow-up" not in meeting_content else meeting_content
         if meeting_content != generated_meeting_content:
             # A repair can rewrite D/R/A. Avoid persisting JSON that no longer
             # exactly represents the delivered Markdown.
@@ -10846,6 +10854,10 @@ def process_audio_task(
         quality_report = _build_quality_report(audio_report, segment_report, full_transcript)
         _refresh_quality_report_summary_warnings(quality_report, meeting_content)
         quality_report["summary_quality_mode"] = "high" if high_quality_summary else "standard"
+        if previous_minutes_context:
+            quality_report["previous_minutes"] = previous_minutes_metadata(
+                previous_minutes_context, include_path=True
+            )
         try:
             source_audio_size = audio_path.stat().st_size
             source_audio_sha256 = _sha256_file(audio_path)

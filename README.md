@@ -13,6 +13,7 @@ meeting_assistant/
 │   ├── main.py             #   FastAPI 入口與路由
 │   ├── database.py         #   SQLite 資料庫（歷史記錄、支援刪除）
 │   ├── tasks.py            #   Gemini AI 背景任務（含長音訊/影片自動切割處理）
+│   ├── previous_minutes.py #   前次 Word 安全解析、追蹤規則與來源雜湊
 │   ├── evidence.py         #   補充資料 / 截圖判讀並追加到會議記錄
 │   └── models.py           #   Pydantic 資料結構
 ├── gui/                    # Phase 2：桌面錄音 GUI
@@ -22,7 +23,8 @@ meeting_assistant/
 ├── static/                 # Phase 4：網頁版前端介面
 │   └── index.html          #   提供網頁上傳、歷史瀏覽、原始媒體核對、品質修訂與刪除功能
 ├── output/                 # AI 生成的 Markdown、原始媒體檔與補充資料附件（自動建立）
-│   └── source_audio/       # 已上傳的原始錄音/錄影保留區（沿用舊資料夾名稱）
+│   ├── source_audio/       # 已上傳的原始錄音/錄影保留區（沿用舊資料夾名稱）
+│   └── previous_minutes/   # 操作者上傳的前次會議紀錄 .docx 保留區
 ├── temp/                   # 分段與處理中暫存檔（自動建立）
 ├── requirements.txt        # 套件相依清單
 ├── .env                    # 您的私密 API Key（不要上傳 Git！）
@@ -78,12 +80,15 @@ MEETING_AUTH_USER_HEADER=X-Meeting-User
 MEETING_AUTH_DEFAULT_ROLE=viewer
 MEETING_AUTH_TRUSTED_PROXY_NETWORKS=127.0.0.0/8,::1/128
 MAX_UPLOAD_MB=500
+PREVIOUS_MINUTES_MAX_MB=20
+PREVIOUS_MINUTES_MAX_TEXT_CHARS=50000
 CORS_ALLOWED_ORIGINS=http://127.0.0.1:8001,http://localhost:8001
 MEETING_ASSISTANT_TRUST_LOCAL_NETWORK=0
 DB_PATH=./meetings.db
 MEETING_TEMP_DIR=./temp
 MEETING_OUTPUT_DIR=./output
 MEETING_SOURCE_AUDIO_DIR=./output/source_audio
+MEETING_PREVIOUS_MINUTES_DIR=./output/previous_minutes
 MEETING_ATTACHMENT_DIR=./output/attachments
 MEETING_BACKUP_DIR=./backups
 MEETING_OFFSITE_BACKUP_DIR=
@@ -250,6 +255,9 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `MEETING_TEMP_DIR` | `./temp` | 分段與處理中的暫存檔資料夾；過期暫存會自動清理。 |
 | `MEETING_OUTPUT_DIR` | `./output` | 生成 Markdown 會議記錄的輸出資料夾。 |
 | `MEETING_SOURCE_AUDIO_DIR` | `./output/source_audio` | 已上傳原始錄音/錄影的保留資料夾，處理完成後不會自動刪除。 |
+| `MEETING_PREVIOUS_MINUTES_DIR` | `./output/previous_minutes` | 選填前次會議紀錄 `.docx` 的保留資料夾；佇列重試與摘要重整會沿用相同來源。 |
+| `PREVIOUS_MINUTES_MAX_MB` | `20` | 前次會議紀錄 Word 的壓縮檔大小上限。 |
+| `PREVIOUS_MINUTES_MAX_TEXT_CHARS` | `50000` | 從前次 Word 擷取並提供摘要模型的文字上限；超出內容會標示為已截斷。 |
 | `MEETING_ATTACHMENT_DIR` | `./output/attachments` | 會議補充資料、截圖、PDF、文件的保存位置。 |
 | `MEETING_BACKUP_DIR` | `./backups` | 啟動維護時保存一致性 SQLite 備份與 v2 完整記錄快照的位置。 |
 | `MEETING_OFFSITE_BACKUP_DIR` | 空白 | 可選的不同磁碟或網路分享路徑；設定後會原子複製 v2 快照、再驗證 SHA-256/ZIP/SQLite。不可與本機備份目錄相同。 |
@@ -375,6 +383,8 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 
 網頁介面的「維運狀態」列會顯示原始媒體容量與「待確認欄位」；後者會開啟 `meeting_confirmation_tasks` 佇列，可逐項補回負責人、期限或時間碼，或明確略過。未連結媒體的移除會先搬到 `backups/source_media_deleted/` 並保存 metadata，不會直接永久刪除；啟動維護再依 `SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS` 清理過期封存。
 
+在「上傳音訊/影片」視窗可選擇一份前次會議紀錄 Word（`.docx`）。系統保留原始檔名與 SHA-256，將前次決議／待辦／風險整理到「前次會議追蹤」；本次完成、延期、取消等狀態仍必須有本次逐字稿時間碼。若本次沒有提到，輸出會標示「本次未討論」，不會把前次決議誤列為本次決議。舊 `.doc`、加密檔、含巨集內容、異常壓縮封裝、純掃描圖片或無可讀文字的 Word 會被拒絕。
+
 ### 手機 / 平板開啟 Web 介面
 
 一鍵啟動時，終端機會列出「手機 / 平板」網址，例如：
@@ -435,6 +445,7 @@ open http://127.0.0.1:8001/docs
 
 | 區塊 | 說明 |
 |------|------|
+| 🔁 **前次會議追蹤** | 上傳前次 Word 時才出現；列出前次事項、本次狀態、本次更新與本次逐字稿佐證 |
 | 📋 **會議摘要** | 300 字以內重點概述 |
 | ✅ **重要決議** | 明確達成的決議（條列式） |
 | 📌 **待辦事項** | 任務 / 負責人 / 期限（表格） |

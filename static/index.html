@@ -1931,6 +1931,12 @@
       <label class="form-label" for="custom-vocabulary">專有詞彙 (選填)</label>
       <input type="text" id="custom-vocabulary" class="form-input" maxlength="1200" placeholder="例如：佳世達、S-ring、IEC 62304" />
     </div>
+    <div class="form-group">
+      <label class="form-label" for="previous-minutes-input">前次會議紀錄 Word (選填)</label>
+      <input type="file" id="previous-minutes-input" class="form-input" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" aria-describedby="previous-minutes-hint previous-minutes-status" />
+      <span id="previous-minutes-hint">僅支援含可讀文字的 .docx，預設上限 20MB；本次狀態仍以本次逐字稿為準。</span>
+      <div id="previous-minutes-status" role="status" aria-live="polite">未選擇前次會議紀錄。</div>
+    </div>
     <div class="progress-box" id="progress-box" role="status" aria-live="polite" aria-atomic="true" aria-busy="false">
       <div class="progress-text">
         <div class="loading-spinner" style="width: 14px; height: 14px; border-width: 2px;"></div>
@@ -2120,6 +2126,7 @@ let runtimeConfig = {
   model: '',
   max_upload_mb: 500,
   max_upload_bytes: 500 * 1024 * 1024,
+  previous_minutes_max_bytes: 20 * 1024 * 1024,
   source_media_archive_retention_days: 90,
   supported_extensions: ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.webm', '.mp4', '.mov', '.avi', '.mkv', '.mpeg', '.mpg', '.wmv'],
   recording_profiles: {
@@ -3023,6 +3030,7 @@ async function loadRuntimeConfig() {
   }
   updateUploadLimitHint();
   updateUploadAcceptList();
+  window.previousMinutesUpload?.refreshConfig();
   updateRecordingProfileOptionLabels();
   updateRecordingEstimate();
 }
@@ -6438,6 +6446,7 @@ function resetUploadForm() {
   fileInput.value = '';
   document.getElementById('custom-title').value = '';
   document.getElementById('custom-vocabulary').value = '';
+  window.previousMinutesUpload?.reset();
   fileNameDisplay.textContent = '點擊選擇檔案，或將檔案拖曳至此';
   fileNameDisplay.style.color = '';
   progressBox.classList.remove('show');
@@ -6511,6 +6520,7 @@ async function startUpload() {
     alert(`檔案大小超過上限 ${formatBytes(runtimeConfig.max_upload_bytes)}，請選擇較小的檔案。`);
     return;
   }
+  if (!window.previousMinutesUpload?.validate()) return;
 
   uploadBusy = true;
   updateUploadActionState();
@@ -6524,6 +6534,7 @@ async function startUpload() {
   if (customTitle) formData.append('title', customTitle);
   const customVocabulary = document.getElementById('custom-vocabulary').value.trim();
   if (customVocabulary) formData.append('custom_vocabulary', customVocabulary);
+  window.previousMinutesUpload?.appendTo(formData);
 
   try {
     const res = await fetch(`${API}/upload-media`, { method: 'POST', body: formData });
@@ -7479,5 +7490,6 @@ function drawVisualizer() {
   draw();
 }
 </script>
+<script src="/previous_minutes.js"></script>
 </body>
 </html>

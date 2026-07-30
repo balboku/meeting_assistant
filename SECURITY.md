@@ -23,6 +23,10 @@ The following paths are runtime data and must stay out of Git:
 - `backups/`
 - `logs/`
 
+## Previous Minutes Uploads
+
+Operator-supplied context accepts `.docx` only. The backend verifies the ZIP package signature and required Word members, rejects encrypted, macro-bearing, path-traversal, excessive-entry, oversized, or excessive-uncompressed packages, and never extracts package members to disk. Parsed text is bounded before it reaches the summary model. Document content is treated as untrusted reference data; current-meeting decisions and status changes still require evidence from the current transcript.
+
 ## Remote Access
 
 The backend allows loopback access and supports controlled LAN access. LAN clients should use the short-lived bootstrap/API session flow; rotate `APP_API_KEY` immediately if it is exposed.

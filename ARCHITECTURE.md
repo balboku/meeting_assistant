@@ -1,6 +1,6 @@
-# 🎙️ AI 語音會議助理 — 現行系統架構文件 v2.5
+# 🎙️ AI 語音會議助理 — 現行系統架構文件 v2.6
 
-> **文件版本**：2.5.0
+> **文件版本**：2.6.0
 > **更新日期**：2026/07/30
 > **現況**：FastAPI、SQLite 持久化佇列、Web/GUI、多段轉錄、品質閘門、人工複核與全文搜尋均為現行功能；LINE webhook 與 ngrok 自動 tunnel 已移除。
 
@@ -29,6 +29,7 @@ graph TB
     subgraph STORAGE["💾 4. 資料儲存層 (Storage)"]
         TEMP["📁 Temp 資料夾\n(分段 / 處理暫存 · 自動刪除)"]
         SOURCE["🎧 Source Media\n(原始錄音/錄影保留)"]
+        PREVIOUS["📄 Previous Minutes\nDOCX + SHA-256"]
         OUTPUT["📂 Output 資料夾\n(Markdown 會議記錄)"]
         ATTACH["📎 Attachments\n補充佐證與 SHA-256"]
         SQLITE["🗄️ SQLite + FTS5\n佇列 / 結構資料 / 版本 / 搜尋"]
@@ -38,10 +39,12 @@ graph TB
     GUI -- "HTTP POST /upload-media" --> FASTAPI
     FASTAPI --> PREPROCESS
     FASTAPI --> SOURCE
+    FASTAPI --> PREVIOUS
     PREPROCESS --> TEMP
     PREPROCESS --> QUEUE
     QUEUE --> TRANSCRIBE
     TRANSCRIBE -- "含時間戳逐字稿" --> QUEUE
+    PREVIOUS -- "未受信任背景資料" --> SUMMARY
     QUEUE --> SUMMARY
     SUMMARY -- "結構化 JSON D/R/A" --> QUEUE
     QUEUE --> OUTPUT
@@ -57,7 +60,7 @@ graph TB
 
 | 層級名稱 | 負責模組與技術堆疊 | 主要任務 |
 | --- | --- | --- |
-| **1. 使用者介面層 (Client)** | Web 歷史與複核介面<br>Python GUI (Tkinter/PyQt) + `sounddevice` | 收集音訊或影片來源（實體錄音 / 線上擷取 / 螢幕錄製），並向後端發送請求，最後展示結果給使用者。 |
+| **1. 使用者介面層 (Client)** | Web 歷史與複核介面<br>Python GUI (Tkinter/PyQt) + `sounddevice` | 收集音訊或影片來源；Web 上傳可選擇前次會議紀錄 `.docx`，最後展示結果供使用者複核。 |
 | **2. 核心後端層 (Backend)** | Python + FastAPI<br>SQLite 持久化佇列 + 單一 Worker | 接收媒體檔、驗證、排程、重試、取消、處理品質閘門，並提供審查與維運 API。 |
 | **3. AI 服務層 (AI Services)** | Gemini 轉錄模型 + 摘要/查核模型 | 先產生可追溯逐字稿，再以 JSON contract 產生 D/R/A；高品質模式增加第二模型證據查核。 |
 | **4. 資料儲存層 (Storage)** | 本地檔案 + SQLite/FTS5 | 保存原始媒體、Markdown、附件、任務事件、結構化 D/R/A、人工審查狀態與修訂歷史。 |
@@ -91,6 +94,7 @@ graph TB
 | **API 網關** | FastAPI | 開出 `/upload-media`（Web／桌面端上傳；`/upload-audio` 保留相容）及審查、搜尋、匯出與維運端點 |
 | **媒體預處理** | Pydub | 必要時抽取/轉換音訊並切割，保留原始音訊或影片作為證據檔 |
 | **任務佇列** | SQLite `jobs` + 單一 Worker | 跨服務重啟保留任務，支援 retry/backoff、取消、進度與事件時間線。 |
+| **前次紀錄解析** | `python-docx` + ZIP 封裝限制 + SHA-256 | 驗證並擷取操作者上傳的 `.docx`；保留來源血緣，限制文字長度，不接受舊 `.doc`、加密／巨集／異常封裝或無文字文件。 |
 
 ---
 
@@ -120,6 +124,7 @@ meeting_assistant/
 ├── temp/                          ← 分段與處理暫存檔（自動刪除）
 ├── output/
 │   ├── source_audio/              ← 已上傳的原始錄音/錄影（處理後保留，沿用舊資料夾名稱）
+│   ├── previous_minutes/          ← 操作者上傳的前次會議紀錄 DOCX（檔名與 SHA-256 寫入品質報告）
 │   ├── 2026-07-04_Marketing.md   ← 日期命名的會議記錄
 │   ├── 2026-07-05_Sync.md
 │   └── ...
@@ -196,14 +201,14 @@ sequenceDiagram
     participant SUM as 摘要模型
     participant DB as 儲存層
 
-    U->>API: POST /upload-media (媒體檔)
+    U->>API: POST /upload-media (媒體檔 + 選填前次 DOCX)
     API-->>U: {"status": "processing"} 立即回應
     API->>PROC: 存入 Temp，格式檢查
     PROC->>TX: 分段上傳與轉錄
     TX-->>PROC: 含時間戳逐字稿
     PROC->>PROC: 本機品質閘門與必要補救
-    PROC->>SUM: 完整逐字稿 + JSON contract
-    SUM-->>PROC: 結構化 D/R/A
+    PROC->>SUM: 前次紀錄背景 + 本次完整逐字稿 + JSON contract
+    SUM-->>PROC: 結構化 P/D/R/A
     PROC->>DB: 寫入 Markdown + SQLite + FTS
     PROC->>PROC: 刪除 Temp 媒體檔
     PROC-->>U: 推播「處理完成」通知
@@ -238,4 +243,4 @@ sequenceDiagram
 
 ---
 
-*AI 語音會議助理 · 系統架構文件 v2.5 · 2026/07/30*
+*AI 語音會議助理 · 系統架構文件 v2.6 · 2026/07/30*

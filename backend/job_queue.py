@@ -119,6 +119,9 @@ def enqueue_audio_job(
     summary_source_path: Optional[Path] = None,
     transcript_reuse_source_path: Optional[Path] = None,
     high_quality_summary: bool = False,
+    previous_minutes_path: Optional[Path] = None,
+    previous_minutes_filename: Optional[str] = None,
+    previous_minutes_sha256: Optional[str] = None,
 ) -> None:
     """Persist an uploaded audio job for the local worker."""
     selected_summary_model = summary_model or SUMMARY_MODEL
@@ -147,6 +150,9 @@ def enqueue_audio_job(
             "summary_source_path": str(summary_source_path) if summary_source_path else None,
             "transcript_reuse_source_path": str(transcript_reuse_source_path) if transcript_reuse_source_path else None,
             "high_quality_summary": bool(high_quality_summary),
+            "previous_minutes_path": str(previous_minutes_path) if previous_minutes_path else None,
+            "previous_minutes_filename": previous_minutes_filename,
+            "previous_minutes_sha256": previous_minutes_sha256,
         },
         max_attempts=max_attempts,
         message="媒體檔已接收，已排入可靠處理佇列。",
@@ -467,6 +473,7 @@ class JobQueueWorker:
         summary_source_path = payload.get("summary_source_path")
         transcript_reuse_source_path = payload.get("transcript_reuse_source_path")
         high_quality_summary = bool(payload.get("high_quality_summary"))
+        previous_minutes_path = payload.get("previous_minutes_path")
 
         output_path = process_audio_task(
             job_id=job_id,
@@ -491,6 +498,9 @@ class JobQueueWorker:
                 Path(transcript_reuse_source_path) if transcript_reuse_source_path else None
             ),
             high_quality_summary=high_quality_summary,
+            previous_minutes_path=Path(previous_minutes_path) if previous_minutes_path else None,
+            previous_minutes_filename=payload.get("previous_minutes_filename"),
+            previous_minutes_sha256=payload.get("previous_minutes_sha256"),
             worker_id=job.get("worker_id"),
             worker_generation=job.get("worker_generation"),
         )

@@ -155,6 +155,14 @@ from backend.maintenance import (
     run_startup_maintenance,
 )
 from backend.media_validation import validate_media_magic
+from backend.previous_minutes import (
+    PREVIOUS_MINUTES_MAX_BYTES,
+    PREVIOUS_MINUTES_MAX_MB,
+    PreviousMinutesError,
+    PreviousMinutesTooLargeError,
+    previous_minutes_reference,
+    store_previous_minutes_upload,
+)
 from backend.quality_segments import review_segment_details_from_text, review_segment_label
 from backend.source_audio import finalize_source_audio_upload, sha256_file
 from backend.tasks import (
@@ -189,6 +197,9 @@ ROOT_DIR   = Path(__file__).parent.parent
 TEMP_DIR   = Path(os.getenv("MEETING_TEMP_DIR") or ROOT_DIR / "temp")
 OUTPUT_DIR = Path(os.getenv("MEETING_OUTPUT_DIR") or ROOT_DIR / "output")
 SOURCE_AUDIO_DIR = Path(os.getenv("MEETING_SOURCE_AUDIO_DIR") or OUTPUT_DIR / "source_audio")
+PREVIOUS_MINUTES_DIR = Path(
+    os.getenv("MEETING_PREVIOUS_MINUTES_DIR") or OUTPUT_DIR / "previous_minutes"
+)
 BACKUP_DIR = Path(os.getenv("MEETING_BACKUP_DIR") or ROOT_DIR / "backups")
 _OFFSITE_BACKUP_DIR_VALUE = str(
     os.getenv("MEETING_OFFSITE_BACKUP_DIR") or ""
@@ -284,6 +295,7 @@ RECORDING_PROFILES = {
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 SOURCE_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+PREVIOUS_MINUTES_DIR.mkdir(parents=True, exist_ok=True)
 
 # 日誌設定
 configure_utf8_logging(level=logging.INFO)
@@ -310,6 +322,7 @@ async def lifespan(app: FastAPI):
                 DB_PATH,
                 BACKUP_DIR,
                 source_media_dir=SOURCE_AUDIO_DIR,
+                previous_minutes_dir=PREVIOUS_MINUTES_DIR,
                 offsite_backup_dir=OFFSITE_BACKUP_DIR,
                 backup_keep=DB_BACKUP_KEEP,
                 full_snapshot_min_interval_hours=(
@@ -1722,6 +1735,8 @@ async def app_config():
         recording_profiles=RECORDING_PROFILES,
         max_upload_mb=MAX_UPLOAD_MB,
         max_upload_bytes=MAX_UPLOAD_BYTES,
+        previous_minutes_max_mb=PREVIOUS_MINUTES_MAX_MB,
+        previous_minutes_max_bytes=PREVIOUS_MINUTES_MAX_BYTES,
         supported_extensions=sorted(SUPPORTED_MEDIA_FORMATS.keys()),
         source_media_archive_retention_days=SOURCE_MEDIA_ARCHIVE_RETENTION_DAYS,
     )
@@ -1833,6 +1848,10 @@ async def admin_list_audit_logs(
 )
 async def upload_media(
     file: UploadFile = File(..., description="要處理的媒體檔（音訊或影片，支援 mp3/wav/m4a/mp4/mov 等）"),
+    previous_minutes_file: Optional[UploadFile] = File(
+        default=None,
+        description="前次會議紀錄（選填，僅支援含可讀文字的 Word .docx）",
+    ),
     model: Optional[str] = Form(default=None, description=f"指定 Gemini 模型（預設：{GEMINI_MODEL}）"),
     title: Optional[str] = Form(default=None, description="自訂會議標題（預設使用檔案名稱）"),
     custom_vocabulary: Optional[str] = Form(default=None, description="本次會議專有詞彙，使用逗號或換行分隔"),
@@ -1859,7 +1878,8 @@ async def upload_media(
 
     if (
         content_length is not None
-        and content_length > MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_ALLOWANCE_BYTES
+        and content_length
+        > MAX_UPLOAD_BYTES + PREVIOUS_MINUTES_MAX_BYTES + MULTIPART_OVERHEAD_ALLOWANCE_BYTES
     ):
         raise HTTPException(
             status_code=413,
@@ -1922,6 +1942,29 @@ async def upload_media(
             temp_source_audio_path.unlink()
         raise HTTPException(status_code=500, detail=f"檔案儲存失敗：{e}")
 
+    previous_minutes_context = None
+    if previous_minutes_file is not None and previous_minutes_file.filename:
+        try:
+            previous_minutes_context = await store_previous_minutes_upload(
+                previous_minutes_file,
+                target_dir=PREVIOUS_MINUTES_DIR,
+                job_id=job_id,
+                timestamp=timestamp,
+            )
+        except PreviousMinutesTooLargeError as exc:
+            if created_new_source_audio and source_audio_path.exists():
+                source_audio_path.unlink()
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except PreviousMinutesError as exc:
+            if created_new_source_audio and source_audio_path.exists():
+                source_audio_path.unlink()
+            status_code = (
+                415
+                if Path(previous_minutes_file.filename).suffix.lower() != ".docx"
+                else 400
+            )
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
     # --- 寫入持久化任務佇列 ---
     selected_model = model or GEMINI_MODEL
     selected_recording_profile = (recording_profile or "").strip()
@@ -1939,6 +1982,17 @@ async def upload_media(
             recording_profile=selected_recording_profile,
             client_recording_warning=client_recording_warning,
             custom_vocabulary=custom_vocabulary_terms,
+            previous_minutes_path=(
+                Path(previous_minutes_context["stored_path"])
+                if previous_minutes_context
+                else None
+            ),
+            previous_minutes_filename=(
+                previous_minutes_context["filename"] if previous_minutes_context else None
+            ),
+            previous_minutes_sha256=(
+                previous_minutes_context["sha256"] if previous_minutes_context else None
+            ),
         )
     except Exception as e:
         if created_new_source_audio:
@@ -4102,6 +4156,11 @@ async def rerun_meeting_record(
             else automatically_full_rerun_indices
         )
     )
+    previous_minutes_path, previous_minutes_filename, previous_minutes_sha256 = (
+        previous_minutes_reference(quality_report)
+    )
+    if previous_minutes_path and not previous_minutes_path.is_file():
+        raise HTTPException(status_code=409, detail="前次會議紀錄來源檔不存在，無法保留追蹤脈絡。")
 
     job_id = str(uuid.uuid4())
     try:
@@ -4127,6 +4186,9 @@ async def rerun_meeting_record(
             transcript_reuse_source_path=transcript_reuse_source_path,
             high_quality_summary=high_quality,
             custom_vocabulary=custom_vocabulary,
+            previous_minutes_path=previous_minutes_path,
+            previous_minutes_filename=previous_minutes_filename,
+            previous_minutes_sha256=previous_minutes_sha256,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"重跑任務排入佇列失敗：{exc}") from exc

@@ -293,10 +293,11 @@ def create_record_snapshot(
     backup_dir: Path,
     *,
     source_media_dir: Path | None = None,
+    previous_minutes_dir: Path | None = None,
     now: datetime | None = None,
     keep: int = 5,
 ) -> Path:
-    """Bundle DB, Markdown, attachments, and referenced original media."""
+    """Bundle DB, Markdown, attachments, prior DOCX, and referenced media."""
     backup_path = Path(backup_path)
     verification = verify_database_backup(backup_path)
     if not verification["ok"]:
@@ -307,6 +308,7 @@ def create_record_snapshot(
     entries: list[dict[str, object]] = []
     missing: list[dict[str, object]] = []
     archived_source_media: dict[str, str] = {}
+    archived_previous_minutes: dict[str, str] = {}
 
     conn = sqlite3.connect(str(backup_path))
     conn.row_factory = sqlite3.Row
@@ -414,6 +416,60 @@ def create_record_snapshot(
                     "meeting_id": int(row["id"]),
                     "source_path": source_audio_value,
                 })
+
+            try:
+                quality_report = json.loads(str(row["quality_report_json"] or "{}"))
+            except json.JSONDecodeError:
+                quality_report = {}
+            previous_metadata = (
+                quality_report.get("previous_minutes")
+                if isinstance(quality_report, dict)
+                else None
+            )
+            if isinstance(previous_metadata, dict):
+                stored_value = str(previous_metadata.get("stored_path") or "").strip()
+                original_name = str(previous_metadata.get("filename") or "").strip()
+                recorded_digest = str(previous_metadata.get("sha256") or "").strip().lower()
+                candidates = [Path(stored_value)] if stored_value else []
+                if previous_minutes_dir is not None and stored_value:
+                    candidates.append(Path(previous_minutes_dir) / Path(stored_value).name)
+                previous_path = next(
+                    (candidate for candidate in candidates if candidate.is_file()),
+                    None,
+                )
+                if previous_path is not None:
+                    digest = _sha256_file(previous_path)
+                    if recorded_digest and digest != recorded_digest:
+                        missing.append({
+                            "category": "previous_minutes",
+                            "meeting_id": int(row["id"]),
+                            "source_path": str(previous_path),
+                            "detail": "SHA-256 不符",
+                        })
+                    else:
+                        arcname = archived_previous_minutes.get(digest)
+                        if arcname is None:
+                            arcname = f"previous_minutes/{digest[:2]}/{digest}.docx"
+                            archive.write(previous_path, arcname)
+                            archived_previous_minutes[digest] = arcname
+                            entries.append({
+                                "category": "previous_minutes",
+                                "archive_path": arcname,
+                                "source_path": str(previous_path),
+                                "sha256": digest,
+                                "bytes": previous_path.stat().st_size,
+                            })
+                        meeting_entry.update({
+                            "previous_minutes_archive_path": arcname,
+                            "previous_minutes_original_name": original_name,
+                            "previous_minutes_sha256": digest,
+                        })
+                else:
+                    missing.append({
+                        "category": "previous_minutes",
+                        "meeting_id": int(row["id"]),
+                        "source_path": stored_value,
+                    })
             meeting_manifest.append(meeting_entry)
 
         for row in evidence:
@@ -447,7 +503,11 @@ def create_record_snapshot(
             "source_media_inventory_sha256": directory_inventory_fingerprint(
                 source_media_dir
             ),
+            "previous_minutes_inventory_sha256": directory_inventory_fingerprint(
+                previous_minutes_dir
+            ),
             "source_media_policy": "已連結會議的原始媒體以 SHA-256 內容定址去重納入快照。",
+            "previous_minutes_policy": "已連結會議的前次 DOCX 以記錄的 SHA-256 驗證後納入快照。",
             "meetings": meeting_manifest,
             "entries": entries,
             "missing": missing,
@@ -545,11 +605,19 @@ def verify_record_snapshot(snapshot_path: Path) -> dict[str, object]:
             for entry in manifest.get("entries") or []
             if entry.get("category") == "source_media"
         ),
+        "previous_minutes": sum(
+            1
+            for entry in manifest.get("entries") or []
+            if entry.get("category") == "previous_minutes"
+        ),
         "meetings": database_check.get("meetings"),
         "jobs": database_check.get("jobs"),
         "record_state_sha256": manifest.get("record_state_sha256"),
         "source_media_inventory_sha256": manifest.get(
             "source_media_inventory_sha256"
+        ),
+        "previous_minutes_inventory_sha256": manifest.get(
+            "previous_minutes_inventory_sha256"
         ),
     }
     _remember_record_snapshot_verification(path, result)
@@ -619,9 +687,11 @@ def restore_record_snapshot(snapshot_path: Path, target_dir: Path) -> dict[str, 
     runtime_root = target / "runtime"
     runtime_output = runtime_root / "output"
     runtime_source_media = runtime_output / "source_audio"
+    runtime_previous_minutes = runtime_output / "previous_minutes"
     runtime_evidence = runtime_root / "evidence"
     runtime_output.mkdir(parents=True, exist_ok=True)
     runtime_source_media.mkdir(parents=True, exist_ok=True)
+    runtime_previous_minutes.mkdir(parents=True, exist_ok=True)
     runtime_evidence.mkdir(parents=True, exist_ok=True)
     runtime_db = runtime_root / "meetings.db"
     shutil.copy2(target / "database" / "meetings.db", runtime_db)
@@ -665,6 +735,36 @@ def restore_record_snapshot(snapshot_path: Path, target_dir: Path) -> dict[str, 
                     (str(source_target), meeting_id),
                 )
 
+            previous_arcname = str(
+                meeting.get("previous_minutes_archive_path") or ""
+            ).strip()
+            previous_target: Path | None = None
+            if previous_arcname:
+                previous_file = target / previous_arcname
+                previous_target = runtime_previous_minutes / previous_file.name
+                if not previous_target.exists():
+                    shutil.copy2(previous_file, previous_target)
+                    restored_files += 1
+                report_row = conn.execute(
+                    "SELECT quality_report_json FROM meetings WHERE id=?",
+                    (meeting_id,),
+                ).fetchone()
+                try:
+                    quality_report = json.loads(report_row[0] or "{}") if report_row else {}
+                except json.JSONDecodeError:
+                    quality_report = {}
+                if not isinstance(quality_report, dict):
+                    quality_report = {}
+                previous_metadata = quality_report.get("previous_minutes")
+                if not isinstance(previous_metadata, dict):
+                    previous_metadata = {}
+                previous_metadata["stored_path"] = str(previous_target)
+                quality_report["previous_minutes"] = previous_metadata
+                conn.execute(
+                    "UPDATE meetings SET quality_report_json=? WHERE id=?",
+                    (json.dumps(quality_report, ensure_ascii=False), meeting_id),
+                )
+
             if job_id:
                 job_row = conn.execute(
                     "SELECT payload_json FROM jobs WHERE job_id=?",
@@ -677,6 +777,14 @@ def restore_record_snapshot(snapshot_path: Path, target_dir: Path) -> dict[str, 
                         payload = {}
                     if source_target is not None:
                         payload["audio_path"] = str(source_target)
+                    if previous_target is not None:
+                        payload["previous_minutes_path"] = str(previous_target)
+                        payload["previous_minutes_filename"] = meeting.get(
+                            "previous_minutes_original_name"
+                        )
+                        payload["previous_minutes_sha256"] = meeting.get(
+                            "previous_minutes_sha256"
+                        )
                     payload["output_dir"] = str(runtime_output)
                     conn.execute(
                         """UPDATE jobs
@@ -1029,6 +1137,7 @@ def run_startup_maintenance(
     db_path: Path,
     backup_dir: Path,
     source_media_dir: Path | None = None,
+    previous_minutes_dir: Path | None = None,
     offsite_backup_dir: Path | None = None,
     backup_keep: int = 5,
     full_snapshot_min_interval_hours: int = 24,
@@ -1038,6 +1147,7 @@ def run_startup_maintenance(
     backup_verification = verify_database_backup(backup_path)
     backup_record_state = record_state_fingerprint(backup_path)
     source_media_inventory = directory_inventory_fingerprint(source_media_dir)
+    previous_minutes_inventory = directory_inventory_fingerprint(previous_minutes_dir)
     existing_snapshot = latest_record_snapshot_health(
         backup_dir,
         max_age_hours=max(1, int(full_snapshot_min_interval_hours)),
@@ -1056,6 +1166,10 @@ def run_startup_maintenance(
             existing_snapshot.get("source_media_inventory_sha256")
             == source_media_inventory
         )
+        and (
+            existing_snapshot.get("previous_minutes_inventory_sha256")
+            == previous_minutes_inventory
+        )
     )
     snapshot_path = (
         Path(str(existing_snapshot["path"]))
@@ -1064,6 +1178,7 @@ def run_startup_maintenance(
             backup_path=backup_path,
             backup_dir=backup_dir,
             source_media_dir=source_media_dir,
+            previous_minutes_dir=previous_minutes_dir,
             keep=backup_keep,
         )
     )

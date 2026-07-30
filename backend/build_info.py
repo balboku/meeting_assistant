@@ -10,7 +10,7 @@ from typing import Any
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.6.0"
 SOURCE_SUFFIXES = {".py", ".html", ".js", ".css", ".ps1"}
 
 
@@ -35,7 +35,7 @@ def _git(*args: str) -> str | None:
 
 def _source_files() -> list[Path]:
     candidates: list[Path] = []
-    for directory_name in ("backend", "scripts"):
+    for directory_name in ("backend", "scripts", "static"):
         directory = ROOT_DIR / directory_name
         if directory.is_dir():
             candidates.extend(
@@ -45,7 +45,7 @@ def _source_files() -> list[Path]:
                 and path.suffix.lower() in SOURCE_SUFFIXES
                 and "__pycache__" not in path.parts
             )
-    for relative in ("static/index.html", "start.py", "requirements.txt"):
+    for relative in ("start.py", "requirements.txt"):
         path = ROOT_DIR / relative
         if path.is_file():
             candidates.append(path)
