@@ -227,7 +227,10 @@ class PreviousMinutesUploadTests(unittest.TestCase):
                 hashlib.sha256(prior_docx).hexdigest(),
             )
             self.assertTrue(captured["previous_minutes_path"].is_file())
-            self.assertEqual(captured["previous_minutes_path"].parent, prior_dir)
+            self.assertTrue(
+                captured["previous_minutes_path"].parent.samefile(prior_dir),
+                "uploaded DOCX should remain inside the configured previous-minutes directory",
+            )
 
     def test_invalid_docx_is_rejected_and_new_media_is_cleaned(self):
         from backend import main
