@@ -122,6 +122,7 @@ def enqueue_audio_job(
     previous_minutes_path: Optional[Path] = None,
     previous_minutes_filename: Optional[str] = None,
     previous_minutes_sha256: Optional[str] = None,
+    regeneration_context: Optional[dict[str, Any]] = None,
 ) -> None:
     """Persist an uploaded audio job for the local worker."""
     selected_summary_model = summary_model or SUMMARY_MODEL
@@ -153,6 +154,7 @@ def enqueue_audio_job(
             "previous_minutes_path": str(previous_minutes_path) if previous_minutes_path else None,
             "previous_minutes_filename": previous_minutes_filename,
             "previous_minutes_sha256": previous_minutes_sha256,
+            "regeneration_context": dict(regeneration_context or {}) or None,
         },
         max_attempts=max_attempts,
         message="媒體檔已接收，已排入可靠處理佇列。",
@@ -501,6 +503,7 @@ class JobQueueWorker:
             previous_minutes_path=Path(previous_minutes_path) if previous_minutes_path else None,
             previous_minutes_filename=payload.get("previous_minutes_filename"),
             previous_minutes_sha256=payload.get("previous_minutes_sha256"),
+            regeneration_context=payload.get("regeneration_context"),
             worker_id=job.get("worker_id"),
             worker_generation=job.get("worker_generation"),
         )

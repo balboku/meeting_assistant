@@ -85,6 +85,7 @@ def permission_for_request(method: str, path: str) -> Optional[str]:
             return "meeting:delete"
         if (
             route.endswith("/rerun")
+            or route.endswith("/previous-minutes-rerun")
             or "/quality/" in route
             or route == "/meetings/quality/recheck-all"
         ):

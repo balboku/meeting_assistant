@@ -90,6 +90,12 @@ Path(sys.argv[1]).write_text("\n;\n".join(scripts), encoding="utf-8")
                 throw "Inline JavaScript extraction failed with exit code $LASTEXITCODE"
             }
             node --check $tempJs
+            Get-ChildItem -LiteralPath "static" -Filter "*.js" -File | ForEach-Object {
+                node --check $_.FullName
+                if ($LASTEXITCODE -ne 0) {
+                    throw "JavaScript syntax check failed for $($_.FullName)"
+                }
+            }
             # Regression coverage marker: node --check static/index.html
         }
         finally {

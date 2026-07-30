@@ -8970,6 +8970,7 @@ def process_audio_task(
     previous_minutes_path: Optional[Path] = None,
     previous_minutes_filename: Optional[str] = None,
     previous_minutes_sha256: Optional[str] = None,
+    regeneration_context: Optional[dict[str, Any]] = None,
     high_quality_summary: bool = False,
     worker_id: Optional[str] = None,
     worker_generation: Optional[int] = None,
@@ -8978,7 +8979,6 @@ def process_audio_task(
     主要背景任務函數：接收音檔路徑，執行完整的 AI 會議記錄生成流程。
 
     所有音訊都先產生逐字稿，再用摘要模型整理會議記錄；長音訊會先切割成分段後依序轉錄。
-
     此函數由本機持久化佇列 worker 或相容的背景流程呼叫，
     任何步驟的狀態變更都會即時寫入 SQLite，供 /status/{job_id} 查詢。
     """
@@ -9011,7 +9011,6 @@ def process_audio_task(
     structured_summary: Optional[dict[str, Any]] = None
     actual_meeting_date = _infer_meeting_date(meeting_title, audio_path)
     previous_minutes_context: Optional[dict[str, Any]] = None
-
     try:
         if previous_minutes_path is not None:
             previous_minutes_context = read_previous_minutes_context(
@@ -10858,6 +10857,7 @@ def process_audio_task(
             quality_report["previous_minutes"] = previous_minutes_metadata(
                 previous_minutes_context, include_path=True
             )
+        if regeneration_context: quality_report["regeneration"] = dict(regeneration_context)
         try:
             source_audio_size = audio_path.stat().st_size
             source_audio_sha256 = _sha256_file(audio_path)

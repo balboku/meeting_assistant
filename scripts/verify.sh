@@ -87,6 +87,9 @@ for attrs, body in re.findall(r"<script([^>]*)>(.*?)</script>", html, flags=re.I
 target.write_text("\n;\n".join(inline_scripts), encoding="utf-8")
 PY
     node --check "$tmp_js"
+    for static_js in static/*.js; do
+        node --check "$static_js"
+    done
     # Regression coverage marker: node --check static/index.html
 else
     echo "node not found; skipping frontend syntax check"

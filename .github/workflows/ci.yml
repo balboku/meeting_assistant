@@ -72,6 +72,11 @@ jobs:
       - name: Architecture guard
         run: python scripts/check_architecture.py
 
+      - name: Frontend JavaScript syntax
+        run: |
+          node --check static/previous_minutes.js
+          node --check static/previous_minutes_rerun.js
+
       - name: Quality consistency audit
         run: python scripts/audit_quality_consistency.py
 

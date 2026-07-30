@@ -4238,6 +4238,112 @@ async def rerun_meeting_record(
 
 
 @app.post(
+    "/meetings/{meeting_id}/previous-minutes-rerun",
+    response_model=JobResponse,
+    summary="補上前次會議紀錄並沿用既有逐字稿重產",
+    tags=["會議記錄"],
+    status_code=202,
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
+async def rerun_meeting_with_previous_minutes(
+    meeting_id: int,
+    previous_minutes_file: UploadFile = File(
+        ...,
+        description="重產時補上的前次會議紀錄（僅支援含可讀文字的 Word .docx）",
+    ),
+    high_quality: bool = Form(
+        default=True,
+        description="摘要完成後使用第二模型再做一次證據查核",
+    ),
+):
+    """保留原紀錄，沿用其逐字稿並以新上傳的前次 DOCX 產生新紀錄。"""
+    record = get_meeting(meeting_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
+    if not previous_minutes_file.filename:
+        raise HTTPException(status_code=400, detail="未提供前次會議紀錄檔名")
+
+    audio_path = _resolve_meeting_source_audio(record)
+    summary_source_path = Path(record.get("output_path") or "")
+    if not summary_source_path.is_file():
+        raise HTTPException(status_code=409, detail="原會議紀錄檔不存在，無法沿用逐字稿重產。")
+    try:
+        source_content = await asyncio.to_thread(
+            summary_source_path.read_text,
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise HTTPException(status_code=409, detail="原會議紀錄檔無法讀取，無法沿用逐字稿重產。") from exc
+    source_transcript = _extract_transcript_section_body(source_content)
+    if not source_transcript:
+        raise HTTPException(status_code=409, detail="原會議紀錄缺少完整逐字稿，無法補上前次紀錄重產。")
+
+    job_id = str(uuid.uuid4())
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    previous_context = None
+    try:
+        previous_context = await store_previous_minutes_upload(
+            previous_minutes_file,
+            target_dir=PREVIOUS_MINUTES_DIR,
+            job_id=job_id,
+            timestamp=timestamp,
+        )
+    except PreviousMinutesTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except PreviousMinutesError as exc:
+        status_code = (
+            415
+            if Path(previous_minutes_file.filename).suffix.lower() != ".docx"
+            else 400
+        )
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    quality_report = record.get("quality_report") or {}
+    recording = quality_report.get("recording") if isinstance(quality_report, dict) else {}
+    custom_vocabulary = normalize_custom_vocabulary(
+        recording.get("custom_vocabulary") if isinstance(recording, dict) else None
+    )
+    previous_path = Path(previous_context["stored_path"])
+    try:
+        enqueue_audio_job(
+            job_id=job_id,
+            audio_path=audio_path,
+            output_dir=OUTPUT_DIR,
+            model=GEMINI_MODEL,
+            meeting_title=record["title"],
+            source="meeting_previous_minutes_rerun",
+            summary_source_path=summary_source_path,
+            high_quality_summary=high_quality,
+            custom_vocabulary=custom_vocabulary,
+            previous_minutes_path=previous_path,
+            previous_minutes_filename=previous_context["filename"],
+            previous_minutes_sha256=previous_context["sha256"],
+            regeneration_context={
+                "relation": "regenerated_with_previous_minutes",
+                "source_meeting_id": meeting_id,
+                "source_job_id": record.get("job_id"),
+                "transcript_reused": True,
+                "source_transcript_sha256": hashlib.sha256(
+                    source_transcript.encode("utf-8")
+                ).hexdigest(),
+            },
+        )
+    except Exception as exc:
+        try:
+            previous_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("無法清理排入佇列失敗的前次會議紀錄：%s", previous_path)
+        raise HTTPException(status_code=500, detail=f"重產任務排入佇列失敗：{exc}") from exc
+
+    mode = "高品質" if high_quality else "標準"
+    return JobResponse(
+        job_id=job_id,
+        status=JobStatus.PENDING,
+        message=f"已補上前次會議紀錄並建立{mode}摘要重產任務；原紀錄會保留。",
+    )
+
+
+@app.post(
     "/meetings/{meeting_id}/evidence",
     response_model=MeetingEvidenceResponse,
     summary="上傳補充資料並追加到會議記錄",

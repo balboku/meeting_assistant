@@ -1565,7 +1565,7 @@
     .upload-area .icon { font-size: 32px; margin-bottom: 12px; color: var(--blue-dim); }
     .upload-area span { display: block; font-size: 14px; margin-top: 8px; color: var(--text-mid); }
     #file-input { display: none; }
-    #evidence-file-input { display: none; }
+    #evidence-file-input, #previous-minutes-rerun-input { display: none; }
 
     .form-group { margin-bottom: 20px; }
     .form-label { display: block; font-size: 13px; color: var(--text-mid); margin-bottom: 8px; }
@@ -6001,6 +6001,10 @@ async function openDetail(id) {
             <button id="rerun-summary-button" class="btn-secondary" aria-describedby="detail-status" aria-busy="false" title="沿用逐字稿，只重新產生摘要、決議與待辦" onclick="rerunMeeting(${id}, null, true)">↻ 重整摘要</button>
             <button id="rerun-summary-high-quality-button" class="btn-secondary" aria-describedby="detail-status" aria-busy="false" title="沿用逐字稿，增加一次第二模型證據查核" onclick="rerunMeeting(${id}, null, true, true)">✓ 高品質重整</button>
             <button id="rerun-meeting-button" class="btn-secondary" aria-describedby="detail-status" aria-busy="false" onclick="rerunMeeting(${id})">🔁 重跑</button>
+            <button id="previous-minutes-rerun-button" class="btn-secondary" aria-describedby="previous-minutes-rerun-status" aria-busy="false" title="補上一份前次 DOCX，沿用目前逐字稿並以高品質模式建立新紀錄" onclick="document.getElementById('previous-minutes-rerun-input').click()">📄 補前次重產</button>
+            <input id="previous-minutes-rerun-input" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                   onchange="window.previousMinutesRerun?.start(${id}, this.files[0]); this.value='';">
+            <span id="previous-minutes-rerun-status" class="evidence-upload-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></span>
             <button id="evidence-upload-button" class="btn-secondary" aria-describedby="evidence-upload-status" aria-busy="false" onclick="document.getElementById('evidence-file-input').click()">📎 補充資料</button>
             <input id="evidence-file-input"
                    type="file"
@@ -6013,6 +6017,7 @@ async function openDetail(id) {
         <div class="detail-meta-row" style="margin-top: 12px;">
           <div class="meta-chip"><span class="icon">📅</span>${r.date}</div>
           ${renderDetailSourceMediaChip(r)}
+          ${window.previousMinutesRerun?.renderLineage(r) || ''}
           <div class="meta-chip"><span class="icon">⏰</span>${formatDate(r.created_at)}</div>
         </div>
       </div>
@@ -7491,5 +7496,6 @@ function drawVisualizer() {
 }
 </script>
 <script src="/previous_minutes.js"></script>
+<script src="/previous_minutes_rerun.js"></script>
 </body>
 </html>

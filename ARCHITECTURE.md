@@ -1,6 +1,6 @@
-# 🎙️ AI 語音會議助理 — 現行系統架構文件 v2.6
+# 🎙️ AI 語音會議助理 — 現行系統架構文件 v2.7
 
-> **文件版本**：2.6.0
+> **文件版本**：2.7.0
 > **更新日期**：2026/07/30
 > **現況**：FastAPI、SQLite 持久化佇列、Web/GUI、多段轉錄、品質閘門、人工複核與全文搜尋均為現行功能；LINE webhook 與 ngrok 自動 tunnel 已移除。
 
@@ -60,7 +60,7 @@ graph TB
 
 | 層級名稱 | 負責模組與技術堆疊 | 主要任務 |
 | --- | --- | --- |
-| **1. 使用者介面層 (Client)** | Web 歷史與複核介面<br>Python GUI (Tkinter/PyQt) + `sounddevice` | 收集音訊或影片來源；Web 上傳可選擇前次會議紀錄 `.docx`，最後展示結果供使用者複核。 |
+| **1. 使用者介面層 (Client)** | Web 歷史與複核介面<br>Python GUI (Tkinter/PyQt) + `sounddevice` | 收集音訊或影片來源；Web 上傳或既有會議詳情可選擇前次會議紀錄 `.docx`，最後展示結果與重產來源供使用者複核。 |
 | **2. 核心後端層 (Backend)** | Python + FastAPI<br>SQLite 持久化佇列 + 單一 Worker | 接收媒體檔、驗證、排程、重試、取消、處理品質閘門，並提供審查與維運 API。 |
 | **3. AI 服務層 (AI Services)** | Gemini 轉錄模型 + 摘要/查核模型 | 先產生可追溯逐字稿，再以 JSON contract 產生 D/R/A；高品質模式增加第二模型證據查核。 |
 | **4. 資料儲存層 (Storage)** | 本地檔案 + SQLite/FTS5 | 保存原始媒體、Markdown、附件、任務事件、結構化 D/R/A、人工審查狀態與修訂歷史。 |
@@ -130,6 +130,8 @@ meeting_assistant/
 │   └── ...
 └── meetings.db                    ← SQLite（可選，歷史搜尋用）
 ```
+
+既有會議可在產出後補上一份前次 DOCX。後端保留原紀錄，沿用其完整逐字稿建立高品質摘要重產任務；新紀錄的 `quality_report_json.regeneration` 保存來源會議 ID、來源 job ID、逐字稿 SHA-256 與 `regenerated_with_previous_minutes` 關係。DOCX 路徑、檔名與 SHA-256 仍由持久化佇列傳遞，重啟、重試與記錄快照會沿用相同來源。
 
 **SQLite 資料表設計（現行）**：
 

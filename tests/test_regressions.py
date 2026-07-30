@@ -17387,13 +17387,17 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
                  mock.patch.object(tasks, "_transcribe_segment") as transcribe, \
                  mock.patch.object(tasks, "is_job_cancel_requested", return_value=False), \
                  mock.patch.object(tasks, "update_job_status"), \
-                 mock.patch.object(tasks, "save_meeting"):
+                 mock.patch.object(tasks, "save_meeting") as save_meeting_mock:
                 output_path = tasks.process_audio_task(
                     job_id="summary-only-job",
                     audio_path=audio_path,
                     output_dir=output_dir,
                     meeting_title="現場錄製_2026-7-10 下午1-17-27",
                     summary_source_path=source_path,
+                    regeneration_context={
+                        "relation": "regenerated_with_previous_minutes",
+                        "source_meeting_id": 42,
+                    },
                 )
 
             self.assertIsNotNone(output_path)
@@ -17402,6 +17406,13 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             self.assertIn("已沿用逐字稿", output_text)
             self.assertIn("保留這份器械與振幅正 20% 的完整逐字稿", output_text)
             self.assertNotIn("氣械與政府正 20%", output_text)
+            self.assertEqual(
+                save_meeting_mock.call_args.kwargs["quality_report"]["regeneration"],
+                {
+                    "relation": "regenerated_with_previous_minutes",
+                    "source_meeting_id": 42,
+                },
+            )
 
     def test_summary_only_processing_blocks_audio_confirmed_transcript_gap(self):
         from backend import tasks
@@ -19903,6 +19914,13 @@ class MeetingReviewWorkflowRegressionTests(unittest.TestCase):
         self.assertEqual(permission_for_request("GET", "/meetings/1"), "meeting:read")
         self.assertEqual(permission_for_request("PUT", "/meetings/1/summary"), "meeting:write")
         self.assertEqual(permission_for_request("POST", "/meetings/1/rerun"), "meeting:rerun")
+        self.assertEqual(
+            permission_for_request(
+                "POST",
+                "/meetings/1/previous-minutes-rerun",
+            ),
+            "meeting:rerun",
+        )
         self.assertEqual(permission_for_request("DELETE", "/meetings/1"), "meeting:delete")
         self.assertEqual(permission_for_request("GET", "/jobs"), "job:read")
         self.assertEqual(permission_for_request("POST", "/jobs/abc/retry"), "job:manage")

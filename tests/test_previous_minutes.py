@@ -275,6 +275,126 @@ class PreviousMinutesUploadTests(unittest.TestCase):
         self.assertIn("previous_minutes_file", script)
         self.assertIn("本次狀態仍以本次逐字稿為準", script)
 
+    def test_existing_meeting_can_add_docx_and_enqueue_high_quality_regeneration(self):
+        from backend import main
+
+        captured = {}
+        prior_docx = docx_bytes("前次待辦：完成設計驗證。")
+        transcript = "[00:00] **[發言者 A]**：本次確認設計驗證進度。"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            prior_dir = root / "previous_minutes"
+            output_dir = root / "output"
+            output_dir.mkdir()
+            audio_path = root / "meeting.mp3"
+            audio_path.write_bytes(b"ID3-audio")
+            meeting_path = root / "meeting.md"
+            meeting_path.write_text(
+                f"## 📝 四、完整逐字稿 (Verbatim Transcript)\n{transcript}",
+                encoding="utf-8",
+            )
+            record = {
+                "id": 42,
+                "job_id": "source-job",
+                "title": "設計驗證會議",
+                "output_path": str(meeting_path),
+                "quality_report": {
+                    "recording": {"custom_vocabulary": ["產品代號"]}
+                },
+            }
+            with mock.patch.object(main, "get_meeting", return_value=record), \
+                 mock.patch.object(main, "_resolve_meeting_source_audio", return_value=audio_path), \
+                 mock.patch.object(main, "PREVIOUS_MINUTES_DIR", prior_dir), \
+                 mock.patch.object(main, "OUTPUT_DIR", output_dir), \
+                 mock.patch.object(
+                     main,
+                     "enqueue_audio_job",
+                     side_effect=lambda **kwargs: captured.update(kwargs),
+                 ):
+                response = asyncio.run(asgi_post(
+                    main.app,
+                    "/meetings/42/previous-minutes-rerun",
+                    files={
+                        "previous_minutes_file": (
+                            "前次會議.docx",
+                            prior_docx,
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        ),
+                    },
+                ))
+
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(captured["source"], "meeting_previous_minutes_rerun")
+            self.assertEqual(captured["summary_source_path"], meeting_path)
+            self.assertTrue(captured["high_quality_summary"])
+            self.assertEqual(captured["custom_vocabulary"], ["產品代號"])
+            self.assertEqual(
+                captured["previous_minutes_sha256"],
+                hashlib.sha256(prior_docx).hexdigest(),
+            )
+            regeneration = captured["regeneration_context"]
+            self.assertEqual(regeneration["relation"], "regenerated_with_previous_minutes")
+            self.assertEqual(regeneration["source_meeting_id"], 42)
+            self.assertEqual(regeneration["source_job_id"], "source-job")
+            self.assertTrue(regeneration["transcript_reused"])
+            self.assertEqual(
+                regeneration["source_transcript_sha256"],
+                hashlib.sha256(transcript.encode("utf-8")).hexdigest(),
+            )
+            self.assertTrue(captured["previous_minutes_path"].is_file())
+
+    def test_regeneration_enqueue_failure_removes_new_previous_minutes_file(self):
+        from backend import main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            prior_dir = root / "previous_minutes"
+            audio_path = root / "meeting.mp3"
+            audio_path.write_bytes(b"ID3-audio")
+            meeting_path = root / "meeting.md"
+            meeting_path.write_text(
+                "## 📝 四、完整逐字稿 (Verbatim Transcript)\n"
+                "[00:00] **[發言者 A]**：測試。",
+                encoding="utf-8",
+            )
+            record = {
+                "id": 43,
+                "title": "重產失敗清理",
+                "output_path": str(meeting_path),
+                "quality_report": {},
+            }
+            with mock.patch.object(main, "get_meeting", return_value=record), \
+                 mock.patch.object(main, "_resolve_meeting_source_audio", return_value=audio_path), \
+                 mock.patch.object(main, "PREVIOUS_MINUTES_DIR", prior_dir), \
+                 mock.patch.object(main, "enqueue_audio_job", side_effect=RuntimeError("queue down")):
+                response = asyncio.run(asgi_post(
+                    main.app,
+                    "/meetings/43/previous-minutes-rerun",
+                    files={
+                        "previous_minutes_file": (
+                            "前次會議.docx",
+                            docx_bytes("前次待辦"),
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        ),
+                    },
+                ))
+
+            self.assertEqual(response.status_code, 500)
+            self.assertFalse(list(prior_dir.glob("*")))
+
+    def test_frontend_can_add_previous_minutes_after_generation(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "static" / "index.html").read_text(encoding="utf-8")
+        script = (root / "static" / "previous_minutes_rerun.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('id="previous-minutes-rerun-button"', html)
+        self.assertIn('id="previous-minutes-rerun-input"', html)
+        self.assertIn('script src="/previous_minutes_rerun.js"', html)
+        self.assertIn("/previous-minutes-rerun", script)
+        self.assertIn("high_quality", script)
+        self.assertIn("regenerated_with_previous_minutes", script)
+
 
 class PreviousMinutesQueueTests(unittest.TestCase):
     def test_queue_persists_and_worker_forwards_previous_minutes_reference(self):
@@ -282,6 +402,10 @@ class PreviousMinutesQueueTests(unittest.TestCase):
 
         captured_job = {}
         prior_path = Path("C:/records/prior.docx")
+        regeneration_context = {
+            "relation": "regenerated_with_previous_minutes",
+            "source_meeting_id": 42,
+        }
         with mock.patch.object(
             job_queue,
             "create_job",
@@ -296,12 +420,14 @@ class PreviousMinutesQueueTests(unittest.TestCase):
                 previous_minutes_path=prior_path,
                 previous_minutes_filename="前次會議.docx",
                 previous_minutes_sha256="b" * 64,
+                regeneration_context=regeneration_context,
             )
 
         payload = captured_job["payload"]
         self.assertEqual(payload["previous_minutes_path"], str(prior_path))
         self.assertEqual(payload["previous_minutes_filename"], "前次會議.docx")
         self.assertEqual(payload["previous_minutes_sha256"], "b" * 64)
+        self.assertEqual(payload["regeneration_context"], regeneration_context)
 
         captured_task = {}
         worker = job_queue.JobQueueWorker()
@@ -326,6 +452,10 @@ class PreviousMinutesQueueTests(unittest.TestCase):
             "前次會議.docx",
         )
         self.assertEqual(captured_task["previous_minutes_sha256"], "b" * 64)
+        self.assertEqual(
+            captured_task["regeneration_context"],
+            regeneration_context,
+        )
 
 
 class PreviousMinutesRecoveryTests(unittest.TestCase):
