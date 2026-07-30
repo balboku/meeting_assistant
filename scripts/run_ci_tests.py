@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+import tempfile
 import traceback
 import unittest
 from pathlib import Path
@@ -97,11 +98,23 @@ class AnnotatingTestResult(unittest.TextTestResult):
 
 def main() -> int:
     leaked_before = _leaked_test_attachments()
-    suite = unittest.defaultTestLoader.discover(str(ROOT))
-    result = unittest.TextTestRunner(
-        verbosity=2,
-        resultclass=AnnotatingTestResult,
-    ).run(suite)
+    with tempfile.TemporaryDirectory(prefix="meeting-assistant-ci-") as tmpdir:
+        isolated_db_path = Path(tmpdir) / "meetings.db"
+        os.environ["DB_PATH"] = str(isolated_db_path)
+
+        # The CI checkout intentionally has no live database. Initialize a
+        # disposable schema so tests cannot depend on a developer machine's
+        # meetings.db or on another test's import/order side effects.
+        from backend import database
+
+        database.DB_PATH = isolated_db_path
+        database.init_db()
+
+        suite = unittest.defaultTestLoader.discover(str(ROOT))
+        result = unittest.TextTestRunner(
+            verbosity=2,
+            resultclass=AnnotatingTestResult,
+        ).run(suite)
     leaked_after = _leaked_test_attachments()
     newly_leaked = sorted(leaked_after - leaked_before)
     if newly_leaked:

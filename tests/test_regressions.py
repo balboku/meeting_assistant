@@ -1298,15 +1298,24 @@ database.save_meeting(
     def test_ci_runs_unit_tests_and_security_scan(self):
         ci = ROOT / ".github" / "workflows" / "ci.yml"
         security_scan = ROOT / "scripts" / "security_scan.py"
+        test_runner = ROOT / "scripts" / "run_ci_tests.py"
 
         self.assertTrue(ci.is_file())
         self.assertTrue(security_scan.is_file())
+        self.assertTrue(test_runner.is_file())
 
         workflow = ci.read_text(encoding="utf-8")
+        runner_source = test_runner.read_text(encoding="utf-8")
         self.assertIn("python scripts/security_scan.py", workflow)
         self.assertIn("python scripts/audit_quality_consistency.py", workflow)
         self.assertIn("python scripts/run_ci_tests.py", workflow)
         self.assertIn("python -m pip check", workflow)
+        self.assertIn(
+            'TemporaryDirectory(prefix="meeting-assistant-ci-")',
+            runner_source,
+        )
+        self.assertIn('os.environ["DB_PATH"]', runner_source)
+        self.assertIn("database.init_db()", runner_source)
 
     def test_docs_describe_operational_knobs_events_and_fts(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
