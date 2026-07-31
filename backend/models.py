@@ -460,7 +460,7 @@ class MeetingEvidenceResponse(BaseModel):
 class HealthResponse(BaseModel):
     """GET /health 的回應格式"""
     status: str = "ok"
-    version: str = "2.7.1"
+    version: str = "2.7.2"
     model: str
     transcription_model: str
     summary_model: str

@@ -440,6 +440,50 @@ class OperationalReliabilityTests(unittest.TestCase):
         self.assertEqual(remote_actor.email, local_email)
         self.assertEqual(remote_actor.role, "admin")
 
+    def test_trusted_lan_resolves_separate_editor_identity(self) -> None:
+        from fastapi import HTTPException
+        from starlette.requests import Request
+
+        import backend.auth as auth
+
+        lan_email = "meeting-lan-editor@meeting-assistant.local"
+        self.database.upsert_app_user(lan_email, role="editor")
+        allowed = Request({
+            "type": "http",
+            "method": "POST",
+            "path": "/upload-media",
+            "query_string": b"",
+            "headers": [],
+            "client": ("192.168.20.55", 12345),
+        })
+        denied = Request({
+            "type": "http",
+            "method": "GET",
+            "path": "/meetings",
+            "query_string": b"",
+            "headers": [],
+            "client": ("192.168.21.55", 12345),
+        })
+
+        with mock.patch.object(auth, "AUTH_FEATURE_ENABLED", True), \
+                mock.patch.object(auth, "AUTH_TRUST_LOCAL_NETWORK", True), \
+                mock.patch.object(
+                    auth,
+                    "AUTH_TRUSTED_LOCAL_NETWORKS",
+                    (auth.ipaddress.ip_network("192.168.20.0/24"),),
+                ), \
+                mock.patch.object(auth, "AUTH_LAN_SESSION_USER", lan_email), \
+                mock.patch.object(auth, "AUTH_API_KEY", "secret"):
+            actor = auth.actor_from_request(allowed)
+            with self.assertRaises(HTTPException) as raised:
+                auth.actor_from_request(denied)
+
+        self.assertEqual(actor.email, lan_email)
+        self.assertEqual(actor.role, "editor")
+        self.assertTrue(actor.can("meeting:write"))
+        self.assertFalse(actor.can("meeting:delete"))
+        self.assertEqual(raised.exception.status_code, 401)
+
     def test_security_headers_and_generic_mutation_audit_are_applied(self) -> None:
         import backend.main as main
 

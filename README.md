@@ -79,11 +79,14 @@ MEETING_AUTH_ENABLED=0
 MEETING_AUTH_USER_HEADER=X-Meeting-User
 MEETING_AUTH_DEFAULT_ROLE=viewer
 MEETING_AUTH_TRUSTED_PROXY_NETWORKS=127.0.0.0/8,::1/128
+MEETING_AUTH_LAN_SESSION_USER=meeting-lan-editor@meeting-assistant.local
+MEETING_AUTH_TRUSTED_LOCAL_NETWORKS=
 MAX_UPLOAD_MB=500
 PREVIOUS_MINUTES_MAX_MB=20
 PREVIOUS_MINUTES_MAX_TEXT_CHARS=50000
 CORS_ALLOWED_ORIGINS=http://127.0.0.1:8001,http://localhost:8001
 MEETING_ASSISTANT_TRUST_LOCAL_NETWORK=0
+MEETING_ASSISTANT_SHARE_HOST=
 DB_PATH=./meetings.db
 MEETING_TEMP_DIR=./temp
 MEETING_OUTPUT_DIR=./output
@@ -158,9 +161,9 @@ TRANSCRIPT_SHORT_CYCLE_DUPLICATE_WINDOW_TURNS=4
 TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MAX_SPAN_SECONDS=30
 ```
 
-安全預設：loopback 可由本機使用，區網入口必須先取得有效的 bootstrap/API session，不把「同 Wi-Fi」當成身分。
+安全預設：loopback 可由本機使用，區網入口必須先取得有效的 bootstrap/API session，不把「同 Wi-Fi」當成身分。若明確啟用長效區網網址，必須同時指定精確 CIDR 與獨立的 LAN 使用者；不能將所有私有網段或 LAN 同仁映射成本機管理員。
 
-帳號、角色、稽核紀錄與中央路由權限政策已完成。`MEETING_AUTH_ENABLED=1` 時，本機 loopback 或有效 API session 會映射到 `MEETING_AUTH_LOCAL_SESSION_USER`；其他區網來源若沒有有效 session 會被拒絕。只有 `MEETING_AUTH_TRUSTED_PROXY_NETWORKS` 內的代理可以提供身分 header，外部用戶端直接偽造會被拒絕。所有 jobs、meetings、source-media 與 admin 路由都依最小權限檢查，角色只從 `app_users` 讀取。
+帳號、角色、稽核紀錄與中央路由權限政策已完成。`MEETING_AUTH_ENABLED=1` 時，本機 loopback 或有效 API session 會映射到 `MEETING_AUTH_LOCAL_SESSION_USER`；明確信任 CIDR 內的直接連線則映射到 `MEETING_AUTH_LAN_SESSION_USER`。只有 `MEETING_AUTH_TRUSTED_PROXY_NETWORKS` 內的代理可以提供身分 header，外部用戶端直接偽造會被拒絕。所有 jobs、meetings、source-media 與 admin 路由都依最小權限檢查，角色只從 `app_users` 讀取。
 
 > 資安提醒：不要提交 `.env`、`meetings.db*`、`temp/`、`output/`、`backups/`、`logs/`、原始錄音、會議記錄或匯出的文件。若金鑰曾暴露，請立即輪換 `GEMINI_API_KEY` 與 `APP_API_KEY`。
 
@@ -353,9 +356,12 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MIN_TURNS` | `3` | 至少幾句高度相似才視為異常。 |
 | `TRANSCRIPT_SHORT_CYCLE_DUPLICATE_WINDOW_TURNS` | `4` | 搜尋異常時採用的相鄰發言視窗大小。 |
 | `TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MAX_SPAN_SECONDS` | `30` | 同一近似重複視窗允許的最大時間跨度。 |
-| `MEETING_ASSISTANT_TRUST_LOCAL_NETWORK` | `0` | 是否允許區網來源免 session 直接開 Web；安全預設關閉，只有明確接受風險才設為 `1`。 |
+| `MEETING_ASSISTANT_TRUST_LOCAL_NETWORK` | `0` | 是否允許 `MEETING_AUTH_TRUSTED_LOCAL_NETWORKS` 內的直接來源使用 LAN 身分開啟 Web；安全預設關閉。 |
+| `MEETING_ASSISTANT_SHARE_HOST` | 空白 | 一鍵啟動時顯示的固定 DNS／NetBIOS 主機名；空白時使用目前 DHCP IP。 |
 | `MEETING_AUTH_ENABLED` | `0` | 帳號/角色權限開關。啟用前須先建立 `MEETING_AUTH_LOCAL_SESSION_USER`；啟用後中央政策會保護所有業務路由。 |
 | `MEETING_AUTH_LOCAL_SESSION_USER` | `local-admin@meeting-assistant.local` | loopback 或有效 API session 對應的持久化帳號；必須先存在於 `app_users`。 |
+| `MEETING_AUTH_LAN_SESSION_USER` | `meeting-lan-editor@meeting-assistant.local` | 長效區網網址使用的獨立持久化帳號；建議只給 `editor` 或 `viewer`，不要給 `admin`。 |
+| `MEETING_AUTH_TRUSTED_LOCAL_NETWORKS` | 空白 | 允許長效區網存取的精確 CIDR 清單，例如 `192.168.20.0/24`；空白時即使開啟 trust 也不放行。 |
 | `MEETING_AUTH_USER_HEADER` | `X-Meeting-User` | 啟用帳號權限時由可信任代理提供的使用者身分 header；角色必須先寫在 `app_users`。 |
 | `MEETING_AUTH_DEFAULT_ROLE` | `viewer` | 啟用帳號權限時，既有使用者資料缺少角色時的保守預設。 |
 | `MEETING_AUTH_TRUSTED_PROXY_NETWORKS` | `127.0.0.0/8,::1/128` | 允許提供身分 header 的反向代理網段；不可直接設成所有網路。 |
@@ -397,6 +403,20 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 ```
 
 請讓手機與執行後端的 Mac / PC 連到同一個 Wi-Fi，再開啟終端機列出的短效 bootstrap 網址；驗證成功後會換成不含金鑰的 session cookie。區網預設不匿名放行。
+
+若已明確設定固定分享主機、精確區網 CIDR 與 LAN 使用者，終端機會改列出不含 token 的長效網址，例如 `http://NB-RD-BALBO:8001/history`。它只接受該 CIDR 的直接連線，LAN 使用者不會取得本機管理員權限。HTTP 區網網址可瀏覽、上傳與管理任務；瀏覽器的麥克風、鏡頭及螢幕錄製通常要求 HTTPS 安全來源，若同仁需要直接在自己的瀏覽器錄音／錄影，應改部署內部 HTTPS。
+
+Windows 首次啟用時，請以「系統管理員」PowerShell 執行下列腳本；即使公司政策將 Wi-Fi 分類為公用網路，規則仍只放行指定 CIDR，不會允許其他公用網路來源：
+
+```powershell
+.\scripts\enable_lan_access.ps1 -TrustedSubnet 192.168.20.0/24
+```
+
+若要撤回區網入口：
+
+```powershell
+.\scripts\enable_lan_access.ps1 -Disable
+```
 
 如果手機仍無法開啟，請先確認：
 - 手機與 Mac / PC 在同一個 Wi-Fi，且不是訪客網路或 AP isolation 網路。

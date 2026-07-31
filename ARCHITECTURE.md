@@ -1,7 +1,7 @@
 # 🎙️ AI 語音會議助理 — 現行系統架構文件 v2.7
 
-> **文件版本**：2.7.1
-> **更新日期**：2026/07/30
+> **文件版本**：2.7.2
+> **更新日期**：2026/07/31
 > **現況**：FastAPI、SQLite 持久化佇列、Web/GUI、多段轉錄、品質閘門、人工複核與全文搜尋均為現行功能；LINE webhook 與 ngrok 自動 tunnel 已移除。
 
 ---
@@ -149,7 +149,7 @@ meeting_assistant/
 | `job_events` | 任務事件時間線，記錄建立、worker claim、狀態轉換、retry、取消等事件，供維運與 UI 觀察流程。 |
 | `job_event_archive` | schema v5 升級前缺少父任務的歷史事件封存；保留原事件而不讓孤兒資料破壞外鍵。 |
 | `runtime_leases` | 保存全域 worker 與啟動維護 lease、heartbeat、generation fencing token。 |
-| `app_users` | 帳號與角色表；`MEETING_AUTH_ENABLED=0` 時維持既有本機模式，啟用後中央路由政策全面執行最小權限。 |
+| `app_users` | 帳號與角色表；`MEETING_AUTH_ENABLED=0` 時維持既有本機模式，啟用後中央路由政策全面執行最小權限。本機 session 與精確 CIDR 的 LAN session 使用不同帳號，避免長效區網網址取得 admin。 |
 | `audit_logs` | 保存 actor、action、resource 與 request metadata；文件與逐項審查變更會建立稽核紀錄。 |
 | `app_meta` | 保存資料庫 schema version，供 `/health` 驗證執行版本。 |
 | `schema_migrations` | 保存每版 migration 套用時間與資料修復明細；升級前先建立 SQLite online backup。 |

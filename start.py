@@ -212,17 +212,20 @@ def print_access_urls():
     print("==================================================")
     print(f"本機瀏覽器：{local_url}")
 
-    lan_ip = local_lan_ip()
-    if not lan_ip:
+    lan_host = (
+        os.getenv("MEETING_ASSISTANT_SHARE_HOST", "").strip()
+        or local_lan_ip()
+    )
+    if not lan_host:
         print("手機 / 平板：無法自動判斷本機 Wi-Fi IP，請確認 Mac 與手機在同一個網路。")
         return
 
     if _env_flag("MEETING_ASSISTANT_TRUST_LOCAL_NETWORK", default=False):
-        print(f"手機 / 平板：{mobile_history_url(lan_ip, SERVER_PORT)}")
+        print(f"手機 / 平板：{mobile_history_url(lan_host, SERVER_PORT)}")
         print("同 Wi-Fi / 信任本機網段可直接開啟。")
     else:
         api_key = os.getenv("APP_API_KEY", "").strip()
-        print(f"手機 / 平板：{mobile_history_url(lan_ip, SERVER_PORT, api_key)}")
+        print(f"手機 / 平板：{mobile_history_url(lan_host, SERVER_PORT, api_key)}")
         print("目前已停用信任本機網段，手機網址使用五分鐘有效的登入連結。")
 
 

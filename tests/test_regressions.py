@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import ipaddress
 import inspect
 import json
 import os
@@ -171,6 +172,35 @@ class SecurityRegressionTests(unittest.TestCase):
             main.TRUST_LOCAL_NETWORK = original_trust
 
         self.assertEqual(response.status_code, 403)
+
+    def test_direct_client_is_allowed_only_inside_configured_trusted_lan(self):
+        import backend.main as main
+
+        original_trust = main.TRUST_LOCAL_NETWORK
+        original_networks = main.TRUSTED_LOCAL_NETWORKS
+        main.TRUST_LOCAL_NETWORK = True
+        main.TRUSTED_LOCAL_NETWORKS = (
+            ipaddress.ip_network("192.168.20.0/24"),
+        )
+        try:
+            allowed = asgi_request(
+                main.app,
+                "GET",
+                "/health",
+                asgi_client=("192.168.20.55", 456),
+            )
+            denied = asgi_request(
+                main.app,
+                "GET",
+                "/health",
+                asgi_client=("192.168.21.55", 456),
+            )
+        finally:
+            main.TRUST_LOCAL_NETWORK = original_trust
+            main.TRUSTED_LOCAL_NETWORKS = original_networks
+
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(denied.status_code, 403)
 
     def test_upload_rejects_files_larger_than_configured_limit(self):
         import backend.main as main
@@ -9837,7 +9867,10 @@ class StartupScriptRegressionTests(unittest.TestCase):
     def test_startup_prints_direct_mobile_access_url_for_same_network(self):
         import start
 
-        with mock.patch.dict(start.os.environ, {"APP_API_KEY": "mobile-key"}, clear=False), \
+        with mock.patch.dict(start.os.environ, {
+                 "APP_API_KEY": "mobile-key",
+                 "MEETING_ASSISTANT_SHARE_HOST": "",
+             }, clear=False), \
              mock.patch.object(start, "local_lan_ip", return_value="192.168.1.20"), \
              mock.patch("builtins.print") as printed:
             start.print_access_urls()
@@ -9845,6 +9878,28 @@ class StartupScriptRegressionTests(unittest.TestCase):
         output = "\n".join(str(call.args[0]) for call in printed.call_args_list if call.args)
         self.assertIn("手機 / 平板：http://192.168.1.20:8001/history", output)
         self.assertNotIn("手機 / 平板：http://192.168.1.20:8001/history?api_key=", output)
+
+    def test_startup_uses_configured_stable_share_host(self):
+        import start
+
+        with mock.patch.dict(start.os.environ, {
+                 "MEETING_ASSISTANT_SHARE_HOST": "NB-RD-BALBO",
+                 "MEETING_ASSISTANT_TRUST_LOCAL_NETWORK": "1",
+             }, clear=False), \
+             mock.patch.object(
+                 start,
+                 "local_lan_ip",
+                 side_effect=AssertionError("configured host should win"),
+             ), \
+             mock.patch("builtins.print") as printed:
+            start.print_access_urls()
+
+        output = "\n".join(str(call.args[0]) for call in printed.call_args_list if call.args)
+        self.assertIn(
+            "手機 / 平板：http://NB-RD-BALBO:8001/history",
+            output,
+        )
+        self.assertNotIn("bootstrap_token", output)
 
     def test_startup_generates_temporary_api_key_when_missing(self):
         import start

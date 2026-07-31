@@ -25,6 +25,17 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _network_env(
+    name: str,
+    default: str = "",
+) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    return tuple(
+        ipaddress.ip_network(value.strip())
+        for value in os.getenv(name, default).split(",")
+        if value.strip()
+    )
+
+
 AUTH_FEATURE_ENABLED = _env_flag("MEETING_AUTH_ENABLED", default=False)
 AUTH_USER_HEADER = os.getenv("MEETING_AUTH_USER_HEADER", "X-Meeting-User").strip() or "X-Meeting-User"
 AUTH_DEFAULT_ROLE = os.getenv("MEETING_AUTH_DEFAULT_ROLE", "viewer").strip() or "viewer"
@@ -36,13 +47,22 @@ AUTH_LOCAL_SESSION_USER = (
 )
 AUTH_API_KEY = os.getenv("APP_API_KEY", "").strip()
 AUTH_API_KEY_COOKIE_NAME = "meeting_assistant_api_key"
-AUTH_TRUSTED_PROXY_NETWORKS = tuple(
-    ipaddress.ip_network(value.strip())
-    for value in os.getenv(
-        "MEETING_AUTH_TRUSTED_PROXY_NETWORKS",
-        "127.0.0.0/8,::1/128",
-    ).split(",")
-    if value.strip()
+AUTH_TRUSTED_PROXY_NETWORKS = _network_env(
+    "MEETING_AUTH_TRUSTED_PROXY_NETWORKS",
+    "127.0.0.0/8,::1/128",
+)
+AUTH_TRUST_LOCAL_NETWORK = _env_flag(
+    "MEETING_ASSISTANT_TRUST_LOCAL_NETWORK",
+    default=False,
+)
+AUTH_TRUSTED_LOCAL_NETWORKS = _network_env(
+    "MEETING_AUTH_TRUSTED_LOCAL_NETWORKS",
+)
+AUTH_LAN_SESSION_USER = (
+    os.getenv(
+        "MEETING_AUTH_LAN_SESSION_USER",
+        "meeting-lan-editor@meeting-assistant.local",
+    ).strip().lower()
 )
 
 
@@ -75,6 +95,11 @@ def auth_config_payload() -> dict[str, Any]:
         "enabled": AUTH_FEATURE_ENABLED,
         "user_header": AUTH_USER_HEADER,
         "local_session_user": AUTH_LOCAL_SESSION_USER,
+        "lan_access_enabled": AUTH_TRUST_LOCAL_NETWORK,
+        "lan_session_user": AUTH_LAN_SESSION_USER,
+        "trusted_local_networks": [
+            str(network) for network in AUTH_TRUSTED_LOCAL_NETWORKS
+        ],
         "default_role": AUTH_DEFAULT_ROLE,
         "trusted_proxy_networks": [
             str(network) for network in AUTH_TRUSTED_PROXY_NETWORKS
@@ -115,6 +140,21 @@ def _request_has_local_access_credential(request: Request) -> bool:
     )
 
 
+def _request_from_trusted_local_network(request: Request) -> bool:
+    """Accept only direct peers inside explicitly configured LAN CIDRs."""
+    if not AUTH_TRUST_LOCAL_NETWORK or not AUTH_TRUSTED_LOCAL_NETWORKS:
+        return False
+    client_host = request.client.host if request.client else ""
+    try:
+        client_address = ipaddress.ip_address(str(client_host or "").strip())
+    except ValueError:
+        return False
+    return any(
+        client_address in network
+        for network in AUTH_TRUSTED_LOCAL_NETWORKS
+    )
+
+
 def actor_from_request(request: Request) -> AuthActor:
     """Build an actor from a trusted header or local/API session.
 
@@ -143,14 +183,17 @@ def actor_from_request(request: Request) -> AuthActor:
             )
         email = header_email
     else:
-        if not AUTH_LOCAL_SESSION_USER:
-            raise HTTPException(status_code=401, detail="缺少使用者身分標頭。")
-        if not _request_has_local_access_credential(request):
+        if _request_has_local_access_credential(request):
+            email = AUTH_LOCAL_SESSION_USER
+        elif _request_from_trusted_local_network(request):
+            email = AUTH_LAN_SESSION_USER
+        else:
             raise HTTPException(
                 status_code=401,
-                detail="缺少有效的本機或 API session 身分憑證。",
+                detail="缺少有效的本機、區網或 API session 身分憑證。",
             )
-        email = AUTH_LOCAL_SESSION_USER
+        if not email:
+            raise HTTPException(status_code=401, detail="缺少可用的登入身分。")
 
     from backend.database import get_app_user_by_email
 

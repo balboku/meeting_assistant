@@ -223,15 +223,11 @@ FFPROBE_STREAM_CACHE_MAX = 256
 FFPROBE_STREAM_CACHE: dict[tuple[str, int, int], set[str]] = {}
 SOURCE_MEDIA_SHA256_CACHE_MAX = 1000
 SOURCE_MEDIA_SHA256_CACHE: dict[tuple[str, int, int], str] = {}
-TRUSTED_LOCAL_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
-    "10.0.0.0/8",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-    "169.254.0.0/16",
-    "100.64.0.0/10",
-    "fc00::/7",
-    "fe80::/10",
-))
+TRUSTED_LOCAL_NETWORKS = tuple(
+    ipaddress.ip_network(network.strip())
+    for network in os.getenv("MEETING_AUTH_TRUSTED_LOCAL_NETWORKS", "").split(",")
+    if network.strip()
+)
 SERVER_PORT = int(os.getenv("MEETING_ASSISTANT_PORT", "8001"))
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
@@ -432,7 +428,8 @@ def _request_from_loopback(request: Request) -> bool:
 
 
 def _request_from_trusted_local_network(request: Request) -> bool:
-    return _request_source_matches(request, _is_trusted_local_network_host)
+    client_host = request.client.host if request.client else None
+    return _is_trusted_local_network_host(client_host)
 
 
 def _api_session_token() -> str:
