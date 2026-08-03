@@ -1,0 +1,140 @@
+.recording-recovery-panel {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(122, 162, 247, 0.06);
+}
+
+.recording-recovery-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.recording-recovery-title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.recording-recovery-help,
+.recording-recovery-status,
+.recording-recovery-empty {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.recording-recovery-status {
+  min-height: 19px;
+  margin-top: 6px;
+  color: var(--text-mid);
+}
+
+.recording-recovery-status.error {
+  color: var(--red);
+}
+
+.recording-recovery-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.recording-recovery-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card2);
+}
+
+.recording-recovery-info {
+  min-width: 0;
+}
+
+.recording-recovery-name {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.recording-recovery-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.recording-recovery-badge {
+  padding: 2px 7px;
+  border-radius: 99px;
+  background: rgba(224, 175, 104, 0.14);
+  color: var(--yellow);
+}
+
+.recording-recovery-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.recording-recovery-action,
+.recording-recovery-refresh {
+  min-height: 30px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-card);
+  color: var(--text-mid);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.recording-recovery-action.primary {
+  border-color: var(--blue-dim);
+  color: var(--blue);
+}
+
+.recording-recovery-action.danger {
+  color: var(--red);
+}
+
+.recording-recovery-action:disabled,
+.recording-recovery-refresh:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.recording-recovery-count {
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: var(--yellow);
+  color: #1a1b26;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+@media (max-width: 620px) {
+  .recording-recovery-item {
+    flex-direction: column;
+  }
+
+  .recording-recovery-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}

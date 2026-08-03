@@ -6,9 +6,11 @@
   <title>AI 語音會議助理 · 歷史記錄</title>
   <link rel="icon" type="image/png" href="/static/favicon.png" />
   <link rel="shortcut icon" href="/static/favicon.ico" />
+  <link rel="stylesheet" href="/static/recording-recovery.css" />
   <script src="/static/vendor/marked.min.js"></script>
   <script src="/static/vendor/purify.min.js"></script>
   <script defer src="/static/confirmation-queue.js"></script>
+  <script src="/static/recording-recovery.js"></script>
   <style>
     /* ── Reset & Base ── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1760,7 +1762,7 @@
         <div class="stat-num" id="total-count">–</div>
         <div class="stat-label">會議記錄</div>
       </div>
-      <button class="btn-record" onclick="openRecordModal()">
+      <button class="btn-record" id="btn-open-record" onclick="openRecordModal()">
         <span style="font-size:16px;">🔴</span> 開始錄製
       </button>
       <button class="btn-primary" onclick="openUploadModal()">
@@ -2532,6 +2534,7 @@ function renderSourceStorageFile(file) {
       ? `<button type="button" class="source-media-action" aria-label="原始檔任務使用中，完成前不可封存" title="任務 ${escapeHtml(activeJobId || activeJobStatus || '使用中')} 使用中，完成前不可封存" disabled>使用中</button>`
       : `<button type="button" class="source-media-action danger" aria-label="封存未連結原始檔" data-source-file="${escapeHtml(filename)}" onclick="deleteUnlinkedSourceMedia(this.dataset.sourceFile)">封存</button>`;
   const actions = [
+    !linked && !active ? `<button type="button" class="source-media-action" aria-label="重新處理未連結原始檔" data-source-file="${escapeHtml(filename)}" onclick="RecordingRecovery.restartServerMedia(this.dataset.sourceFile)">重新處理</button>` : '',
     `<button type="button" class="source-media-action" aria-label="預覽${mediaActionLabel}" data-source-url="${escapeHtml(sourceUrl)}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${escapeHtml(filename)}" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile)">預覽</button>`,
     `<a class="source-media-action" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer" aria-label="在新分頁開啟${mediaActionLabel}">新分頁</a>`,
     `<a class="source-media-action" href="${escapeHtml(downloadUrl)}" download aria-label="下載${mediaActionLabel}">下載</a>`,
@@ -6635,7 +6638,7 @@ async function pollStatus(jobId) {
 
 // ── 啟動 ────────────────────────────────────────────────────────────
 async function initializeDashboard() {
-  await loadRuntimeConfig();
+  await loadRuntimeConfig(); RecordingRecovery.initialize({ maxUploadBytes: runtimeConfig.max_upload_bytes });
   const initialLoads = Promise.allSettled([
     loadMeetings(),
     loadJobs(),
@@ -6693,7 +6696,7 @@ const recScreenOptions = document.getElementById('rec-screen-options');
 const recIncludeMic = document.getElementById('rec-include-mic');
 
 function openRecordModal() {
-  resetRecorder();
+  resetRecorder(); RecordingRecovery.refresh();
   openAccessibleModal(recModal, document.getElementById('rec-title'));
 }
 
@@ -7016,7 +7019,7 @@ function discardActiveLocalRecording() {
   }
   releaseRecordingStreams();
   restoreRecorderIdleState('錄製已取消，內容未送出');
-  activeRecordingMode = null;
+  activeRecordingMode = null; RecordingRecovery.discardActive().catch(err => console.warn('Unable to remove cancelled recording recovery data.', err));
   activeRecordingProfileId = null;
   setRecordingConfigurationLocked(false);
   setRecordingSubmissionLocked(false);
@@ -7269,7 +7272,8 @@ async function startRecording() {
       console.warn('瀏覽器不接受指定錄製位元率，改用瀏覽器預設值。', err);
       mediaRecorder = new MediaRecorder(recStream, mimeType ? { mimeType } : {});
     }
-    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
+    await RecordingRecovery.begin({ title: document.getElementById('rec-title').value, customVocabulary: document.getElementById('rec-vocabulary').value, mode: activeRecordingMode, profileId: activeRecordingProfileId, mimeType: mediaRecorder.mimeType }).catch(err => console.warn('Recording interruption protection is unavailable.', err));
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) { recordedChunks.push(e.data); RecordingRecovery.captureChunk(e.data, recSeconds); } };
     mediaRecorder.onstop = onRecordingStopped;
     mediaRecorder.start(1000);  // 每秒收一次 chunk
     startRecordingPreviewQualityMonitor();
@@ -7292,7 +7296,7 @@ async function startRecording() {
     recTimerEl.style.color = 'var(--red)';
 
   } catch (err) {
-    releaseRecordingStreams();
+    releaseRecordingStreams(); RecordingRecovery.discardActive().catch(discardErr => console.warn('Unable to clear recording recovery data.', discardErr));
     restoreRecorderIdleState();
     activeRecordingMode = null;
     activeRecordingProfileId = null;
@@ -7330,6 +7334,7 @@ async function onRecordingStopped() {
   const title = document.getElementById('rec-title').value.trim()
     || `現場錄製_${new Date().toLocaleString('zh-TW').replace(/[/:]/g, '-')}`;
   const customVocabulary = document.getElementById('rec-vocabulary').value.trim();
+  await RecordingRecovery.finish({ title, customVocabulary, seconds: recSeconds, warning: recordingWarning }).catch(err => console.warn('Unable to finalize recording recovery data.', err));
 
   const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
   const file = new File([blob], `recording.${ext}`, { type: blob.type });
@@ -7378,6 +7383,7 @@ async function onRecordingStopped() {
     const res = await fetch(`${API}/upload-media`, { method: 'POST', body: formData });
     if (!res.ok) throw new Error(await apiErrorMessage(res));
     const data = await res.json();
+    await RecordingRecovery.removeActive().catch(err => console.warn('Recording was queued but local recovery data could not be removed.', err));
     activeRecordingJobId = data.job_id;
     document.getElementById('rec-close-btn').disabled = false;
     loadJobs();
@@ -7386,6 +7392,7 @@ async function onRecordingStopped() {
     // 開始輪詢
     pollRecStatus(data.job_id);
   } catch (err) {
+    await RecordingRecovery.markUploadFailed(err.message).catch(saveErr => console.warn('Unable to retain failed upload recovery data.', saveErr));
     setRecordingResult(`❌ ${completedModeLabel}上傳失敗`, 'error');
     recProgMsg.textContent = `❌ 上傳失敗：${err.message}`;
     document.getElementById('rec-close-btn').disabled = false;
