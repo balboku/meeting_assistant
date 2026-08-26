@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import start
@@ -25,6 +27,42 @@ class _FakeProcess:
 
 
 class StartSupervisorTests(unittest.TestCase):
+    def test_startup_opens_isolated_chrome_with_audio_defaults_for_recording(self) -> None:
+        launched = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            chrome_path = tmp_path / "chrome.exe"
+            profile_path = tmp_path / "recording-profile"
+            chrome_path.touch()
+            with mock.patch.object(start.platform, "system", return_value="Windows"), \
+                 mock.patch.dict(start.os.environ, {
+                     "MEETING_ASSISTANT_FORCE_SCREEN_AUDIO_DEFAULT": "1",
+                     "MEETING_ASSISTANT_CHROME_PATH": str(chrome_path),
+                     "MEETING_ASSISTANT_CHROME_PROFILE_DIR": str(profile_path),
+                 }, clear=False), \
+                 mock.patch("builtins.print"):
+                opened = start.open_recording_chrome(
+                    "http://127.0.0.1:8001/history",
+                    process_factory=launched,
+                )
+
+        self.assertTrue(opened)
+        command = launched.call_args.args[0]
+        self.assertEqual(command[0], str(chrome_path))
+        self.assertIn(f"--user-data-dir={profile_path}", command)
+        self.assertIn("--enable-features=GetDisplayMediaAudioSelection", command)
+        self.assertIn("--system-audio-capture-default_checked", command)
+        self.assertEqual(command[-2:], ["--new-window", "http://127.0.0.1:8001/history"])
+
+    def test_startup_falls_back_to_default_browser_when_recording_chrome_is_unavailable(self) -> None:
+        with mock.patch.object(start.time, "sleep"), \
+             mock.patch.object(start, "open_recording_chrome", return_value=False), \
+             mock.patch.object(start.webbrowser, "open") as browser_open, \
+             mock.patch("builtins.print"):
+            start.open_browser()
+
+        browser_open.assert_called_once_with("http://127.0.0.1:8001/history")
+
     def test_supervisor_restarts_failed_child_with_bounded_backoff(self) -> None:
         return_codes = iter([1, 0])
         launches: list[list[str]] = []

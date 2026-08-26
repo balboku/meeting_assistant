@@ -20,7 +20,11 @@ TRANSIENT_RETRY_MARKERS = (
 QUALITY_RETRY_MARKERS = (
     "轉錄不完整",
     "品質閘門",
+)
+TERMINAL_RETRY_MARKERS = (
     "補救遞迴已達安全上限",
+    "音訊語音密度高但逐字稿文字量偏低",
+    "逐字稿文字量明顯超過音訊語音活動可支持範圍",
 )
 
 
@@ -69,6 +73,8 @@ def effective_job_max_attempts(error_detail: str, configured: int) -> int:
     maximum = max(1, int(configured))
     if is_transient_error(error_detail):
         return maximum
+    if any(marker in str(error_detail or "") for marker in TERMINAL_RETRY_MARKERS):
+        return 1
     if not any(marker in str(error_detail or "") for marker in QUALITY_RETRY_MARKERS):
         return maximum
     try:

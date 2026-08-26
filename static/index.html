@@ -1677,6 +1677,7 @@
       width: 16px; height: 16px; accent-color: var(--blue);
       flex-shrink: 0;
     }
+    .rec-screen-audio-requirement { margin: 10px 0 0; color: var(--text-mid); font-size: 12px; line-height: 1.6; } .rec-screen-audio-requirement strong { color: var(--blue); } .rec-screen-audio-requirement a { color: var(--blue); font-weight: 700; text-underline-offset: 2px; }
     .rec-preview {
       width: 100%; border-radius: 10px; background: var(--bg);
       margin-bottom: 16px; display: none;
@@ -2058,6 +2059,7 @@
         <input type="checkbox" id="rec-include-mic" checked />
         <span>同時錄麥克風，錄製中可關閉</span>
       </label>
+      <p class="rec-screen-audio-requirement" role="note"><strong>分享音訊為必要條件：</strong>其他 Windows 電腦請先<a href="/downloads/windows-recording-launcher.cmd" download>下載錄製專用 Chrome 啟動器</a>並由它開啟本系統，Chrome 分頁、視窗與整個螢幕才會優先預設勾選分享音訊；未取得聲音時不會開始錄製。</p>
     </div>
     <div class="rec-quality-box">
       <label class="form-label" for="rec-quality-profile">錄製品質</label>
@@ -6793,9 +6795,8 @@ function resetRecorder() {
 }
 
 function updateRecordingModeOptions() {
-  syncRecordingModeTabs();
-  recScreenOptions?.classList.toggle('show', recMode === 'screen');
-  if (recScreenOptions) recScreenOptions.hidden = recMode !== 'screen';
+  syncRecordingModeTabs(); recScreenOptions?.classList.toggle('show', recMode === 'screen'); if (recScreenOptions) recScreenOptions.hidden = recMode !== 'screen';
+  if ((!mediaRecorder || mediaRecorder.state === 'inactive') && !activeRecordingJobId) recStatusEl.textContent = recMode === 'screen' ? '下一步：按下開始錄製，選擇會議分頁或螢幕並勾選「分享音訊」' : '準備就緒，按下開始錄製';
 }
 
 function syncRecordingModeTabs() {
@@ -7078,7 +7079,7 @@ function recordingModeLabel(mode = recMode) {
 
 function recordingPermissionHint(mode = recMode) {
   if (mode === 'screen') {
-    return '請確認瀏覽器已授予螢幕分享權限；若要錄線上會議其他人的聲音，分享分頁或視窗時需勾選分享音訊。';
+    return '請重新按「開始錄製」，選擇實際播放會議聲音的分頁或螢幕，並勾選「分享分頁音訊／系統音訊」。';
   }
   if (mode === 'video') {
     return '請確認瀏覽器已授予攝影機與麥克風權限。';
@@ -7175,14 +7176,15 @@ async function createRecordingStream() {
 
     recStatusEl.textContent = '請選擇要分享的螢幕、視窗或分頁...';
     const displayStream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: profile.video_fps || 15, max: 30 } },
-      audio: true,
+      video: { frameRate: { ideal: profile.video_fps || 15, max: 30 } }, audio: true,
+      systemAudio: 'include', windowAudio: 'system', audioSelection: 'preferred',
     });
     recSourceStreams.push(displayStream);
 
     try {
       const displayAudioTracks = displayStream.getAudioTracks();
       recScreenAudioCaptured = displayAudioTracks.length > 0;
+      if (!recScreenAudioCaptured) throw new Error('未取得分頁／系統音訊，錄製尚未開始。');
       const includeMic = Boolean(recIncludeMic?.checked);
       let micAudioTracks = [];
 

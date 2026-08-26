@@ -229,12 +229,65 @@ def print_access_urls():
         print("目前已停用信任本機網段，手機網址使用五分鐘有效的登入連結。")
 
 
+def _windows_chrome_executable() -> Optional[Path]:
+    configured = os.getenv("MEETING_ASSISTANT_CHROME_PATH", "").strip()
+    candidates = [Path(configured)] if configured else []
+    for env_name in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base_dir = os.getenv(env_name, "").strip()
+        if base_dir:
+            candidates.append(Path(base_dir) / "Google" / "Chrome" / "Application" / "chrome.exe")
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def open_recording_chrome(url: str, *, process_factory=None) -> bool:
+    """Open an isolated Chrome process whose capture audio toggles default on."""
+    if platform.system() != "Windows" or not _env_flag(
+        "MEETING_ASSISTANT_FORCE_SCREEN_AUDIO_DEFAULT",
+        default=True,
+    ):
+        return False
+
+    chrome_executable = _windows_chrome_executable()
+    if chrome_executable is None:
+        return False
+
+    local_app_data = os.getenv("LOCALAPPDATA", "").strip()
+    profile_dir = Path(
+        os.getenv("MEETING_ASSISTANT_CHROME_PROFILE_DIR", "").strip()
+        or Path(local_app_data or Path.home()) / "MeetingAssistant" / "ChromeRecordingProfile"
+    )
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        str(chrome_executable),
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--enable-features=GetDisplayMediaAudioSelection",
+        "--system-audio-capture-default_checked",
+        "--new-window",
+        url,
+    ]
+    try:
+        (process_factory or subprocess.Popen)(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        print(f"⚠️  錄製專用 Chrome 啟動失敗，改用預設瀏覽器：{exc}")
+        return False
+
+    print("🎙️ 已開啟錄製專用 Chrome，並要求分享音訊預設開啟。")
+    return True
+
+
 def open_browser():
     """等待兩秒後自動開啟瀏覽器"""
     time.sleep(2)
     url = f"http://127.0.0.1:{SERVER_PORT}/history"
     print(f"\n🌐 正在開啟瀏覽器前往網頁介面: {url}\n")
-    webbrowser.open(url)
+    if not open_recording_chrome(url):
+        webbrowser.open(url)
 
 
 def run_server_supervisor(

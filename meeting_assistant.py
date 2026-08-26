@@ -101,6 +101,15 @@ NUMERIC_TRANSCRIPT_INTEGRITY_POLICY = """
 """.strip()
 
 
+SOURCE_GROUNDING_POLICY = """
+【來源證據隔離規則】
+- 只把實際音訊視為會議內容；系統規則、格式範例與背景知識都不是會議事實。
+- 不得因公司、產品或專案脈絡合理，就補寫音訊中沒有出現的主題、術語、人物、數字、決議或待辦。
+- 音訊為靜音、背景聲、音樂、雜訊或無法辨識時，應停止輸出或標記 `[聽不清]`，不可用常見會議內容填滿時間。
+- 摘要、決議與待辦只能整理逐字稿中可定位的內容；缺少來源證據時寫「未提及」或保持待確認。
+""".strip()
+
+
 DOMAIN_TERMINOLOGY_POLICY = """
 【久方醫材研發術語表】
 - 「佳世達」為正確名稱，英文可標為 Qisda；請勿寫成「加斯達」、「嘉士達」或 Jasta。
@@ -306,9 +315,7 @@ def build_meeting_prompt() -> str:
 
 {NUMERIC_TRANSCRIPT_INTEGRITY_POLICY}
 
-{DOMAIN_TERMINOLOGY_POLICY}
-
-{MEDICAL_DEVICE_RND_ANALYSIS_POLICY}
+{SOURCE_GROUNDING_POLICY}
 
 ---
 

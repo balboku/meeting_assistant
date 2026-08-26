@@ -141,6 +141,7 @@ from backend.auth import (
     require_permission,
 )
 from backend.confirmation_api import router as confirmation_router
+from backend.recording_launcher import router as recording_launcher_router
 from backend.source_media_recovery import router as source_media_recovery_router
 from backend.cleanup import (
     SOURCE_AUDIO_TEMP_PREFIXES,
@@ -374,6 +375,7 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 app.include_router(confirmation_router)
+app.include_router(recording_launcher_router)
 app.include_router(source_media_recovery_router)
 
 def _host_without_port(host: str) -> str:

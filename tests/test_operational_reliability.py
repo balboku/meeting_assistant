@@ -188,6 +188,63 @@ class OperationalReliabilityTests(unittest.TestCase):
         self.assertEqual(final_status, "failed")
         self.assertEqual(database.get_job("quality-retry-job")["attempts"], 3)
 
+    def test_recovery_depth_safety_failure_is_not_retried_whole_meeting(self) -> None:
+        database = self.database
+        database.create_job(
+            "recovery-depth-job",
+            payload={
+                "audio_path": str(self.root / "audio.mp3"),
+                "output_dir": str(self.root),
+            },
+            max_attempts=5,
+        )
+        database.claim_next_pending_job()
+
+        status = database.retry_or_fail_job(
+            "recovery-depth-job",
+            "補救遞迴已達安全上限（8 層）",
+        )
+
+        self.assertEqual(status, "failed")
+        self.assertEqual(database.get_job("recovery-depth-job")["attempts"], 1)
+
+    def test_excess_transcript_density_failure_is_not_retried_whole_meeting(self) -> None:
+        database = self.database
+        database.create_job(
+            "excess-density-job",
+            payload={
+                "audio_path": str(self.root / "audio.mp3"),
+                "output_dir": str(self.root),
+            },
+            max_attempts=5,
+        )
+        database.claim_next_pending_job()
+
+        status = database.retry_or_fail_job(
+            "excess-density-job",
+            "逐字稿文字量明顯超過音訊語音活動可支持範圍（9 字／1 秒有效語音）",
+        )
+
+        self.assertEqual(status, "failed")
+        self.assertEqual(database.get_job("excess-density-job")["attempts"], 1)
+
+    def test_low_transcript_density_failure_is_not_retried_whole_meeting(self) -> None:
+        database = self.database
+        database.create_job(
+            "low-density-job",
+            payload={"audio_path": str(self.root / "audio.mp3"), "output_dir": str(self.root)},
+            max_attempts=5,
+        )
+        database.claim_next_pending_job()
+
+        status = database.retry_or_fail_job(
+            "low-density-job",
+            "音訊語音密度高但逐字稿文字量偏低（10 字／11 秒有效語音）",
+        )
+
+        self.assertEqual(status, "failed")
+        self.assertEqual(database.get_job("low-density-job")["attempts"], 1)
+
     def test_only_one_embedded_worker_holds_leadership(self) -> None:
         import backend.job_queue as job_queue
 

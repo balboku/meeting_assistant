@@ -29,6 +29,7 @@ logs/
 # OS/editor/tooling
 .DS_Store
 Thumbs.db
+desktop.ini
 .gstack/
 .vscode/
 .idea/

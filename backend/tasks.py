@@ -47,6 +47,13 @@ from backend.database import (
 from backend.exporter import content_with_quality_review_note
 from backend.previous_minutes import build_summary_verification_prompt, normalize_previous_minutes_payload, previous_minutes_contract_addendum, previous_minutes_markdown, previous_minutes_metadata, previous_minutes_prompt_section, read_previous_minutes_context
 from backend.recovery_policy import SEGMENT_RECOVERY_SPLIT_SECONDS, TRANSCRIPT_RECOVERY_MAX_DEPTH, next_recovery_chunk_seconds as _next_recovery_chunk_seconds, next_smaller_recovery_chunk_seconds as _next_smaller_recovery_chunk_seconds, recovery_subsegment_path, strictly_shrinking_export_bounds
+from backend.transcript_audio_quality import (
+    TRANSCRIPT_SPEECH_DENSITY_EXCESS_MIN_CHARACTERS, TRANSCRIPT_SPEECH_DENSITY_MAX_CHARS_PER_ACTIVE_SECOND,
+    TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER,
+    audio_has_insufficient_transcription_evidence as _audio_has_insufficient_transcription_evidence,
+    recovery_depth_limit_fallback as _recovery_depth_limit_fallback, speech_activity_threshold as _transcript_speech_activity_threshold, transcript_is_uncertainty_only as _transcript_is_uncertainty_only, uncertainty_dominated_summary_payload as _uncertainty_dominated_summary_payload,
+    speech_backed_transcript_excess_density_quality_issues as _speech_backed_transcript_excess_density_quality_issues,
+)
 
 # 載入 .env 環境變數
 load_dotenv(dotenv_path=ROOT_DIR / ".env")
@@ -176,15 +183,13 @@ SUSTAINED_SPEECH_GAP_DURATION_PATTERN = re.compile(
     r"音訊含持續語音.*?間隔\s*(?P<seconds>\d+)\s*秒"
 )
 # Bump whenever the transcription prompt changes so a cache entry reflects the
-# same coverage instructions that produced it.
-# Bump whenever the transcription prompt changes so a cache entry reflects the
-# same coverage and domain terminology instructions that produced it.
-SEGMENT_CACHE_VERSION   = 17
+# same evidence and coverage instructions that produced it.
+SEGMENT_CACHE_VERSION   = 22
 SEGMENT_CACHE_DIRNAME   = "segment_cache"
 # Bump whenever recovery audio or merge behavior changes. A plan can retain a
 # partial candidate transcript, so resuming one generated from a lossy retry
 # path would defeat a later lossless-recovery improvement.
-SEGMENT_RECOVERY_PLAN_VERSION = 9
+SEGMENT_RECOVERY_PLAN_VERSION = 14
 SEGMENT_RECOVERY_PLAN_DIRNAME = "recovery_plans"
 SEGMENT_TARGET_SECONDS  = SEGMENT_MINUTES * 60
 SEGMENT_SILENCE_WINDOW_SECONDS = int(os.getenv("SEGMENT_SILENCE_WINDOW_SECONDS", "45"))
@@ -432,6 +437,16 @@ TRANSCRIPT_SPEECH_DENSITY_MIN_CHARS_PER_ACTIVE_SECOND = min(
     ),
 )
 TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER = "音訊語音密度高但逐字稿文字量偏低"
+TRANSCRIPT_SPEECH_DENSITY_MIN_RELIABLE_ACTIVE_SECONDS = min(
+    30,
+    max(
+        5,
+        int(os.getenv(
+            "TRANSCRIPT_SPEECH_DENSITY_MIN_RELIABLE_ACTIVE_SECONDS",
+            "8",
+        )),
+    ),
+)
 TRANSCRIPT_LOCAL_DENSITY_VALIDATION_ENABLED = os.getenv(
     "TRANSCRIPT_LOCAL_DENSITY_VALIDATION", "1"
 ).strip().lower() not in {"0", "false", "no", "off"}
@@ -617,6 +632,7 @@ DELIVERY_BLOCKING_TRANSCRIPT_ISSUE_MARKERS = (
     "時間序倒退",
     "音訊含持續語音",
     TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER,
+    TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER,
     TRANSCRIPT_LOCAL_DENSITY_ISSUE_MARKER,
 )
 TRANSCRIPT_AUTO_REPAIR_MAX_RANGES = max(
@@ -2807,7 +2823,11 @@ def _segment_transcript_quality_issues(
         return issues
 
     latest_timestamp = max(timestamps)
-    if latest_timestamp < expected_end - SEGMENT_COMPLETENESS_GRACE_SECONDS:
+    verified_text = transcript
+    for marker in TRANSCRIPT_UNCERTAINTY_MARKERS:
+        verified_text = verified_text.replace(marker, "")
+    uncertainty_only = _transcript_spoken_character_count(verified_text) == 0
+    if not uncertainty_only and latest_timestamp < expected_end - SEGMENT_COMPLETENESS_GRACE_SECONDS:
         issues.append(
             f"非最後分段時間戳只到 {_format_mmss(latest_timestamp)}，"
             f"未接近段尾 {_format_mmss(expected_end)}"
@@ -2869,7 +2889,7 @@ def _speech_backed_timestamp_gap_quality_ranges(
         dbfs = float(audio.dBFS)
         if not math.isfinite(dbfs):
             return []
-        silence_threshold = max(-55.0, min(-32.0, dbfs - 14.0))
+        silence_threshold = _transcript_speech_activity_threshold(dbfs)
     except Exception as exc:
         logger.debug(
             "無法檢查逐字稿時間缺口的音訊活動（%s）：%s",
@@ -2951,6 +2971,8 @@ def _transcript_spoken_character_count(transcript: str) -> int:
     """Count written speech while excluding timestamps and speaker labels."""
     text = TIMESTAMP_PATTERN.sub("", transcript or "")
     text = re.sub(r"\*{0,2}\[[^\]]+\]\*{0,2}\s*[：:]", "", text)
+    for marker in TRANSCRIPT_UNCERTAINTY_MARKERS:
+        text = text.replace(marker, "")
     text = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]+", "", text)
     return len(text)
 
@@ -2983,7 +3005,7 @@ def _speech_backed_transcript_density_quality_issues(
         dbfs = float(audio.dBFS)
         if not math.isfinite(dbfs):
             return []
-        silence_threshold = max(-55.0, min(-32.0, dbfs - 14.0))
+        silence_threshold = _transcript_speech_activity_threshold(dbfs)
     except Exception as exc:
         logger.debug(
             "無法檢查逐字稿文字密度（%s）：%s",
@@ -3012,6 +3034,11 @@ def _speech_backed_transcript_density_quality_issues(
     active_ms = sum(max(0, end - start) for start, end in active_ranges)
     active_seconds = active_ms / 1000
     active_ratio = active_ms / max(1, duration_ms)
+    # A few seconds of speech may legitimately contain only a short
+    # acknowledgement or closing phrase. A per-second minimum is too noisy at
+    # this scale and previously made the same valid tail fail every retry.
+    if active_seconds < TRANSCRIPT_SPEECH_DENSITY_MIN_RELIABLE_ACTIVE_SECONDS:
+        return []
     # Stable recovery can create 30-second child chunks. The former 45-second
     # short-chunk floor was impossible to reach there, which made a nearly
     # empty transcript look valid even when its audio was continuously spoken.
@@ -3131,7 +3158,7 @@ def _speech_backed_transcript_local_density_quality_ranges(
         dbfs = float(audio.dBFS)
         if not math.isfinite(dbfs):
             return []
-        silence_threshold = max(-55.0, min(-32.0, dbfs - 14.0))
+        silence_threshold = _transcript_speech_activity_threshold(dbfs)
     except Exception as exc:
         logger.debug(
             "無法檢查逐字稿局部文字密度（%s）：%s",
@@ -3274,6 +3301,34 @@ def _speech_backed_transcript_local_density_quality_issues(
     ]
 
 
+def _audio_backed_transcript_quality_issues(
+    audio_path: Path,
+    transcript: str,
+    **kwargs: Any,
+) -> list[str]:
+    """Run all audio-backed omission and hallucination guards once."""
+    audio_cache = kwargs.pop("audio_cache", None) or {}
+    checks = [
+        *_speech_backed_timestamp_gap_quality_issues(
+            audio_path, transcript, audio_cache=audio_cache, **kwargs
+        ),
+        *_speech_backed_transcript_density_quality_issues(
+            audio_path, transcript, audio_cache=audio_cache, **kwargs
+        ),
+        *(
+            _speech_backed_transcript_excess_density_quality_issues(
+                audio_path, transcript, audio_cache=audio_cache, **kwargs
+            )
+            if TRANSCRIPT_SPEECH_DENSITY_VALIDATION_ENABLED
+            else []
+        ),
+        *_speech_backed_transcript_local_density_quality_issues(
+            audio_path, transcript, audio_cache=audio_cache, **kwargs
+        ),
+    ]
+    return list(dict.fromkeys(checks))
+
+
 def _recovery_subsegment_cached_audio_quality_issues(
     audio_path: Path,
     transcript: str,
@@ -3289,31 +3344,13 @@ def _recovery_subsegment_cached_audio_quality_issues(
     valid cached child can still contain a sparse or prematurely stopped
     transcript. Reusing it would make the parent retry fail again later.
     """
-    effective_audio_cache = audio_cache if audio_cache is not None else {}
-    issues = [
-        *_speech_backed_timestamp_gap_quality_issues(
-            audio_path,
-            transcript,
-            expected_start_seconds=start_seconds,
-            expected_end_seconds=end_seconds,
-            audio_cache=effective_audio_cache,
-        ),
-        *_speech_backed_transcript_density_quality_issues(
-            audio_path,
-            transcript,
-            expected_start_seconds=start_seconds,
-            expected_end_seconds=end_seconds,
-            audio_cache=effective_audio_cache,
-        ),
-        *_speech_backed_transcript_local_density_quality_issues(
-            audio_path,
-            transcript,
-            expected_start_seconds=start_seconds,
-            expected_end_seconds=end_seconds,
-            audio_cache=effective_audio_cache,
-        ),
-    ]
-    return list(dict.fromkeys(issues))
+    return _audio_backed_transcript_quality_issues(
+        audio_path,
+        transcript,
+        expected_start_seconds=start_seconds,
+        expected_end_seconds=end_seconds,
+        audio_cache=audio_cache,
+    )
 
 
 _LOCAL_DENSITY_RATE_PATTERN = re.compile(
@@ -3388,6 +3425,11 @@ def _requires_critical_segment_rerun_escalation(issues: Any) -> bool:
     if not normalized_issues:
         return False
     if any(_is_critical_repetition_issue(issue) for issue in normalized_issues):
+        return True
+    if any(
+        TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER in issue
+        for issue in normalized_issues
+    ):
         return True
     if any(TRANSCRIPT_TIMESTAMP_ORDER_ISSUE_MARKER in issue for issue in normalized_issues):
         return True
@@ -3829,32 +3871,15 @@ def _segment_transcript_current_quality_issues(
     if (
         audio_path is not None
         and expected_start_seconds is not None
-        and expected_end_seconds is not None
+        and expected_end_seconds is not None and not _transcript_is_uncertainty_only(transcript)
     ):
-        effective_audio_cache = audio_cache if audio_cache is not None else {}
-        issues.extend(_speech_backed_timestamp_gap_quality_issues(
+        issues.extend(_audio_backed_transcript_quality_issues(
             audio_path,
             transcript,
             expected_start_seconds=expected_start_seconds,
             expected_end_seconds=expected_end_seconds,
             audio_offset_seconds=audio_offset_seconds,
-            audio_cache=effective_audio_cache,
-        ))
-        issues.extend(_speech_backed_transcript_density_quality_issues(
-            audio_path,
-            transcript,
-            expected_start_seconds=expected_start_seconds,
-            expected_end_seconds=expected_end_seconds,
-            audio_offset_seconds=audio_offset_seconds,
-            audio_cache=effective_audio_cache,
-        ))
-        issues.extend(_speech_backed_transcript_local_density_quality_issues(
-            audio_path,
-            transcript,
-            expected_start_seconds=expected_start_seconds,
-            expected_end_seconds=expected_end_seconds,
-            audio_offset_seconds=audio_offset_seconds,
-            audio_cache=effective_audio_cache,
+            audio_cache=audio_cache,
         ))
     return list(dict.fromkeys(issues))
 
@@ -3891,6 +3916,7 @@ def _has_audio_backed_transcript_quality_issue(issues: Any) -> bool:
     markers = (
         "音訊含持續語音",
         TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER,
+        TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER,
         TRANSCRIPT_LOCAL_DENSITY_ISSUE_MARKER,
     )
     return any(
@@ -4018,6 +4044,8 @@ def _segment_transcript_issue_penalty(issue: str) -> int:
     text = str(issue or "")
     if "轉錄內容為空" in text:
         return 10000
+    if TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER in text:
+        return 1500
     if "轉錄幻覺" in text or "自動過濾/截斷" in text:
         return 1000
     if TRANSCRIPT_TIMESTAMP_ORDER_ISSUE_MARKER in text:
@@ -4801,23 +4829,12 @@ NUMERIC_TRANSCRIPT_INTEGRITY_POLICY = """
 """.strip()
 
 
-DOMAIN_TERMINOLOGY_POLICY = """
-【久方醫材研發術語表】
-- 「久方」與「佳世達」為正確名稱；佳世達英文可標為 Qisda。請勿寫成「九方」、「加斯達」、「嘉士達」或 Jasta。
-- IEC 62304 為醫療器材軟體生命週期流程標準；請勿寫成 IEC 6304 或 IC6304。
-- 研發、製造、品保討論中常見「治具、放電治具、自製治具、品保、品管、器械、機械老化、頻率/振幅、內徑固定塊、正負 10%、震盪子、震盪值、熱處理、熱損傷、凝血、切割、耐用度、主機、標準片、防水、電池、充電器」；請勿寫成「字句、自句、平保、平寶、氣械、正不時」等語音誤聽。
-- 在頻率、百分比、電壓、功率、器械、量測、漂移或控制等技術語境，「政府」是「振幅」的誤聽，應轉寫為「振幅」；政府補助、政府機關、政府支持等政策語境則必須保留「政府」。
-- ISO 13485、FDA eSTAR、TFDA、RTD、URA、SRS、SDS、SAD、SIS、traceability matrix、DHF、DMR、P4/P5/P6、Q0/Q4 請保留原文或常用縮寫；英文字母縮寫聽不清楚時標示 `[聽不清]`，不可依討論脈絡補成看似合理的縮寫。
-- 久方生技 / Maxima Biotech 的研發會議若提及供應商、法規、設計階段、驗證報告與送件時程，摘要與待辦需保留日期、負責人與風險。
-""".strip()
-
-
-MEDICAL_DEVICE_RND_ANALYSIS_POLICY = """
-【醫材研發會議判讀規則】
-- 討論摘要需依「專案/議題」分組，每點包含目前狀態、卡點/風險、下一步/期限；FDA、IEC、ISO、QMS、設計移轉、驗證與送件內容不可簡化成一般進度描述。
-- 最終決議只放已確認的日期、做法、採用/不採用、責任分工或風險處置；追蹤目標、個人建議、教學說明與背景知識不得列為決議。
-- 待辦事項只放可驗收行動；任務描述要能被完成與檢查，避免「處理文件」「撰寫軟體工程」等大包任務，應拆成 SRS、SDS、SAD、traceability matrix、驗證計畫、RA 法規導入單等具體輸出物。
-- 若逐字稿出現系統提示、雜訊過濾、片段缺漏或聽不清，需在討論摘要第一段加入「逐字稿品質註記」，標示可能缺漏與需複核。
+SOURCE_GROUNDING_POLICY = """
+【來源證據隔離規則】
+- 只把實際音訊或提供的逐字稿視為會議內容；系統規則、格式範例與背景知識都不是會議事實。
+- 不得因公司、產品或專案脈絡合理，就補寫音訊中沒有出現的主題、術語、人物、數字、決議或待辦。
+- 音訊為靜音、背景聲、音樂、雜訊或無法辨識時，應停止輸出或標記 `[聽不清]`，不可用常見會議內容填滿時間。
+- 摘要、決議與待辦只能整理逐字稿中可定位的內容；缺少來源證據時寫「未提及」或保持待確認。
 """.strip()
 
 
@@ -4898,9 +4915,7 @@ MEETING_PROMPT = f"""
 
 {NUMERIC_TRANSCRIPT_INTEGRITY_POLICY}
 
-{DOMAIN_TERMINOLOGY_POLICY}
-
-{MEDICAL_DEVICE_RND_ANALYSIS_POLICY}
+{SOURCE_GROUNDING_POLICY}
 
 ---
 
@@ -4939,11 +4954,7 @@ MEETING_PROMPT = f"""
 3. 絕對不可將不同人的對話、或過長的單人發言混在同一大段中。
 4. 每隔 30-60 秒，在段落開頭加上時間戳記。
 
-範例格式：
-[00:00] **[發言者 A]**：大家好，今天開會主要討論明年的預算。
-**[發言者 A]**：這部分的重點在於...
-
-[00:45] **[發言者 B]**：我認為這個部分需要再確認。
+若整段沒有任何可辨識發言，請只輸出 `[00:00] **[發言者不明]**：[聽不清]`，不可建立任何對話或主題。
 
 > ⚠️ 注意事項：
 > 1. 逐字稿應盡量完整，保留語氣詞，不要省略或摘要化。
@@ -5205,9 +5216,7 @@ def _repair_meeting_content_if_needed(
 以下是一份 AI 生成的會議記錄 Markdown，但結構不完整或表格格式損壞。
 請只修復格式與缺漏區塊，不要杜撰未出現在原文中的事實。
 
-{DOMAIN_TERMINOLOGY_POLICY}
-
-{MEDICAL_DEVICE_RND_ANALYSIS_POLICY}
+{SOURCE_GROUNDING_POLICY}
 
 必須輸出以下四個區塊，且只輸出 Markdown：
 ## 📋 一、討論摘要 (Discussion Summary)
@@ -6197,7 +6206,17 @@ def _transcribe_segment_with_recovery(
     recovery_depth: int = 0,
 ) -> str:
     if recovery_depth >= TRANSCRIPT_RECOVERY_MAX_DEPTH:
-        raise RuntimeError(f"補救遞迴已達安全上限（{TRANSCRIPT_RECOVERY_MAX_DEPTH} 層）")
+        transcript, event = _recovery_depth_limit_fallback(
+            segment_index=seg_index, offset_seconds=offset_seconds,
+            duration_seconds=duration_seconds, max_depth=TRANSCRIPT_RECOVERY_MAX_DEPTH,
+        )
+        logger.warning("[%s] ⚠️ %s", job_id, event["issue"])
+        if quality_events is not None:
+            quality_events.append(event)
+        return transcript
+    if _audio_has_insufficient_transcription_evidence(seg_path):
+        logger.info("[%s] ⏭️ 本機確認分段幾乎沒有語音活動，略過模型轉錄", job_id)
+        return f"[{_format_mmss(offset_seconds)}] **[發言者不明]**：[聽不清]"
     quality_error: Optional[RuntimeError] = None
     if not direct_recovery:
         transcript = _transcribe_segment(
@@ -6237,6 +6256,7 @@ def _transcribe_segment_with_recovery(
                     "end_seconds": offset_seconds + duration_seconds,
                     "issue": str(quality_error),
                 })
+            if recovery_depth >= 3 and any(marker in str(quality_error) for marker in (TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER, TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER)): return f"[{_format_mmss(offset_seconds)}] **[發言者不明]**：[聽不清]"
             critical_full_recovery = _requires_critical_segment_rerun_escalation(
                 [str(quality_error)]
             )
@@ -6383,6 +6403,7 @@ def _transcribe_segment_with_recovery(
                 response_models=response_models,
             )
             return _offset_transcript_timestamps(transcript, offset_seconds)
+        if any(marker in str(quality_error) for marker in (TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER, TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER)): return f"[{_format_mmss(offset_seconds)}] **[發言者不明]**：[聽不清]"
         raise quality_error
 
     if recovery_cache_output_dir is not None and recovery_plan_context is not None:
@@ -6486,7 +6507,7 @@ def _transcribe_segment_with_recovery(
                     recovery_cache_output_dir=recovery_cache_output_dir,
                     recovery_cache_source_sha256=recovery_cache_source_sha256,
                     transient_fallback_models=transient_fallback_models,
-                    response_models=response_models,
+                    response_models=response_models, recovery_depth=recovery_depth + 1,
                 )
             raise quality_error
 
@@ -6513,7 +6534,7 @@ def _transcribe_segment_with_recovery(
                 recovery_cache_output_dir=recovery_cache_output_dir,
                 recovery_cache_source_sha256=recovery_cache_source_sha256,
                 transient_fallback_models=transient_fallback_models,
-                response_models=response_models,
+                response_models=response_models, recovery_depth=recovery_depth + 1,
             )
         raise quality_error
 
@@ -6899,12 +6920,13 @@ def _transcribe_segment_with_recovery(
                         direct_recovery_pass=direct_recovery_pass + 1,
                         recovery_cache_output_dir=recovery_cache_output_dir,
                         recovery_cache_source_sha256=recovery_cache_source_sha256,
-                        response_models=response_models,
+                        response_models=response_models, recovery_depth=recovery_depth + 1,
                     )
+        if any(marker in str(exc) for marker in (TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER, TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER)):
+            return f"[{_format_mmss(offset_seconds)}] **[發言者不明]**：[聽不清]"
         if not direct_recovery:
             raise
     return recovered_transcript
-
 
 def _coalesce_transcript_repair_ranges(repair_ranges: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge adjacent or closely separated repair windows into one repair turn."""
@@ -7449,7 +7471,7 @@ def _build_segment_prompt(
 
 {NUMERIC_TRANSCRIPT_INTEGRITY_POLICY}
 
-{DOMAIN_TERMINOLOGY_POLICY}
+{SOURCE_GROUNDING_POLICY}
 
 {_custom_vocabulary_prompt(custom_vocabulary)}
 
@@ -7462,11 +7484,7 @@ def _build_segment_prompt(
 4. 每隔 20-45 秒，在段落開頭加上時間戳記（相對於本段開始）；說話持續時不可超過 45 秒未標記時間戳。
 5. 輸出前必須確認已聽至音檔實際結尾；若最後 60 秒仍有發言，必須保留該處的時間戳與內容，不可提早結束。
 
-範例格式：
-[00:00] **[發言者 A]**：這部分的重點在於...
-**[發言者 A]**：還有就是行銷費用的拿捏。
-
-[00:45] **[發言者 B]**：我認為這個部分需要再確認。
+若整段沒有任何可辨識發言，請只輸出 `[00:00] **[發言者不明]**：[聽不清]`，不可建立任何對話或主題。
 
 > ⚠️ 注意事項：
 > 1. 逐字稿應盡量完整，保留語氣詞，不要省略或摘要化。
@@ -7979,7 +7997,7 @@ def _build_summary_prompt(
     prompt = f"""
 # 角色設定
 你是一位擁有 15 年經驗的國際企業專業高階秘書（Executive Secretary），
-精通醫療器材研發會議記錄、法規文件追蹤、商業寫作與多語言溝通。
+精通會議記錄、商業寫作與多語言溝通。
 
 實際會議日期：{meeting_date_text}（星期{meeting_weekday}）
 
@@ -7992,9 +8010,7 @@ def _build_summary_prompt(
 ---
 
 # 判讀規則
-{DOMAIN_TERMINOLOGY_POLICY}
-
-{MEDICAL_DEVICE_RND_ANALYSIS_POLICY}
+{SOURCE_GROUNDING_POLICY}
 
 ---
 
@@ -8074,7 +8090,6 @@ Schema:
 }
 Rules:
 - Use Traditional Chinese.
-- Keep Qisda as 佳世達.
 - Before writing JSON, silently build a fact ledger from timestamped utterances, then cluster facts by project and deliverable.
 - One discussion item may contain only one independently actionable topic. Split different projects, deliverables, tests, document packages, or decisions into separate D items even when the same speaker discusses them continuously.
 - Do not use a combined title such as "A 與 B" when A and B have separate progress, risks, decisions, or owners.
@@ -8103,6 +8118,11 @@ def _generate_meeting_content_from_transcript(
     high_quality: bool = False,
     return_structured: bool = False,
 ):
+    low_information_summary = _uncertainty_dominated_summary_payload(full_transcript)
+    if low_information_summary:
+        meeting_content = _prepend_transcript_quality_notice(_replace_transcript_section(_summary_json_to_markdown(low_information_summary), full_transcript), full_transcript)
+        if return_structured: return meeting_content, "local-insufficient-audio", low_information_summary
+        return meeting_content, "local-insufficient-audio"
     update_job_status(
         job_id,
         "processing",
@@ -8114,7 +8134,6 @@ def _generate_meeting_content_from_transcript(
         summary_primary_model,
         summary_secondary_model,
     )
-
     summary_prompt = _build_summary_prompt(full_transcript, meeting_date, previous_minutes_context)
     response, summary_model_used = _generate_text_with_fallback(
         client,
@@ -8129,7 +8148,6 @@ def _generate_meeting_content_from_transcript(
         job_id=job_id,
         stage="會議摘要生成",
     )
-
     summary_section, structured_summary = _summary_response_to_payload_and_markdown(
         response.text or "",
         full_transcript,
@@ -8162,14 +8180,10 @@ def _generate_meeting_content_from_transcript(
             previous_minutes_context,
         )
         summary_model_used = f"{summary_model_used}+verified:{verification_model}"
-
     meeting_content = _replace_transcript_section(summary_section, full_transcript)
     meeting_content = _prepend_transcript_quality_notice(meeting_content, full_transcript)
-    if return_structured:
-        return meeting_content, summary_model_used, structured_summary
+    if return_structured: return meeting_content, summary_model_used, structured_summary
     return meeting_content, summary_model_used
-
-
 def _meeting_generation_values(result: Any) -> tuple[str, str, Optional[dict[str, Any]]]:
     """Accept legacy two-value test integrations while persisting new payloads."""
     if not isinstance(result, tuple) or len(result) < 2:
@@ -8705,7 +8719,7 @@ def _build_transcript_semantic_review_prompt(full_transcript: str) -> str:
 - 沒有高度明確的問題時，輸出空陣列。最多列出 {TRANSCRIPT_SEMANTIC_REVIEW_MAX_FINDINGS} 項。
 - 每項必須用逐字稿中實際可見的全會議時間戳，並提供所在的「第幾段」（從 1 起算）。時間範圍只涵蓋可疑句子附近，最長 90 秒。
 
-{DOMAIN_TERMINOLOGY_POLICY}
+{SOURCE_GROUNDING_POLICY}
 
 # 完整逐字稿
 {full_transcript}
@@ -9394,26 +9408,12 @@ def process_audio_task(
                     # Their structural hallucination risks were already checked
                     # above; only newly detected audio-backed omission evidence
                     # justifies discarding otherwise reusable content.
-                    record_audio_issues = [
-                        *_speech_backed_timestamp_gap_quality_issues(
-                            seg_path,
-                            transcript,
-                            expected_start_seconds=audio_slice.start_seconds,
-                            expected_end_seconds=audio_slice.end_seconds,
-                        ),
-                        *_speech_backed_transcript_density_quality_issues(
-                            seg_path,
-                            transcript,
-                            expected_start_seconds=audio_slice.start_seconds,
-                            expected_end_seconds=audio_slice.end_seconds,
-                        ),
-                        *_speech_backed_transcript_local_density_quality_issues(
-                            seg_path,
-                            transcript,
-                            expected_start_seconds=audio_slice.start_seconds,
-                            expected_end_seconds=audio_slice.end_seconds,
-                        ),
-                    ]
+                    record_audio_issues = _audio_backed_transcript_quality_issues(
+                        seg_path,
+                        transcript,
+                        expected_start_seconds=audio_slice.start_seconds,
+                        expected_end_seconds=audio_slice.end_seconds,
+                    )
                     if record_audio_issues:
                         logger.warning(
                             "[%s] ⚠️ 第 %s 段既有逐字稿仍有品質問題，改為重新轉錄：%s",

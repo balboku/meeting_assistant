@@ -61,7 +61,18 @@ pause
 exit /b %EXIT_CODE%
 
 :ensure_venv
-if exist ".venv\Scripts\python.exe" exit /b 0
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" -c "import sys" >nul 2>nul
+    if not errorlevel 1 exit /b 0
+
+    echo [WARN] Existing .venv is unusable, likely because the project was moved from another computer or Windows account.
+    call :backup_broken_venv
+    if errorlevel 1 exit /b 1
+) else if exist ".venv" (
+    echo [WARN] Existing .venv is incomplete and will be rebuilt.
+    call :backup_broken_venv
+    if errorlevel 1 exit /b 1
+)
 
 echo [INFO] .venv not found. Creating a virtual environment...
 call :create_venv
@@ -69,6 +80,23 @@ if errorlevel 1 (
     echo [ERROR] Could not create .venv. Please install Python 3.13 or newer.
     exit /b 1
 )
+exit /b 0
+
+:backup_broken_venv
+if not exist ".venv" exit /b 0
+
+for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss"`) do set "VENV_TIMESTAMP=%%T"
+if not defined VENV_TIMESTAMP set "VENV_TIMESTAMP=!RANDOM!"
+set "VENV_BACKUP=.venv.broken-!VENV_TIMESTAMP!"
+if exist "!VENV_BACKUP!" set "VENV_BACKUP=!VENV_BACKUP!-!RANDOM!"
+
+move ".venv" "!VENV_BACKUP!" >nul
+if errorlevel 1 (
+    echo [ERROR] Could not preserve the unusable .venv directory.
+    exit /b 1
+)
+
+echo [INFO] Preserved unusable environment as !VENV_BACKUP!
 exit /b 0
 
 :create_venv
@@ -92,12 +120,23 @@ exit /b 1
 
 :resolve_python
 if exist ".venv\Scripts\python.exe" (
-    set "PYTHON_EXE=%CD%\.venv\Scripts\python.exe"
-    exit /b 0
+    ".venv\Scripts\python.exe" -c "import sys" >nul 2>nul
+    if not errorlevel 1 (
+        set "PYTHON_EXE=%CD%\.venv\Scripts\python.exe"
+        exit /b 0
+    )
 )
 
 where py >nul 2>nul
 if not errorlevel 1 (
+    for /f "usebackq delims=" %%P in (`py -3.14 -c "import sys; print(sys.executable)" 2^>nul`) do (
+        set "PYTHON_EXE=%%P"
+        exit /b 0
+    )
+    for /f "usebackq delims=" %%P in (`py -3.13 -c "import sys; print(sys.executable)" 2^>nul`) do (
+        set "PYTHON_EXE=%%P"
+        exit /b 0
+    )
     for /f "usebackq delims=" %%P in (`py -3 -c "import sys; print(sys.executable)" 2^>nul`) do (
         set "PYTHON_EXE=%%P"
         exit /b 0

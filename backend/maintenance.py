@@ -1186,6 +1186,25 @@ def _path_check(name: str, path: Path, must_contain: tuple[str, ...] = ()) -> di
     return {"name": name, "status": "ok", "detail": str(path)}
 
 
+def _resolve_media_tool(
+    environment: Mapping[str, str],
+    env_names: tuple[str, ...],
+    executable: str,
+) -> str | None:
+    """Resolve a media tool exactly as runtime tasks are configured to use it."""
+    for env_name in env_names:
+        configured = str(environment.get(env_name, "")).strip().strip('"')
+        if not configured:
+            continue
+
+        configured_path = Path(configured)
+        if configured_path.is_file():
+            return str(configured_path)
+        return shutil.which(configured)
+
+    return shutil.which(executable)
+
+
 def run_startup_health_checks(
     temp_dir: Path,
     output_dir: Path,
@@ -1235,8 +1254,16 @@ def run_startup_health_checks(
                 "detail": integrity,
             })
 
-    ffmpeg_path = shutil.which("ffmpeg")
-    ffprobe_path = shutil.which("ffprobe")
+    ffmpeg_path = _resolve_media_tool(
+        environment,
+        ("FFMPEG_PATH", "FFMPEG_BINARY"),
+        "ffmpeg",
+    )
+    ffprobe_path = _resolve_media_tool(
+        environment,
+        ("FFPROBE_PATH", "FFPROBE_BINARY"),
+        "ffprobe",
+    )
     checks.append({
         "name": "media_tools",
         "status": "ok" if ffmpeg_path and ffprobe_path else "failed",

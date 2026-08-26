@@ -1605,6 +1605,32 @@ class StartupHealthRegressionTests(unittest.TestCase):
         self.assertEqual(names["output_dir"]["status"], "failed")
         self.assertEqual(names["static_vendor"]["status"], "failed")
 
+    def test_startup_health_uses_configured_media_tool_paths(self):
+        from backend.maintenance import run_startup_health_checks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            ffmpeg_path = tmp_path / "ffmpeg.exe"
+            ffprobe_path = tmp_path / "ffprobe.exe"
+            ffmpeg_path.touch()
+            ffprobe_path.touch()
+
+            checks = run_startup_health_checks(
+                temp_dir=tmp_path,
+                output_dir=tmp_path,
+                static_vendor_dir=tmp_path,
+                env={
+                    "GEMINI_API_KEY": "configured",
+                    "FFMPEG_PATH": str(ffmpeg_path),
+                    "FFPROBE_PATH": str(ffprobe_path),
+                },
+            )
+
+        names = {check["name"]: check for check in checks}
+        self.assertEqual(names["media_tools"]["status"], "ok")
+        self.assertIn(str(ffmpeg_path), names["media_tools"]["detail"])
+        self.assertIn(str(ffprobe_path), names["media_tools"]["detail"])
+
     def test_health_endpoint_includes_startup_checks(self):
         import backend.main as main
 
@@ -1834,6 +1860,9 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertIn("每秒遞增的時間戳製造未實際說出的量測或清單", prompt)
         self.assertIn("不可跳過仍有說話聲的時間區間", prompt)
         self.assertIn("已聽至音檔實際結尾", prompt)
+        self.assertIn("若整段沒有任何可辨識發言", prompt)
+        self.assertNotIn("這部分的重點在於", prompt)
+        self.assertNotIn("行銷費用的拿捏", prompt)
 
     def test_segment_repair_focus_is_issue_specific_without_reusing_prior_text(self):
         from backend import tasks
@@ -1973,34 +2002,35 @@ class TaskRegressionTests(unittest.TestCase):
         self.assertIn("不要把不同人的發言合併成同一位", prompt)
         self.assertIn("若只能辨識到匿名發言者", prompt)
 
-    def test_backend_prompts_use_medical_device_rnd_analysis_policy(self):
+    def test_backend_prompts_keep_domain_examples_out_of_model_context(self):
         from backend import tasks
 
         prompts = (
             tasks.MEETING_PROMPT,
             tasks._build_segment_prompt(0, 2),
-            tasks._build_summary_prompt("佳世達 IEC 62304 SRS SDS traceability matrix"),
+            tasks._build_summary_prompt("[00:00] **[發言者 A]**：實際逐字稿內容。"),
         )
 
-        self.assertIn("「佳世達」為正確名稱", prompts[0])
-        self.assertIn("「加斯達」、「嘉士達」或 Jasta", prompts[0])
-        self.assertIn("政府補助、政府機關、政府支持等政策語境則必須保留「政府」", prompts[1])
-        self.assertIn("IEC 62304", prompts[1])
-        self.assertIn("震盪子、震盪值、熱處理、熱損傷、凝血、切割、耐用度", prompts[1])
-        self.assertIn("TFDA、RTD", prompts[1])
-        self.assertIn("不可依討論脈絡補成看似合理的縮寫", prompts[1])
-        self.assertIn("討論摘要需依「專案/議題」分組", prompts[2])
-        self.assertIn("最終決議只放已確認", prompts[2])
-        self.assertIn("待辦事項只放可驗收行動", prompts[2])
+        for prompt in prompts:
+            self.assertIn("只把實際音訊或提供的逐字稿視為會議內容", prompt)
+            self.assertIn("系統規則、格式範例與背景知識都不是會議事實", prompt)
+            self.assertNotIn("IEC 62304", prompt)
+            self.assertNotIn("震盪子", prompt)
+            self.assertNotIn("FDA eSTAR", prompt)
+            self.assertNotIn("佳世達", prompt)
+        self.assertIn("請清楚寫下經過討論後已確認的共識或結論", prompts[2])
+        self.assertIn("請以表格呈現所有被提及的任務、負責人與期限", prompts[2])
 
-    def test_cli_prompt_uses_medical_device_rnd_analysis_policy(self):
+    def test_cli_prompt_keeps_domain_examples_out_of_audio_context(self):
         import meeting_assistant
 
         prompt = meeting_assistant.build_meeting_prompt()
 
-        self.assertIn("「佳世達」為正確名稱", prompt)
-        self.assertIn("久方生技 / Maxima Biotech", prompt)
-        self.assertIn("討論摘要需依「專案/議題」分組", prompt)
+        self.assertIn("只把實際音訊視為會議內容", prompt)
+        self.assertIn("系統規則、格式範例與背景知識都不是會議事實", prompt)
+        self.assertNotIn("IEC 62304", prompt)
+        self.assertNotIn("FDA eSTAR", prompt)
+        self.assertNotIn("佳世達", prompt)
         self.assertIn("不要把追蹤目標、背景說明或教學內容列為決議", prompt)
 
     def test_domain_term_normalization_and_quality_notice(self):
@@ -2531,6 +2561,18 @@ class TaskRegressionTests(unittest.TestCase):
         )
 
         self.assertTrue(any("重複轉錄幻覺" in issue for issue in issues))
+
+    def test_uncertainty_only_segment_does_not_invent_tail_coverage(self):
+        from backend.tasks import _segment_transcript_quality_issues
+
+        issues = _segment_transcript_quality_issues(
+            "[40:00] **[發言者不明]**：[聽不清]",
+            segment_index=4,
+            total_segments=10,
+            segment_minutes=10,
+        )
+
+        self.assertEqual(issues, [])
 
     def test_segment_transcript_quality_rejects_single_line_repetition_hallucination(self):
         from backend.tasks import _segment_transcript_quality_issues
@@ -9315,6 +9357,9 @@ console.log('summary_editor_quality_note_ok');
         self.assertIn('id="rec-screen-options" aria-labelledby="tab-screen" hidden', html)
         self.assertIn('id="rec-screen-options"', html)
         self.assertIn('id="rec-include-mic" checked', html)
+        self.assertIn('class="rec-screen-audio-requirement" role="note"', html)
+        self.assertIn("分享音訊為必要條件", html)
+        self.assertIn("未取得聲音時不會開始錄製", html)
         self.assertIn('id="btn-rec-mic"', html)
         self.assertIn('aria-label="關閉錄製視窗"', html)
         self.assertIn('id="rec-size-estimate" aria-live="polite"', html)
@@ -9398,6 +9443,11 @@ console.log('summary_editor_quality_note_ok');
         self.assertIn("recPreview.classList.remove('show');", html)
         self.assertIn("getDisplayMedia", html)
         self.assertIn("audio: true", html)
+        self.assertIn("systemAudio: 'include'", html)
+        self.assertIn("windowAudio: 'system'", html)
+        self.assertIn("audioSelection: 'preferred'", html)
+        self.assertIn("if (!recScreenAudioCaptured)", html)
+        self.assertIn("未取得分頁／系統音訊，錄製尚未開始", html)
         self.assertIn("const includeMic = Boolean(recIncludeMic?.checked)", html)
         self.assertIn("if (includeMic)", html)
         self.assertIn("getUserMedia({ audio: microphoneConstraints })", html)
@@ -9435,7 +9485,8 @@ console.log('summary_editor_quality_note_ok');
         self.assertIn("setRecordingResult('已取消處理。', 'error')", html)
         self.assertIn("Optional microphone capture failed; continuing with screen audio.", html)
         self.assertIn("目前沒有可錄製的聲音", html)
-        self.assertIn("分享分頁或視窗時需勾選分享音訊", html)
+        self.assertIn("選擇實際播放會議聲音的分頁或螢幕", html)
+        self.assertIn("分享分頁音訊／系統音訊", html)
         self.assertIn("攝影機與麥克風權限", html)
         self.assertIn("麥克風權限", html)
         self.assertIn("${recordingPermissionHint()}", html)
@@ -9443,6 +9494,81 @@ console.log('summary_editor_quality_note_ok');
         self.assertIn("displayStream.getAudioTracks()", html)
         self.assertIn("...micAudioTracks", html)
         self.assertIn("createMediaStreamDestination", html)
+
+    def test_screen_recording_refuses_to_start_without_shared_audio_track(self):
+        static_path = json.dumps(str(ROOT / "static" / "index.html"))
+        node_script = f"""
+const fs = require('fs');
+const vm = require('vm');
+const html = fs.readFileSync({static_path}, 'utf8');
+const script = [...html.matchAll(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi)]
+  .map(match => match[1])
+  .find(block => block.includes('async function createRecordingStream'));
+if (!script) process.exit(2);
+function grab(name) {{
+  const start = script.indexOf(`async function ${{name}}`);
+  if (start < 0) process.exit(3);
+  const next = script.indexOf('\\n\\nasync function ', start + 1);
+  const nextSync = script.indexOf('\\n\\nfunction ', start + 1);
+  const candidates = [next, nextSync].filter(value => value >= 0);
+  const end = candidates.length ? Math.min(...candidates) : script.length;
+  return script.slice(start, end);
+}}
+const displayStream = {{
+  getAudioTracks() {{ return []; }},
+  getVideoTracks() {{ return [{{}}]; }},
+  getTracks() {{ return []; }}
+}};
+const sandbox = {{
+  console,
+  recMode: 'screen',
+  recStatusEl: {{ textContent: '' }},
+  recSourceStreams: [],
+  recScreenAudioCaptured: false,
+  recScreenMicCaptured: false,
+  recMicAudioTracks: [],
+  recIncludeMic: {{ checked: true }},
+  navigator: {{ mediaDevices: {{
+    async getDisplayMedia(options) {{
+      sandbox.displayOptions = options;
+      return displayStream;
+    }}
+  }} }},
+  getRecordingProfile() {{ return {{ video_fps: 15, audio_sample_rate: 24000 }}; }},
+  releaseRecordingStreams() {{ sandbox.released = true; }},
+  mixAudioTracks() {{ throw new Error('mixing must not run without shared audio'); }},
+  attachScreenStopHandler() {{ throw new Error('stop handler must not run without shared audio'); }}
+}};
+vm.runInNewContext(grab('createRecordingStream'), sandbox);
+(async () => {{
+  try {{
+    await sandbox.createRecordingStream();
+    process.exit(4);
+  }} catch (error) {{
+    if (!String(error.message).includes('未取得分頁／系統音訊')) process.exit(5);
+    if (!sandbox.released) process.exit(6);
+    if (sandbox.displayOptions?.audio !== true) process.exit(7);
+    if (sandbox.displayOptions?.systemAudio !== 'include') process.exit(8);
+    if (sandbox.displayOptions?.windowAudio !== 'system') process.exit(9);
+    if (sandbox.displayOptions?.audioSelection !== 'preferred') process.exit(10);
+    if (!sandbox.recSourceStreams.includes(displayStream)) process.exit(11);
+    console.log('screen_audio_required_ok');
+  }}
+}})().catch(error => {{ console.error(error); process.exit(12); }});
+"""
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is not available")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_recording_preview_warns_after_repeated_black_frames(self):
         static_path = json.dumps(str(ROOT / "static" / "index.html"))
@@ -11252,6 +11378,197 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
             tasks.TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER in issue
             for issue in issues
         ))
+
+    def test_speech_backed_transcript_density_ignores_too_short_rate_sample(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -20.0
+
+            def __len__(self):
+                return 5_000
+
+            def __getitem__(self, _slice):
+                return self
+
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 3_000)]):
+            issues = tasks._speech_backed_transcript_density_quality_issues(
+                Path("short-tail.mp3"),
+                "[00:00] **[發言者 A]**：沒有問題",
+                expected_start_seconds=0,
+                expected_end_seconds=5,
+            )
+
+        self.assertEqual(issues, [])
+
+    def test_speech_backed_excess_density_blocks_sparse_audio_hallucination(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -20.0
+
+            def __len__(self):
+                return 600_000
+
+            def __getitem__(self, _slice):
+                return self
+
+        transcript = "[00:00] **[發言者 A]**：" + ("虛構的完整會議內容" * 30)
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(0, 5_000)]):
+            issues = tasks._speech_backed_transcript_excess_density_quality_issues(
+                Path("mostly-silent.mp3"),
+                transcript,
+                expected_start_seconds=0,
+                expected_end_seconds=600,
+            )
+
+        self.assertTrue(any(
+            tasks.TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER in issue
+            for issue in issues
+        ))
+        self.assertTrue(tasks._requires_critical_segment_rerun_escalation(issues))
+
+    def test_speech_backed_excess_density_blocks_short_generic_silence_hallucination(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -55.0
+
+            def __len__(self):
+                return 38_000
+
+            def __getitem__(self, _slice):
+                return self
+
+        transcript = "[00:00] **[發言者 A]**：好，那這部分我們就先這樣定案。"
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[]):
+            issues = tasks._speech_backed_transcript_excess_density_quality_issues(
+                Path("silent-generic.mp3"),
+                transcript,
+                expected_start_seconds=0,
+                expected_end_seconds=38,
+            )
+
+        self.assertTrue(any(
+            tasks.TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER in issue
+            for issue in issues
+        ))
+
+    def test_local_silence_gate_skips_only_material_low_information_audio(self):
+        from backend import transcript_audio_quality
+
+        class FakeAudio:
+            dBFS = -55.0
+
+            def __len__(self):
+                return 33_000
+
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(32_000, 32_500)]):
+            self.assertTrue(
+                transcript_audio_quality.audio_has_insufficient_transcription_evidence(
+                    Path("almost-silent.mp3")
+                )
+            )
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(5_000, 15_000)]):
+            self.assertFalse(
+                transcript_audio_quality.audio_has_insufficient_transcription_evidence(
+                    Path("spoken.mp3")
+                )
+            )
+
+    def test_local_silence_gate_ignores_amplified_background_noise(self):
+        from backend import transcript_audio_quality
+
+        class FakeAudio:
+            dBFS = -56.0
+
+            def __len__(self):
+                return 38_000
+
+        def fake_detect_nonsilent(_audio, *, silence_thresh, **_kwargs):
+            self.assertGreaterEqual(silence_thresh, -50.0)
+            return [(1_000, 2_200)]
+
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch(
+                 "pydub.silence.detect_nonsilent",
+                 side_effect=fake_detect_nonsilent,
+             ):
+            self.assertTrue(
+                transcript_audio_quality.audio_has_insufficient_transcription_evidence(
+                    Path("normalized-room-noise.flac")
+                )
+            )
+
+    def test_local_silence_gate_stops_short_recovery_noise(self):
+        from backend import transcript_audio_quality
+
+        class FakeAudio:
+            dBFS = -51.5
+
+            def __len__(self):
+                return 14_800
+
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch("pydub.silence.detect_nonsilent", return_value=[(4_000, 4_600)]):
+            self.assertTrue(
+                transcript_audio_quality.audio_has_insufficient_transcription_evidence(
+                    Path("short-recovery-noise.mp3")
+                )
+            )
+
+    def test_uncertainty_markers_do_not_count_as_spoken_characters(self):
+        from backend import tasks
+
+        transcript = "\n\n".join(
+            f"[{minute:02d}:00] **[發言者不明]**：[聽不清]"
+            for minute in range(10)
+        )
+
+        self.assertEqual(tasks._transcript_spoken_character_count(transcript), 0)
+
+    def test_local_density_ignores_normalized_noise_below_voice_floor(self):
+        from backend import tasks
+
+        class FakeAudio:
+            dBFS = -56.0
+
+            def __len__(self):
+                return 600_000
+
+            def __getitem__(self, _slice):
+                return self
+
+        observed_thresholds = []
+
+        def fake_detect_nonsilent(_audio, *, silence_thresh, **_kwargs):
+            observed_thresholds.append(silence_thresh)
+            return []
+
+        transcript = "\n\n".join(
+            f"[{minute:02d}:00] **[發言者不明]**：[聽不清]"
+            for minute in range(10)
+        )
+        with mock.patch("pydub.AudioSegment.from_file", return_value=FakeAudio()), \
+             mock.patch(
+                 "pydub.silence.detect_nonsilent",
+                 side_effect=fake_detect_nonsilent,
+             ):
+            ranges = tasks._speech_backed_transcript_local_density_quality_ranges(
+                Path("normalized-room-noise.flac"),
+                transcript,
+                expected_start_seconds=0,
+                expected_end_seconds=600,
+            )
+
+        self.assertEqual(ranges, [])
+        self.assertTrue(observed_thresholds)
+        self.assertTrue(all(value >= -50.0 for value in observed_thresholds))
 
     def test_speech_backed_transcript_density_accepts_substantive_dense_audio(self):
         from backend import tasks

@@ -135,6 +135,13 @@ TRANSCRIPT_SPEECH_DENSITY_MIN_ACTIVE_SECONDS=90
 TRANSCRIPT_SPEECH_DENSITY_SHORT_SEGMENT_MIN_ACTIVE_SECONDS=15
 TRANSCRIPT_SPEECH_DENSITY_MIN_ACTIVE_RATIO=0.45
 TRANSCRIPT_SPEECH_DENSITY_MIN_CHARS_PER_ACTIVE_SECOND=2.5
+TRANSCRIPT_SPEECH_DENSITY_MIN_RELIABLE_ACTIVE_SECONDS=8
+TRANSCRIPT_SPEECH_DENSITY_MAX_CHARS_PER_ACTIVE_SECOND=8
+TRANSCRIPT_SPEECH_DENSITY_EXCESS_MIN_CHARACTERS=8
+TRANSCRIPT_SPEECH_ACTIVITY_DBFS_FLOOR=-50
+TRANSCRIPT_LOCAL_SILENCE_SKIP_MIN_SECONDS=5
+TRANSCRIPT_LOCAL_SILENCE_SKIP_MAX_ACTIVE_SECONDS=2
+TRANSCRIPT_LOCAL_SILENCE_SKIP_MAX_ACTIVE_RATIO=0.05
 TRANSCRIPT_LOCAL_DENSITY_VALIDATION=1
 TRANSCRIPT_LOCAL_DENSITY_WINDOW_SECONDS=90
 TRANSCRIPT_LOCAL_DENSITY_STEP_SECONDS=45
@@ -320,11 +327,18 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `TRANSCRIPT_SPEECH_GAP_SECONDS` | `60` | 兩個時間戳相隔超過此秒數時，才進行本機語音活動確認；保留 15 秒容差，以符合逐字稿每 20-45 秒應標示時間戳的規則。 |
 | `TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_SECONDS` | `12` | 缺口內至少需有多少秒非靜音音訊，才視為可能漏字。 |
 | `TRANSCRIPT_SPEECH_GAP_MIN_ACTIVE_RATIO` | `0.25` | 缺口內非靜音音訊比例門檻；避免把真正的會議靜默誤判成漏字。 |
-| `TRANSCRIPT_SPEECH_DENSITY_VALIDATION` | `1` | 啟用音訊與逐字稿文字量交叉檢查；僅在高語音活動段落的文字量異常偏低時觸發重跑。 |
+| `TRANSCRIPT_SPEECH_DENSITY_VALIDATION` | `1` | 啟用音訊與逐字稿文字量雙向交叉檢查；文字量異常偏低或遠超過有效語音可支持範圍時觸發重跑。 |
 | `TRANSCRIPT_SPEECH_DENSITY_MIN_ACTIVE_SECONDS` | `90` | 至少需有此秒數的有效語音，才進行文字密度判定。 |
 | `TRANSCRIPT_SPEECH_DENSITY_SHORT_SEGMENT_MIN_ACTIVE_SECONDS` | `15` | 補救用短分段依長度下修文字密度的有效語音門檻時，仍保留的最小秒數；系統同時以分段長度上限約束門檻，避免 30 秒小段因不可能達到 45 秒語音而漏檢。 |
 | `TRANSCRIPT_SPEECH_DENSITY_MIN_ACTIVE_RATIO` | `0.45` | 有效語音需佔分段的最小比例，避免背景雜訊造成誤判。 |
 | `TRANSCRIPT_SPEECH_DENSITY_MIN_CHARS_PER_ACTIVE_SECOND` | `2.5` | 低於此每秒有效語音文字量時，視為逐字稿可能被過度省略。 |
+| `TRANSCRIPT_SPEECH_DENSITY_MIN_RELIABLE_ACTIVE_SECONDS` | `8` | 有效語音少於此秒數時不使用「文字量偏低」速率判斷，避免把極短答覆誤判成漏字；過量文字 gate 仍會運作。 |
+| `TRANSCRIPT_SPEECH_DENSITY_MAX_CHARS_PER_ACTIVE_SECOND` | `8` | 高於此每秒有效語音文字量且總字數達過量門檻時，視為靜音／雜訊區段可能產生幻覺。 |
+| `TRANSCRIPT_SPEECH_DENSITY_EXCESS_MIN_CHARACTERS` | `8` | 啟動過量文字 gate 的最小逐字稿字數；短答覆仍低於門檻，靜音區段的完整句子則會被攔截。 |
+| `TRANSCRIPT_SPEECH_ACTIVITY_DBFS_FLOOR` | `-50` | 音量高於此 dBFS 才計為可支持逐字稿的語音活動；避免語音聚焦或正規化後的底噪被誤認成發言。 |
+| `TRANSCRIPT_LOCAL_SILENCE_SKIP_MIN_SECONDS` | `5` | 至少達此長度的分段才啟用本機低資訊音訊略過；仍須同時符合活動秒數與比例門檻，避免合法短答覆被誤判。 |
+| `TRANSCRIPT_LOCAL_SILENCE_SKIP_MAX_ACTIVE_SECONDS` | `2` | 分段高於音量底線的活動不超過此秒數，且同時低於比例門檻時，直接標記 `[聽不清]` 而不呼叫模型。 |
+| `TRANSCRIPT_LOCAL_SILENCE_SKIP_MAX_ACTIVE_RATIO` | `0.05` | 本機低資訊音訊略過的最大活動比例；需與秒數門檻同時成立。 |
 | `TRANSCRIPT_LOCAL_DENSITY_VALIDATION` | `1` | 啟用滑動視窗檢查，找出整段總字數正常、但局部持續有聲卻被漏掉的內容。 |
 | `TRANSCRIPT_LOCAL_DENSITY_WINDOW_SECONDS` | `90` | 局部文字密度的檢查視窗秒數。 |
 | `TRANSCRIPT_LOCAL_DENSITY_STEP_SECONDS` | `45` | 相鄰檢查視窗的起點間距；較小可更精準定位，但會增加本機運算。 |
@@ -358,6 +372,9 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `TRANSCRIPT_SHORT_CYCLE_DUPLICATE_MAX_SPAN_SECONDS` | `30` | 同一近似重複視窗允許的最大時間跨度。 |
 | `MEETING_ASSISTANT_TRUST_LOCAL_NETWORK` | `0` | 是否允許 `MEETING_AUTH_TRUSTED_LOCAL_NETWORKS` 內的直接來源使用 LAN 身分開啟 Web；安全預設關閉。 |
 | `MEETING_ASSISTANT_SHARE_HOST` | 空白 | 一鍵啟動時顯示的固定 DNS／NetBIOS 主機名；空白時使用目前 DHCP IP。 |
+| `MEETING_ASSISTANT_FORCE_SCREEN_AUDIO_DEFAULT` | `1` | Windows 一鍵啟動時在伺服器主機使用獨立 Chrome 錄製設定檔；此設定不會傳到其他同仁的電腦，其他 Windows 電腦須使用頁面內下載的錄製專用啟動器。設為 `0` 改用一般預設瀏覽器。 |
+| `MEETING_ASSISTANT_CHROME_PATH` | 空白 | 錄製專用 Chrome 的選用執行檔路徑；空白時自動尋找標準安裝位置。 |
+| `MEETING_ASSISTANT_CHROME_PROFILE_DIR` | 空白 | 錄製專用 Chrome 設定檔路徑；空白時使用使用者本機應用程式資料夾，避免既有 Chrome 程序忽略啟動旗標。 |
 | `MEETING_AUTH_ENABLED` | `0` | 帳號/角色權限開關。啟用前須先建立 `MEETING_AUTH_LOCAL_SESSION_USER`；啟用後中央政策會保護所有業務路由。 |
 | `MEETING_AUTH_LOCAL_SESSION_USER` | `local-admin@meeting-assistant.local` | loopback 或有效 API session 對應的持久化帳號；必須先存在於 `app_users`。 |
 | `MEETING_AUTH_LAN_SESSION_USER` | `meeting-lan-editor@meeting-assistant.local` | 長效區網網址使用的獨立持久化帳號；建議只給 `editor` 或 `viewer`，不要給 `admin`。 |
@@ -380,7 +397,10 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 直接在 Finder 中雙擊執行 `啟動會議助理.command` 檔案，它會自動啟動後端伺服器並幫您在瀏覽器開啟網頁介面。
 
 **Windows 使用者**：
-直接在資料夾中雙擊執行 `啟動會議助理.bat` 檔案，系統會彈出黑色的命令提示字元視窗啟動伺服器，並同樣在瀏覽器為您開啟網頁。
+直接在資料夾中雙擊執行 `啟動會議助理.bat` 檔案，系統會彈出黑色的命令提示字元視窗啟動伺服器，並開啟獨立的錄製專用 Chrome。此獨立設定檔確保啟動旗標不會被已開啟的一般 Chrome 忽略，分享 Chrome 分頁、視窗或整個螢幕時會預設開啟音訊；使用者仍可在 Chrome 分享視窗中自行關閉。
+
+**其他 Windows 同仁錄製**：
+先用收到的區網網址開啟系統，在「即時錄製會議 → 螢幕錄影/分頁音訊」下載「錄製專用 Chrome 啟動器」，並於下載後 5 分鐘內執行一次。啟動器只把目前伺服器網址與短效 bootstrap token 寫入檔案，不包含永久 API key；首次執行會在隔離設定檔建立 session，之後可沿用同一啟動器。若首次執行已超過 5 分鐘、伺服器網址已變更或專用 Chrome 網站資料被清除，請重新下載。一般 Chrome 的設定不會被改動。
 
 **其他系統或無介面伺服器**：
 在終端機輸入以下指令即可啟動：
@@ -406,7 +426,7 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 
 請讓手機與執行後端的 Mac / PC 連到同一個 Wi-Fi，再開啟終端機列出的短效 bootstrap 網址；驗證成功後會換成不含金鑰的 session cookie。區網預設不匿名放行。
 
-若已明確設定固定分享主機、精確區網 CIDR 與 LAN 使用者，終端機會改列出不含 token 的長效網址，例如 `http://NB-RD-BALBO:8001/history`。它只接受該 CIDR 的直接連線，LAN 使用者不會取得本機管理員權限。HTTP 區網網址可瀏覽、上傳與管理任務；瀏覽器的麥克風、鏡頭及螢幕錄製通常要求 HTTPS 安全來源，若同仁需要直接在自己的瀏覽器錄音／錄影，應改部署內部 HTTPS。
+若已明確設定固定分享主機、精確區網 CIDR 與 LAN 使用者，終端機會改列出不含 token 的長效網址，例如 `http://NB-RD-BALBO:8001/history`。它只接受該 CIDR 的直接連線，LAN 使用者不會取得本機管理員權限。一般瀏覽器仍通常要求 HTTPS 才能使用麥克風、鏡頭與螢幕錄製；Windows 錄製專用啟動器會只把目前 HTTP 來源視為安全來源且仍保留 Chrome 權限提示，適合內部過渡使用，長期部署仍建議採內部 HTTPS。
 
 Windows 首次啟用時，請以「系統管理員」PowerShell 執行下列腳本；即使公司政策將 Wi-Fi 分類為公用網路，規則仍只放行指定 CIDR，不會允許其他公用網路來源：
 
