@@ -5448,7 +5448,21 @@ function updateSourceMediaPlayerStatus(player, statusEl) {
     return;
   }
   if (Number(player.readyState || 0) < 1) {
-    setSourceMediaPlayerStatus(statusEl, `正在載入${label}預覽...`, 'loading', true);
+    setSourceMediaPlayerStatus(
+      statusEl,
+      `正在準備可拖曳的${label}預覽；首次開啟可能需要幾秒...`,
+      'loading',
+      true
+    );
+    return;
+  }
+  const duration = Number(player.duration);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    setSourceMediaPlayerStatus(
+      statusEl,
+      `這份${label}尚無法拖曳。請重新整理後再試；若仍無法拖曳，請聯絡管理員檢查 FFmpeg。您仍可連續播放或下載原始檔。`,
+      'error'
+    );
     return;
   }
   if (isVideo && player.readyState >= 2) {
@@ -5476,7 +5490,7 @@ function updateSourceMediaPlayerStatus(player, statusEl) {
     );
     return;
   }
-  setSourceMediaPlayerStatus(statusEl);
+  setSourceMediaPlayerStatus(statusEl, `已可拖曳${label}到想檢查的時間點。`, 'success');
 }
 
 function bindSourceMediaPlayerStatus(player, statusEl) {

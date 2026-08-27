@@ -166,6 +166,7 @@ from backend.previous_minutes import (
 )
 from backend.quality_segments import review_segment_details_from_text, review_segment_label
 from backend.source_audio import finalize_source_audio_upload, sha256_file
+from backend.seekable_media import SeekableMediaError, ensure_seekable_playback_media
 from backend.tasks import (
     GEMINI_MODEL,
     SEGMENT_CACHE_VERSION,
@@ -198,6 +199,7 @@ ROOT_DIR   = Path(__file__).parent.parent
 TEMP_DIR   = Path(os.getenv("MEETING_TEMP_DIR") or ROOT_DIR / "temp")
 OUTPUT_DIR = Path(os.getenv("MEETING_OUTPUT_DIR") or ROOT_DIR / "output")
 SOURCE_AUDIO_DIR = Path(os.getenv("MEETING_SOURCE_AUDIO_DIR") or OUTPUT_DIR / "source_audio")
+PLAYBACK_MEDIA_DIR = Path(os.getenv("MEETING_PLAYBACK_MEDIA_DIR") or OUTPUT_DIR / "playback_media")
 PREVIOUS_MINUTES_DIR = Path(
     os.getenv("MEETING_PREVIOUS_MINUTES_DIR") or OUTPUT_DIR / "previous_minutes"
 )
@@ -292,6 +294,7 @@ RECORDING_PROFILES = {
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 SOURCE_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+PLAYBACK_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 PREVIOUS_MINUTES_DIR.mkdir(parents=True, exist_ok=True)
 
 # 日誌設定
@@ -1656,12 +1659,11 @@ async def get_source_media_archive_file(
         if archived_kind
         else _source_media_content_type({"source_audio": original_name, "quality_report": {}}, archive_path)
     )
-    return FileResponse(
-        path=archive_path,
+    return await _source_media_file_response(
+        archive_path,
         filename=original_name,
         media_type=media_type,
-        headers={"Accept-Ranges": "bytes"},
-        content_disposition_type="attachment" if download else "inline",
+        download=download,
     )
 
 
@@ -1695,12 +1697,11 @@ async def get_source_media_inventory_file(
         "quality_report": linked_ref.get("quality_report") if linked_ref else {},
     }
     media_type = _source_media_content_type(record, source_path)
-    return FileResponse(
-        path=source_path,
+    return await _source_media_file_response(
+        source_path,
         filename=source_path.name,
         media_type=media_type,
-        headers={"Accept-Ranges": "bytes"},
-        content_disposition_type="attachment" if download else "inline",
+        download=download,
     )
 
 
@@ -2358,6 +2359,46 @@ def _source_media_content_type_for_kind(source_path: Path, media_kind: Optional[
     if suffix == ".webm":
         return "video/webm" if normalized_kind == "video" else "audio/webm"
     return SUPPORTED_MEDIA_FORMATS.get(suffix, "application/octet-stream")
+
+
+async def _source_media_file_response(
+    source_path: Path,
+    *,
+    filename: str,
+    media_type: str,
+    download: bool,
+) -> FileResponse:
+    """Serve immutable evidence for downloads and a seekable copy for playback."""
+    response_path = source_path
+    playback_variant = "original"
+    if not download and source_path.suffix.lower() == ".webm":
+        try:
+            response_path = await asyncio.to_thread(
+                ensure_seekable_playback_media,
+                source_path,
+                PLAYBACK_MEDIA_DIR,
+                original_name=filename,
+            )
+            if response_path != source_path:
+                playback_variant = "seekable-derivative"
+        except SeekableMediaError as exc:
+            playback_variant = "original-fallback"
+            logger.warning(
+                "Unable to prepare seekable playback derivative for %s: %s",
+                source_path,
+                exc,
+            )
+
+    return FileResponse(
+        path=response_path,
+        filename=filename,
+        media_type=media_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "X-Playback-Media": playback_variant,
+        },
+        content_disposition_type="attachment" if download else "inline",
+    )
 
 
 def _meeting_records_with_source_media_type(records: list[dict]) -> list[dict]:
@@ -3787,12 +3828,11 @@ async def get_meeting_source_media(
 
     audio_path = _resolve_meeting_source_audio(record)
     media_type = _source_media_content_type(record, audio_path)
-    return FileResponse(
-        path=audio_path,
+    return await _source_media_file_response(
+        audio_path,
         filename=audio_path.name,
         media_type=media_type,
-        headers={"Accept-Ranges": "bytes"},
-        content_disposition_type="attachment" if download else "inline",
+        download=download,
     )
 
 

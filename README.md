@@ -91,6 +91,8 @@ DB_PATH=./meetings.db
 MEETING_TEMP_DIR=./temp
 MEETING_OUTPUT_DIR=./output
 MEETING_SOURCE_AUDIO_DIR=./output/source_audio
+MEETING_PLAYBACK_MEDIA_DIR=./output/playback_media
+MEETING_PLAYBACK_REMUX_TIMEOUT_SECONDS=300
 MEETING_PREVIOUS_MINUTES_DIR=./output/previous_minutes
 MEETING_ATTACHMENT_DIR=./output/attachments
 MEETING_BACKUP_DIR=./backups
@@ -265,6 +267,8 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `MEETING_TEMP_DIR` | `./temp` | 分段與處理中的暫存檔資料夾；過期暫存會自動清理。 |
 | `MEETING_OUTPUT_DIR` | `./output` | 生成 Markdown 會議記錄的輸出資料夾。 |
 | `MEETING_SOURCE_AUDIO_DIR` | `./output/source_audio` | 已上傳原始錄音/錄影的保留資料夾，處理完成後不會自動刪除。 |
+| `MEETING_PLAYBACK_MEDIA_DIR` | `./output/playback_media` | 瀏覽器第一次開啟 WebM 時，用 FFmpeg stream-copy 建立的可拖曳播放快取；不重新編碼，也不改寫或取代原始 SHA-256 檔案。 |
+| `MEETING_PLAYBACK_REMUX_TIMEOUT_SECONDS` | `300` | 首次播放建立 WebM 有限時長與 seek 索引的最長處理秒數（10-1800）；成功後沿用內容定址快取。 |
 | `MEETING_PREVIOUS_MINUTES_DIR` | `./output/previous_minutes` | 選填前次會議紀錄 `.docx` 的保留資料夾；佇列重試與摘要重整會沿用相同來源。 |
 | `PREVIOUS_MINUTES_MAX_MB` | `20` | 前次會議紀錄 Word 的壓縮檔大小上限。 |
 | `PREVIOUS_MINUTES_MAX_TEXT_CHARS` | `50000` | 從前次 Word 擷取並提供摘要模型的文字上限；超出內容會標示為已截斷。 |

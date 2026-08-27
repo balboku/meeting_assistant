@@ -13153,6 +13153,43 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertEqual(media_download_head_response.status_code, 200)
         self.assertIn("attachment", media_download_head_response.headers.get("content-disposition", ""))
 
+    def test_webm_inline_playback_uses_seekable_derivative_but_download_preserves_original(self):
+        import backend.main as main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_path = root / "source.webm"
+            derivative_path = root / "source.seekable.webm"
+            source_path.write_bytes(b"original-evidence")
+            derivative_path.write_bytes(b"seekable-playback")
+            original_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+            record = {
+                "id": 56,
+                "title": "可拖曳播放",
+                "source_audio": str(source_path),
+                "quality_report": {"recording": {"profile": "video_balanced"}},
+            }
+            with mock.patch.object(main, "get_meeting", return_value=record), \
+                 mock.patch.object(
+                     main,
+                     "ensure_seekable_playback_media",
+                     return_value=derivative_path,
+                 ) as ensure_mock:
+                inline_response = asgi_request(main.app, "GET", "/meetings/56/source-media")
+                download_response = asgi_request(main.app, "GET", "/meetings/56/source-media?download=1")
+                final_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+
+        self.assertEqual(inline_response.status_code, 200)
+        self.assertEqual(inline_response.content, b"seekable-playback")
+        self.assertEqual(inline_response.headers.get("x-playback-media"), "seekable-derivative")
+        self.assertEqual(inline_response.headers.get("accept-ranges"), "bytes")
+        self.assertEqual(download_response.status_code, 200)
+        self.assertEqual(download_response.content, b"original-evidence")
+        self.assertEqual(download_response.headers.get("x-playback-media"), "original")
+        self.assertIn("attachment", download_response.headers.get("content-disposition", ""))
+        self.assertEqual(final_digest, original_digest)
+        ensure_mock.assert_called_once()
+
     def test_meeting_quality_recheck_updates_report_without_queueing_a_job(self):
         import backend.main as main
 
@@ -18292,7 +18329,9 @@ class FreeOptimizationRegressionTests(unittest.TestCase):
         self.assertIn("statusEl.setAttribute('aria-busy', String(Boolean(busy)));", html)
         self.assertIn("statusEl.classList.toggle('success', level === 'success' && Boolean(message));", html)
         self.assertIn("Number(player.readyState || 0) < 1", html)
-        self.assertIn("正在載入${label}預覽...", html)
+        self.assertIn("正在準備可拖曳的${label}預覽；首次開啟可能需要幾秒...", html)
+        self.assertIn("這份${label}尚無法拖曳。請重新整理後再試", html)
+        self.assertIn("已可拖曳${label}到想檢查的時間點。", html)
         self.assertIn("'loading', true", html)
         self.assertIn("video.dataset.previewPrimed", html)
         self.assertIn("loadedmetadata", html)
@@ -18556,6 +18595,7 @@ function statusElement(hasAudioFallback = true) {{
 const player = {{
   tagName: 'VIDEO',
   readyState: 2,
+  duration: 60,
   videoWidth: 1280,
   videoHeight: 720,
   error: null,
@@ -18570,6 +18610,10 @@ status = statusElement(false);
 brightInfo = sourceVideoBlankFrameInfo(player);
 updateSourceMediaPlayerStatus(player, status);
 brightMessage = status.textContent;
+player.duration = Infinity;
+status = statusElement(false);
+updateSourceMediaPlayerStatus(player, status);
+unseekableMessage = status.textContent;
 `, sandbox);
 if (!sandbox.blankInfo?.blank) {{
   console.error(sandbox.blankInfo);
@@ -18587,9 +18631,13 @@ if (sandbox.brightInfo?.blank) {{
   console.error(sandbox.brightInfo);
   process.exit(7);
 }}
-if (sandbox.brightMessage) {{
+if (!sandbox.brightMessage.includes('已可拖曳影片')) {{
   console.error(sandbox.brightMessage);
   process.exit(8);
+}}
+if (!sandbox.unseekableMessage.includes('尚無法拖曳') || !sandbox.unseekableMessage.includes('聯絡管理員')) {{
+  console.error(sandbox.unseekableMessage);
+  process.exit(9);
 }}
 console.log('source_video_black_preview_warning_ok');
 """
