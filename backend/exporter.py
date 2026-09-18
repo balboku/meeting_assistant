@@ -1,4 +1,5 @@
 from pathlib import Path
+import html
 import logging
 import os
 import re
@@ -199,6 +200,7 @@ def _set_cell_markdown(cell, markdown: str) -> None:
     lines = _strip_frontmatter(markdown).splitlines()
     first_paragraph_used = False
     in_transcript = False
+    in_translation = False
     index = 0
 
     while index < len(lines):
@@ -225,6 +227,7 @@ def _set_cell_markdown(cell, markdown: str) -> None:
         if heading_match:
             heading = heading_match.group(2).strip()
             in_transcript = "完整逐字稿" in heading or "Verbatim Transcript" in heading
+            in_translation = "英文中譯對照（AI 翻譯，僅供參考）" in heading
             paragraph = _next_paragraph(cell, first_paragraph_used)
             first_paragraph_used = True
             _append_markdown_runs(
@@ -245,6 +248,14 @@ def _set_cell_markdown(cell, markdown: str) -> None:
             paragraph = _next_paragraph(cell, first_paragraph_used)
             first_paragraph_used = True
             _format_paragraph(paragraph, role)
+            pair = re.match(r"^\*\*(英文原文／混語原文|中文翻譯（AI）)\*\*：(.*)$", text) if in_translation else None
+            if pair:
+                _append_markdown_runs(paragraph, pair.group(1) + "：", size=10, bold=True)
+                literal = html.unescape(re.sub(r"\\([\\`*_{}\[\]()#!|])", r"\1", pair.group(2)))
+                run = paragraph.add_run(literal)
+                _set_run_font(run, size=10)
+                index += 1
+                continue
             _append_markdown_runs(
                 paragraph,
                 text,

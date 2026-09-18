@@ -45,6 +45,12 @@ from backend.database import (
     save_meeting
 )
 from backend.exporter import content_with_quality_review_note
+from backend.transcript_translation import append_chinese_translation
+from backend.transcript_sections import (
+    TRANSCRIPT_SECTION_HEADING, TRANSCRIPT_SECTION_PATTERN, NEXT_TOP_LEVEL_SECTION_PATTERN,
+    _replace_transcript_section, _canonical_transcript_text,
+    _extract_post_transcript_sections, _extract_transcript_section_body,
+)
 from backend.previous_minutes import build_summary_verification_prompt, normalize_previous_minutes_payload, previous_minutes_contract_addendum, previous_minutes_markdown, previous_minutes_metadata, previous_minutes_prompt_section, read_previous_minutes_context
 from backend.recovery_policy import SEGMENT_RECOVERY_SPLIT_SECONDS, TRANSCRIPT_RECOVERY_MAX_DEPTH, next_recovery_chunk_seconds as _next_recovery_chunk_seconds, next_smaller_recovery_chunk_seconds as _next_smaller_recovery_chunk_seconds, recovery_subsegment_path, strictly_shrinking_export_bounds
 from backend.transcript_audio_quality import (
@@ -117,6 +123,7 @@ TRANSCRIPTION_MODEL     = _env_model("TRANSCRIPTION_MODEL", _env_model("GEMINI_M
 GEMINI_MODEL            = TRANSCRIPTION_MODEL
 SUMMARY_MODEL           = _env_model("SUMMARY_MODEL", "gemma-4-31b-it")
 SUMMARY_FALLBACK_MODEL  = _env_model("SUMMARY_FALLBACK_MODEL", GEMINI_MODEL)
+TRANSCRIPT_CHINESE_TRANSLATION_ENABLED = os.getenv("TRANSCRIPT_CHINESE_TRANSLATION_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 SUMMARY_VERIFIER_MODEL  = _env_model("SUMMARY_VERIFIER_MODEL", "gemini-3.5-flash")
 # Used only after the primary transcription model has produced a segment that
 # still fails deterministic transcript and local-audio quality checks.
@@ -339,12 +346,6 @@ SEGMENT_TIMESTAMP_BOUNDARY_TOLERANCE_SECONDS = max(
 TRANSCRIPT_CROSS_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS = max(SEGMENT_OVERLAP_SECONDS + 3, int(os.getenv("TRANSCRIPT_CROSS_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS", "10")))
 TRANSCRIPT_INTRA_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS = min(120, max(0, int(os.getenv("TRANSCRIPT_INTRA_SEGMENT_TIMESTAMP_REGRESSION_TOLERANCE_SECONDS", "15"))))
 TRANSCRIPT_TIMESTAMP_ORDER_ISSUE_MARKER = "分段時間序倒退"
-TRANSCRIPT_SECTION_HEADING = "## 📝 四、完整逐字稿 (Verbatim Transcript)"
-TRANSCRIPT_SECTION_PATTERN = re.compile(
-    r"^##\s*[^\n]*(?:Verbatim Transcript|完整逐字稿|逐字稿|蝔)[^\n]*\n",
-    re.MULTILINE | re.IGNORECASE,
-)
-NEXT_TOP_LEVEL_SECTION_PATTERN = re.compile(r"^##\s+", re.MULTILINE)
 SEGMENT_INCOMPLETE_MARKERS = (
     "系統提示：此處音檔包含無意義雜訊",
     "已自動過濾後續重複內容",
@@ -861,49 +862,6 @@ def _prepend_transcript_quality_notice(meeting_content: str, transcript: str) ->
         + f"\n{notice_block}\n"
         + meeting_content[insert_at:]
     )
-
-
-def _replace_transcript_section(meeting_content: str, full_transcript: str) -> str:
-    """Keep the generated summary, but force the transcript section to remain verbatim."""
-    content = meeting_content or ""
-    transcript = (full_transcript or "").strip()
-    match = TRANSCRIPT_SECTION_PATTERN.search(content)
-    if match:
-        prefix = content[:match.start()].rstrip()
-        suffix = _extract_post_transcript_sections(content)
-    else:
-        prefix = content.rstrip()
-        suffix = ""
-
-    prefix = re.sub(r"\n-{3,}\s*$", "", prefix).rstrip()
-    separator = "\n\n---\n\n" if prefix else ""
-    result = f"{prefix}{separator}{TRANSCRIPT_SECTION_HEADING}\n{transcript}\n"
-    if suffix:
-        result = f"{result.rstrip()}\n\n{suffix.rstrip()}\n"
-    return result
-
-
-def _canonical_transcript_text(text: str) -> str:
-    return "\n".join(line.rstrip() for line in (text or "").strip().splitlines()).strip()
-
-
-def _extract_post_transcript_sections(meeting_content: str) -> str:
-    match = TRANSCRIPT_SECTION_PATTERN.search(meeting_content or "")
-    if not match:
-        return ""
-    next_section = NEXT_TOP_LEVEL_SECTION_PATTERN.search(meeting_content or "", match.end())
-    if not next_section:
-        return ""
-    return (meeting_content or "")[next_section.start():].strip()
-
-
-def _extract_transcript_section_body(meeting_content: str) -> Optional[str]:
-    match = TRANSCRIPT_SECTION_PATTERN.search(meeting_content or "")
-    if not match:
-        return None
-    next_section = NEXT_TOP_LEVEL_SECTION_PATTERN.search(meeting_content or "", match.end())
-    end = next_section.start() if next_section else len(meeting_content or "")
-    return (meeting_content or "")[match.end():end].strip()
 
 
 _TRANSCRIPT_SEGMENT_HEADING_PATTERN = re.compile(
@@ -8192,6 +8150,22 @@ def _meeting_generation_values(result: Any) -> tuple[str, str, Optional[dict[str
     return str(result[0]), str(result[1]), structured
 
 
+def _append_transcript_chinese_translation(
+    client, meeting_content: str, full_transcript: str, job_id: str,
+    primary_model: str, fallback_model: str,
+    worker_id: Optional[str] = None, worker_generation: Optional[int] = None,
+) -> tuple[str, dict[str, Any]]:
+    def check_active():
+        _raise_if_cancelled(job_id)
+        _raise_if_job_lease_lost(job_id, worker_id, worker_generation)
+    return append_chinese_translation(
+        client, meeting_content, full_transcript, job_id, primary_model, fallback_model,
+        enabled=TRANSCRIPT_CHINESE_TRANSLATION_ENABLED, generate_text=_generate_text_with_fallback,
+        check_active=check_active, update_status=update_job_status,
+        fatal_errors=(JobCancelled, JobLeaseLost),
+    )
+
+
 def _build_quality_report(
     audio_report: dict[str, Any],
     segment_report: list[dict[str, Any]],
@@ -10826,6 +10800,10 @@ def process_audio_task(
             # exactly represents the delivered Markdown.
             structured_summary = None
         meeting_content = _finalize_meeting_content(meeting_content, full_transcript, job_id)
+        meeting_content, translation_report = _append_transcript_chinese_translation(
+            client, meeting_content, full_transcript, job_id,
+            summary_primary_model, summary_secondary_model, worker_id, worker_generation,
+        )
         logger.info(f"[{job_id}] ✅ 會議記錄生成成功")
 
         # ------------------------------------------------------------------
@@ -10851,6 +10829,7 @@ def process_audio_task(
             audio_report["warnings"] = audio_warnings
 
         quality_report = _build_quality_report(audio_report, segment_report, full_transcript)
+        quality_report["transcript_translation"] = translation_report
         _refresh_quality_report_summary_warnings(quality_report, meeting_content)
         quality_report["summary_quality_mode"] = "high" if high_quality_summary else "standard"
         if previous_minutes_context:

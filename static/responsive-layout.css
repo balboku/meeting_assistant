@@ -1,0 +1,102 @@
+/* Viewport-safe dialogs: one scroll owner, with close/actions always reachable. */
+.modal-overlay {
+  padding: 16px;
+  overscroll-behavior: contain;
+}
+
+.modal-overlay > .modal {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  padding: 0;
+  overflow: hidden;
+}
+
+.modal > .modal-header {
+  flex: 0 0 auto;
+  gap: 12px;
+  margin: 0;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-title { min-width: 0; overflow-wrap: anywhere; }
+.modal-close { flex: 0 0 auto; min-width: 44px; min-height: 44px; }
+
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  padding: 20px 24px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+
+.modal > .modal-footer,
+#record-modal .rec-controls {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+}
+
+.modal-body .source-storage-list,
+.modal-body .revision-list,
+.modal-body .revision-item pre {
+  max-height: none;
+  overflow-y: visible;
+}
+
+#summary-editor-modal .modal-body,
+#transcript-editor-modal .modal-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-body .summary-editor {
+  display: block;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: min(52vh, 680px);
+  height: min(52dvh, 680px);
+}
+
+html.modal-open,
+html.modal-open body { overflow: hidden; overscroll-behavior: none; }
+
+@media (max-width: 700px) {
+  header { flex-wrap: wrap; gap: 12px; }
+  .header-left { width: 100%; gap: 10px; }
+  .header-left .badge { display: none; }
+  .logo { font-size: 18px; }
+  .logo span { display: block; margin-top: 3px; }
+  .stats { width: 100%; gap: 10px; }
+  .stats > button {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 44px;
+    justify-content: center;
+    padding: 10px 8px;
+  }
+  .modal-overlay { padding: 8px; }
+  .modal-overlay > .modal {
+    max-width: 100%;
+    max-height: calc(100vh - 16px);
+    max-height: calc(100dvh - 16px);
+  }
+  .modal > .modal-header { padding: 10px 16px; }
+  .modal-title { font-size: 18px; }
+  .modal-body { padding: 16px; }
+  .modal > .modal-footer,
+  #record-modal .rec-controls { gap: 8px; padding: 12px 16px; }
+  .modal-footer > button { min-height: 44px; }
+  .modal-footer .editor-save-status { flex-basis: 100%; }
+  .rec-mode-tabs { gap: 6px; }
+  .rec-tab { min-width: 0; padding: 10px 6px; font-size: 12px; }
+  .rec-visualizer { max-width: 100%; }
+  .form-input { min-width: 0; max-width: 100%; }
+}
