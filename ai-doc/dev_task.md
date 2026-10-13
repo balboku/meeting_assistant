@@ -75,5 +75,8 @@
 - 回復：若新版無法提供服務，在正式工作目錄乾淨且沒有新工作時切換到已記錄基線 `43d4e38` 並重新啟動既有 supervisor；不使用 hard reset、不還原或刪除資料庫。新增 runtime／models 可保留且舊版不使用；若涉及正式資料恢復先停止並請使用者決定。
 - 基線健康已為 degraded：database_backup／offsite_record_snapshot 顯示「完整驗證進行中」，既有快照可恢復、缺檔 0。不得把這個既有狀態誤報為新版故障或宣稱所有健康項已通過。
 - 本輪瀏覽器控制工具逾時。重用前輪隔離實測截圖；正式站畫面複驗尚未通過，不以 API 成功冒充 UI 實測。硬體收音／準確率／unsigned EXE 的限制保留。
+- 最終候選全套（含備份修正）706 tests / 152.107 秒 / OK，`tmp/release-final-ci.log`。產品提交 `22e677a1b273f6b77d49e9e0bccdbdec0bbb5207` 已推送 `origin/feat/meeting-quality-upgrades`；後續文件提交不改變產品來源指紋。
+- 正式主機已安裝鎖定的 sherpa-onnx／core 1.13.8、soundcard 0.4.6，`pip check` 通過；9 個模型／來源授權檔及桌面 ZIP 與測試副本 SHA-256 全部一致。保留原 `.env` 與原主依賴。
+- 部署收據位置：正式副本 `backups/release_20261013_quality/backup-verification.json`（完整快照驗證）、`preservation-check.json`（前後資料保全）、`smoke.json`（實際載入提交、worker、API／下載與剩餘健康警示）。這些含環境路徑的操作證據留在受管主機、不送入 Git；僅在收據全部通過後回報部署完成。正式站 UI 複驗與上述人工驗收為保留待辦，不以收據的 API 通過取代。
 
 使用思考習慣：#拆解問題、#限制條件、#可驗證性
