@@ -20,6 +20,11 @@ if str(ROOT) not in sys.path:
 # fixtures independent from a developer machine's live .env configuration.
 os.environ["MEETING_AUTH_ENABLED"] = "0"
 os.environ["MEETING_OFFSITE_BACKUP_DIR"] = ""
+# Legacy fixtures are generic generateContent doubles. Native Transcribe and
+# quota routing have explicit adapter/integration tests with injected clients.
+# Never allow a developer's real credential to escape through a test double.
+os.environ["GEMINI_API_KEY"] = "unit-test-not-a-credential"
+os.environ["TRANSCRIPTION_MODEL"] = "gemini-3.1-flash-lite"
 
 TEST_ATTACHMENT_SHA256 = (
     "ea80334363eed145dfeee51ebae7dc3f1cd7d0c7879f8bfd2070c061d3c33f56"

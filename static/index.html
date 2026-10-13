@@ -7,6 +7,7 @@
   <link rel="icon" type="image/png" href="/static/favicon.png" />
   <link rel="shortcut icon" href="/static/favicon.ico" />
   <link rel="stylesheet" href="/static/recording-recovery.css" />
+  <link rel="stylesheet" href="/static/minutes-reader.css" />
   <script src="/static/vendor/marked.min.js"></script>
   <script src="/static/vendor/purify.min.js"></script>
   <script defer src="/static/confirmation-queue.js"></script>
@@ -1811,7 +1812,7 @@
         <div class="job-dashboard-summary" id="job-dashboard-summary" aria-live="polite">載入中...</div>
       </div>
       <div class="job-dashboard-controls">
-        <button class="btn-secondary job-refresh" onclick="loadJobs()">更新</button>
+        <button class="btn-secondary job-refresh" onclick="loadJobs(); loadMetrics()">更新</button>
         <button class="btn-secondary job-refresh"
                 id="job-dashboard-toggle"
                 aria-expanded="false"
@@ -2133,6 +2134,8 @@
 </div>
 
 <script src="/static/modal-accessibility.js"></script>
+<script src="/static/dashboard-requests.js"></script>
+<script src="/static/minutes-reader.js"></script>
 <script>
 const API = '';  // 同源請求，不需要前綴
 let debounceTimer = null;
@@ -5930,8 +5933,12 @@ async function openDetail(id) {
     currentMeetingData = r;
 
     // 渲染 Markdown
-    const md = r.full_content || '（無內容）';
-    const html = DOMPurify.sanitize(marked.parse(normalizeMeetingMarkdown(md)));
+    const readerOptions = {
+      markdown: md => DOMPurify.sanitize(marked.parse(normalizeMeetingMarkdown(md))),
+      enhance: enhanceTranscriptTimecodes,
+      seek: seconds => { cueSourceMedia(seconds); focusSourceMediaEvidence(); },
+    };
+    const html = MinutesReader.render(r, readerOptions);
 
     detailContent.innerHTML = `
       <div class="detail-header">
@@ -5955,7 +5962,8 @@ async function openDetail(id) {
                    accept=".png,.jpg,.jpeg,.webp,.pdf,.txt,.md,.csv,.docx"
                    onchange="uploadEvidence(${id}, this.files[0]); this.value='';">
             <span id="evidence-upload-status" class="evidence-upload-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="false"></span>
-            <a href="${API}/meetings/${id}/export/docx" class="btn-primary" style="text-decoration: none; flex-shrink: 0;" download>📥 下載 4-QA-005 V01</a>
+            <a href="${API}/meetings/${id}/export/docx?layout=topics" class="btn-primary" style="text-decoration: none; flex-shrink: 0;" download>📥 議題式 Word</a>
+            <a href="${API}/meetings/${id}/export/docx?layout=original" class="btn-secondary" download>原格式 Word</a>
           </div>
         </div>
         <div class="detail-meta-row" style="margin-top: 12px;">
@@ -5966,15 +5974,15 @@ async function openDetail(id) {
         </div>
       </div>
       ${renderMeetingReviewPanel(r)}
-      ${renderStructuredReviewPanel(r)}
+      ${(r.structured_items || []).length ? `<details class="minutes-item-review"><summary>D/R/A 逐項審查（${r.structured_items.length} 項）</summary>${renderStructuredReviewPanel(r)}</details>` : ''}
       ${renderQualityReport(r)}
       ${renderAudioEvidence(r)}
       <div class="document-view">
-        <div class="md-content">${html}</div>
+        ${html}
       </div>
     `;
     setDetailStatus(`已載入會議記錄：${r.title}`);
-    enhanceTranscriptTimecodes(detailContent.querySelector('.md-content'));
+    MinutesReader.mount(detailContent, r, readerOptions);
     enhanceSourceMediaPlayer();
     syncReadingModeButton();
   } catch (err) {
@@ -6159,13 +6167,13 @@ async function loadJobs() {
   const jobList = document.getElementById('job-list');
   const summary = document.getElementById('job-dashboard-summary');
   if (!jobList) return;
+  const request = DashboardRequests.begin('jobs', 15000);
+  if (!request) return;
   setElementBusy(jobList, true);
   if (summary) summary.textContent = '載入任務中...';
 
   try {
-    const res = await fetch(`${API}/jobs?limit=20`);
-    if (!res.ok) throw new Error(await res.text());
-    const data = await res.json();
+    const data = await request.json(`${API}/jobs?limit=20`);
     const jobs = data.jobs || [];
     updateJobDashboardSummary(jobs);
 
@@ -6176,9 +6184,10 @@ async function loadJobs() {
 
     jobList.innerHTML = jobs.slice(0, 6).map(renderJobPill).join('');
   } catch (err) {
-    jobList.innerHTML = `<div class="job-empty">任務載入失敗：${escapeHtml(err.message)}</div>`;
-    if (summary) summary.textContent = '無法載入任務';
+    jobList.innerHTML = `<div class="job-empty">請按「更新」重試任務讀取。${request.timedOut ? '連線逾時。' : escapeHtml(err.message)}</div>`;
+    if (summary) summary.textContent = '讀取失敗，請按更新';
   } finally {
+    request.finish();
     setElementBusy(jobList, false);
   }
 }
@@ -6222,16 +6231,14 @@ async function loadMetrics() {
   const sourceStorageTile = document.getElementById('ops-source-storage-tile');
   const averageEl = document.getElementById('ops-average-seconds');
   if (!healthEl || !totalEl || !failedEl || !needsReviewEl || !qualitySummaryEl || !qualityRecordingEl || !qualityTranscriptEl || !qualityRerunnableEl || !sourceStorageEl || !sourceStorageTile || !averageEl) return;
+  const request = DashboardRequests.begin('metrics', 60000);
+  if (!request) return;
 
   try {
-    const [metricsRes, healthRes] = await Promise.all([
-      fetch(`${API}/metrics`),
-      fetch(`${API}/health`)
+    const [data, health] = await Promise.all([
+      request.json(`${API}/metrics`),
+      request.json(`${API}/health`)
     ]);
-    if (!metricsRes.ok) throw new Error(await metricsRes.text());
-    if (!healthRes.ok) throw new Error(await healthRes.text());
-    const data = await metricsRes.json();
-    const health = await healthRes.json();
     const failed = data.jobs?.by_status?.failed || 0;
     const healthOk = health.status === 'ok';
     healthEl.textContent = healthOk ? '正常' : '需注意';
@@ -6273,13 +6280,15 @@ async function loadMetrics() {
       ? '–'
       : `${data.jobs.average_completed_seconds}s`;
   } catch (err) {
-    healthEl.textContent = '載入失敗';
+    healthEl.textContent = request.timedOut ? '逾時，請更新' : '失敗，請更新';
     healthEl.classList.add('warn');
     needsReviewEl.textContent = '–';
     needsReviewEl.classList.remove('attention');
     sourceStorageEl.textContent = '–';
     sourceStorageEl.classList.remove('attention');
     sourceStorageTile.title = '無法讀取 /metrics';
+  } finally {
+    request.finish();
   }
 }
 

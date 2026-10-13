@@ -21,6 +21,7 @@ meetings.db*
 *.sqlite
 *.sqlite3
 temp/
+/tmp/
 output/
 backups/
 logs/

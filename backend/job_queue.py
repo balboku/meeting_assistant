@@ -14,6 +14,7 @@ import os
 import socket
 import threading
 import uuid
+from backend.model_availability import ModelsQuotaWaiting
 from pathlib import Path
 from typing import Any, Optional
 
@@ -432,9 +433,17 @@ class JobQueueWorker:
 
             raise RuntimeError(f"未知任務類型：{task_type}")
         except Exception as exc:
+            if job.get("worker_id") and not job_lease_is_current(
+                job_id, str(job["worker_id"]), int(job.get("worker_generation") or 0),
+            ):
+                logger.warning("[%s] 舊 worker 已失去 lease，保留後繼 worker 的狀態", job_id)
+                return
             resulting_status = retry_or_fail_job(job_id, str(exc))
             self._log_source_audio_retention(job, resulting_status)
-            logger.exception("[%s] ❌ 任務執行失敗，狀態：%s", job_id, resulting_status)
+            if isinstance(exc, ModelsQuotaWaiting):
+                logger.info("[%s] ⏳ 模型額度暫時不足，保留進度等待續跑：%s", job_id, resulting_status)
+            else:
+                logger.exception("[%s] ❌ 任務執行失敗，狀態：%s", job_id, resulting_status)
 
     def _process_audio_job(self, job: dict[str, Any]) -> None:
         job_id = job["job_id"]

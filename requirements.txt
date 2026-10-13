@@ -3,6 +3,9 @@
 
 # Google Gemini SDK（核心 AI 功能）
 google-genai>=0.2.0
+httpx>=0.28.1
+# Dedicated speech output is normalized locally to Traditional Chinese.
+opencc-python-reimplemented==0.1.7
 
 # 環境變數管理
 python-dotenv>=1.0.0
@@ -31,3 +34,7 @@ pydub>=0.25.1
 
 # Security floor (transitive through Google auth)
 pyasn1>=0.6.4
+cryptography>=50.0.0
+# Security floors for HTTP transport and async worker dependencies.
+anyio>=4.14.2
+urllib3>=2.8.0

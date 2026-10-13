@@ -4,6 +4,34 @@ import re
 from typing import Optional
 
 
+def transcript_turns(transcript: str) -> list[tuple[int, str, str]]:
+    """Parse the existing explicit line-level turns without guessing speakers."""
+    pattern = re.compile(
+        r"^\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\d)\]\s*"
+        r"(?:\*{1,2})?\[(?P<speaker>[^\]]+)\](?:\*{1,2})?\s*[：:]\s*(?P<text>.*)$",
+        flags=re.MULTILINE,
+    )
+    return [(int(m["minutes"]) * 60 + int(m["seconds"]), m["speaker"].strip(), m["text"].strip())
+            for m in pattern.finditer(transcript or "")]
+
+
+def transcript_speaker_labels(transcript: str) -> list[str]:
+    """Read labels, not voice identities: Markdown emphasis is optional.
+
+    A timestamp may appear inside a paragraph in legacy output. Only labels at
+    a turn prefix or line start count; names quoted in speech are not speakers.
+    Missing labels remain missing rather than inheriting the preceding voice.
+    """
+    prefix = re.compile(
+        r"(?:\[\d{1,3}:[0-5]\d(?::[0-5]\d)?\][ \t]*|^[ \t]*)"
+        r"\*{0,2}\[([^\]\n]+)\]\*{0,2}[ \t]*[：:]",
+        re.MULTILINE,
+    )
+    non_speakers = {"聽不清", "台語音訊不清晰", "發言者不明", "多人重疊"}
+    labels = {re.sub(r"\s+", " ", m[1]).strip() for m in prefix.finditer(transcript or "")}
+    return sorted(label for label in labels if label and label not in non_speakers)
+
+
 def _normalize_detail_turn_text(text: str) -> str:
     normalized = re.sub(r"\s+", "", text.strip().lower())
     return re.sub(r"[，。,.、；;：:！!？?\-—~「」『』（）()\[\]【】\"'`*_]+", "", normalized)

@@ -45,7 +45,15 @@ from backend.database import (
     save_meeting
 )
 from backend.exporter import content_with_quality_review_note
+from backend.audio_preparation import needs_initial_speech_focus
+from backend.generation_config import for_model as _generation_config_for_model
+from backend.model_availability import ModelsQuotaWaiting, generate_with_pool, is_quota_error, wait_for_quota_error
+from backend.model_routing import candidates as _model_candidates, cache_candidates as _fallback_cache_candidates, quota_store as _model_quota_store, estimate_input_tokens
+from backend.transcribe_adapter import MODEL as TRANSCRIBE_MODEL, generate_transcription
+from backend.job_checkpoints import ACTIVE_CHECKPOINTS, JobCheckpoints, checkpointed, quota_resume, shared_cache_allowed, load_verified_segment, save_verified_segment
+from backend.database import get_job
 from backend.transcript_translation import append_chinese_translation
+from backend.transcript_diagnostics import transcript_turns as _transcript_turns, transcript_speaker_labels
 from backend.transcript_sections import (
     TRANSCRIPT_SECTION_HEADING, TRANSCRIPT_SECTION_PATTERN, NEXT_TOP_LEVEL_SECTION_PATTERN,
     _replace_transcript_section, _canonical_transcript_text,
@@ -53,7 +61,14 @@ from backend.transcript_sections import (
 )
 from backend.previous_minutes import build_summary_verification_prompt, normalize_previous_minutes_payload, previous_minutes_contract_addendum, previous_minutes_markdown, previous_minutes_metadata, previous_minutes_prompt_section, read_previous_minutes_context
 from backend.recovery_policy import SEGMENT_RECOVERY_SPLIT_SECONDS, TRANSCRIPT_RECOVERY_MAX_DEPTH, next_recovery_chunk_seconds as _next_recovery_chunk_seconds, next_smaller_recovery_chunk_seconds as _next_smaller_recovery_chunk_seconds, recovery_subsegment_path, strictly_shrinking_export_bounds
+from backend.recovery_progress import RecoveryNoProgressError, RecoveryProgress
+from backend.transcription_budget import (
+    ACTIVE_TRANSCRIPTION_BUDGET,
+    TranscriptionRequestBudget,
+    TranscriptionRequestBudgetExceeded,
+)
 from backend.transcript_audio_quality import (
+    _spoken_character_count as _transcript_spoken_character_count,
     TRANSCRIPT_SPEECH_DENSITY_EXCESS_MIN_CHARACTERS, TRANSCRIPT_SPEECH_DENSITY_MAX_CHARS_PER_ACTIVE_SECOND,
     TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER,
     audio_has_insufficient_transcription_evidence as _audio_has_insufficient_transcription_evidence,
@@ -119,17 +134,17 @@ def _env_model(name: str, default: str) -> str:
 
 
 # 常數
-TRANSCRIPTION_MODEL     = _env_model("TRANSCRIPTION_MODEL", _env_model("GEMINI_MODEL", "gemini-3.1-flash-lite"))
+TRANSCRIPTION_MODEL     = _env_model("TRANSCRIPTION_MODEL", _env_model("GEMINI_MODEL", "gemini-3.5-transcribe"))
 GEMINI_MODEL            = TRANSCRIPTION_MODEL
 SUMMARY_MODEL           = _env_model("SUMMARY_MODEL", "gemma-4-31b-it")
-SUMMARY_FALLBACK_MODEL  = _env_model("SUMMARY_FALLBACK_MODEL", GEMINI_MODEL)
+SUMMARY_FALLBACK_MODEL  = _env_model("SUMMARY_FALLBACK_MODEL", "gemini-3.1-flash-lite")
 TRANSCRIPT_CHINESE_TRANSLATION_ENABLED = os.getenv("TRANSCRIPT_CHINESE_TRANSLATION_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 SUMMARY_VERIFIER_MODEL  = _env_model("SUMMARY_VERIFIER_MODEL", "gemini-3.5-flash")
 # Used only after the primary transcription model has produced a segment that
 # still fails deterministic transcript and local-audio quality checks.
 TRANSCRIPTION_RECOVERY_MODEL = _env_model(
     "TRANSCRIPTION_RECOVERY_MODEL",
-    SUMMARY_VERIFIER_MODEL,
+    "gemini-3.8-flash",
 )
 # A manual full-segment rerun is an explicit quality request.  Default it to
 # the recovery model so it does not merely repeat the same lightweight pass.
@@ -196,7 +211,9 @@ SEGMENT_CACHE_DIRNAME   = "segment_cache"
 # Bump whenever recovery audio or merge behavior changes. A plan can retain a
 # partial candidate transcript, so resuming one generated from a lossy retry
 # path would defeat a later lossless-recovery improvement.
-SEGMENT_RECOVERY_PLAN_VERSION = 14
+# Older plans can contain English discarded by the letter-based density gate.
+# Keep completed text caches, but restart those obsolete recovery strategies.
+SEGMENT_RECOVERY_PLAN_VERSION = 15
 SEGMENT_RECOVERY_PLAN_DIRNAME = "recovery_plans"
 SEGMENT_TARGET_SECONDS  = SEGMENT_MINUTES * 60
 SEGMENT_SILENCE_WINDOW_SECONDS = int(os.getenv("SEGMENT_SILENCE_WINDOW_SECONDS", "45"))
@@ -296,7 +313,7 @@ RECOVERY_SHORT_SUBSEGMENT_OVERLAP_SECONDS = min(
 AUDIO_PREPROCESSING_ENABLED = os.getenv("AUDIO_PREPROCESSING", "1").strip().lower() not in {
     "0", "false", "no", "off",
 }
-AUDIO_PREPROCESSING_VERSION = 8
+AUDIO_PREPROCESSING_VERSION = 9
 AUDIO_MIN_DBFS = float(os.getenv("AUDIO_MIN_DBFS", "-55"))
 AUDIO_NORMALIZE_BELOW_DBFS = float(os.getenv("AUDIO_NORMALIZE_BELOW_DBFS", "-28"))
 AUDIO_INITIAL_SPEECH_FOCUS_ENABLED = os.getenv(
@@ -1243,35 +1260,16 @@ def _generate_text_with_fallback(
     job_id: str,
     stage: str,
 ) -> tuple[Any, str]:
-    try:
-        response = client.models.generate_content(
-            model=primary_model,
-            contents=contents,
-            config=config,
-        )
-        return response, primary_model
-    except Exception as primary_error:
-        if fallback_model and fallback_model != primary_model:
-            logger.warning(
-                "[%s] ⚠️ %s 使用模型 %s 失敗，改用 %s：%s",
-                job_id,
-                stage,
-                primary_model,
-                fallback_model,
-                primary_error,
-            )
-            update_job_status(
-                job_id,
-                "processing",
-                f"⚠️ {stage} 使用 {primary_model} 失敗，改用 {fallback_model}...",
-            )
-            response = client.models.generate_content(
-                model=fallback_model,
-                contents=contents,
-                config=config,
-            )
-            return response, fallback_model
-        raise
+    store = _model_quota_store(client)
+    return generate_with_pool(
+        _model_candidates(primary_model, fallback_model, audio=False, expanded=store is not None),
+        lambda candidate: client.models.generate_content(
+            model=candidate, contents=contents,
+            config=_generation_config_for_model(candidate, config)),
+        store=store, input_tokens=estimate_input_tokens(contents),
+        before_call=lambda: _raise_if_cancelled(job_id),
+        on_switch=lambda candidate: update_job_status(job_id, "processing", f"⚠️ {stage} 改用 {candidate} 接續..."),
+    )
 
 
 def _is_transient_transcription_error(error: BaseException) -> bool:
@@ -1289,42 +1287,32 @@ def _generate_transcript_with_transient_fallback(
     job_id: str,
     segment_index: int,
     total_segments: int,
+    audio_duration_seconds: int = 0,
+    audio_scope: str = "",
 ) -> tuple[Any, str]:
-    """Use the distinct recovery model only when the primary upstream fails."""
-    try:
-        response = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=config,
-        )
-        return response, model
-    except Exception as primary_error:
-        fallback_model = _resolve_transcription_recovery_model(model)
-        if not fallback_model or not _is_transient_transcription_error(primary_error):
-            raise
-
-        logger.warning(
-            "[%s] ⚠️ 第 %s/%s 段轉錄模型 %s 暫時失敗，改用 %s：%s",
-            job_id,
-            segment_index + 1,
-            total_segments,
-            model,
-            fallback_model,
-            primary_error,
-        )
-        update_job_status(
-            job_id,
-            "processing",
-            f"⚠️ 第 {segment_index + 1}/{total_segments} 段轉錄服務暫時異常，"
-            f"改用 {fallback_model}...",
-        )
+    """Continue with another eligible speech model; never hot-loop on quota."""
+    budget = ACTIVE_TRANSCRIPTION_BUDGET.get()
+    store = _model_quota_store(client)
+    def before_call():
         _raise_if_cancelled(job_id)
-        response = client.models.generate_content(
-            model=fallback_model,
-            contents=contents,
-            config=config,
-        )
-        return response, fallback_model
+        if budget is not None:
+            budget.reserve(segment_index)
+    def generate(candidate):
+        if candidate == TRANSCRIBE_MODEL:
+            return generate_transcription(client, contents[0], segment_index=segment_index,
+                total_segments=total_segments, audio_scope=audio_scope)
+        return client.models.generate_content(model=candidate, contents=contents,
+            config=_generation_config_for_model(candidate, config))
+    return generate_with_pool(
+        _model_candidates(model, _resolve_transcription_recovery_model(model), audio=True, expanded=store is not None),
+        generate, store=store, before_call=before_call,
+        input_tokens=lambda candidate: estimate_input_tokens(
+            [] if candidate == TRANSCRIBE_MODEL else contents, audio_duration_seconds),
+        is_transient=lambda error: _is_transient_transcription_error(error) or (
+            model == TRANSCRIBE_MODEL and isinstance(error, ValueError)),
+        on_switch=lambda candidate: update_job_status(job_id, "processing",
+            f"⚠️ 第 {segment_index + 1}/{total_segments} 段改用 {candidate} 接續轉錄..."),
+    )
 
 
 def _format_mmss(total_seconds: int) -> str:
@@ -2925,16 +2913,6 @@ def _speech_backed_timestamp_gap_quality_issues(
     ]
 
 
-def _transcript_spoken_character_count(transcript: str) -> int:
-    """Count written speech while excluding timestamps and speaker labels."""
-    text = TIMESTAMP_PATTERN.sub("", transcript or "")
-    text = re.sub(r"\*{0,2}\[[^\]]+\]\*{0,2}\s*[：:]", "", text)
-    for marker in TRANSCRIPT_UNCERTAINTY_MARKERS:
-        text = text.replace(marker, "")
-    text = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]+", "", text)
-    return len(text)
-
-
 def _speech_backed_transcript_density_quality_issues(
     audio_path: Path,
     transcript: str,
@@ -3302,6 +3280,8 @@ def _recovery_subsegment_cached_audio_quality_issues(
     valid cached child can still contain a sparse or prematurely stopped
     transcript. Reusing it would make the parent retry fail again later.
     """
+    if _transcript_is_uncertainty_only(transcript) and not _audio_has_insufficient_transcription_evidence(audio_path):
+        return ["補救快取只有 [聽不清]，不能視為已驗證的語音逐字稿"]
     return _audio_backed_transcript_quality_issues(
         audio_path,
         transcript,
@@ -4423,6 +4403,8 @@ def _segment_cache_quality_issues(
     segment_index: int,
     context: dict[str, Any],
 ) -> list[str]:
+    if _transcript_is_uncertainty_only(transcript):
+        return ["快取只有 [聽不清]，沒有可沿用的逐字稿；需重新核對來源音訊"]
     bounds = context.get("segment_bounds") or []
     expected_start = None
     expected_end = None
@@ -4467,7 +4449,7 @@ def _load_segment_transcript_cache(
 ) -> Optional[str]:
     cache_files = [_segment_cache_file(output_dir, job_id, segment_index)]
     shared_file = _shared_segment_cache_file(output_dir, context, segment_index)
-    if shared_file is not None and shared_file not in cache_files:
+    if shared_cache_allowed() and shared_file is not None and shared_file not in cache_files:
         cache_files.append(shared_file)
 
     for cache_file in cache_files:
@@ -4569,6 +4551,7 @@ def _segment_recovery_plan_context(
         return None
     return {
         "plan_version": SEGMENT_RECOVERY_PLAN_VERSION,
+        "audio_preprocessing_profile": _audio_preprocessing_profile(),
         "source_audio_sha256": source_sha256,
         "model": str(model or "").strip(),
         "segment_index": int(segment_index),
@@ -5157,6 +5140,7 @@ def _finalize_meeting_content(meeting_content: str, full_transcript: str, job_id
     return finalized
 
 
+@checkpointed
 def _repair_meeting_content_if_needed(
     client,
     model: str,
@@ -5396,11 +5380,11 @@ def _prepare_audio_for_transcription(
     if (
         AUDIO_PREPROCESSING_ENABLED
         and AUDIO_INITIAL_SPEECH_FOCUS_ENABLED
-        and math.isfinite(max_dbfs)
-        and dynamic_range_db is not None
-        and max_dbfs >= AUDIO_INITIAL_SPEECH_FOCUS_CLIP_DBFS
-        and dynamic_range_db >= RECOVERY_SPEECH_FOCUS_MIN_DYNAMIC_RANGE_DB
-        and active_ratio >= AUDIO_INITIAL_SPEECH_FOCUS_MIN_ACTIVE_RATIO
+        and needs_initial_speech_focus(
+            dbfs, max_dbfs, active_ratio, clip_dbfs=AUDIO_INITIAL_SPEECH_FOCUS_CLIP_DBFS,
+            min_dynamic_range_db=RECOVERY_SPEECH_FOCUS_MIN_DYNAMIC_RANGE_DB,
+            min_active_ratio=AUDIO_INITIAL_SPEECH_FOCUS_MIN_ACTIVE_RATIO,
+        )
     ):
         focused_path = _create_speech_focus_audio(
             audio_path,
@@ -5413,10 +5397,10 @@ def _prepare_audio_for_transcription(
             report["preprocessed"] = True
             report["preprocessing_mode"] = "speech_focus"
             report["warnings"].append(
-                "偵測到爆音、高語音密度與較大動態範圍，轉錄時已使用本機語音聚焦副本。"
+                "錄音音量落差明顯（低音量或峰值過大），轉錄已使用本機語音聚焦副本；重要詞句仍請回聽確認。"
             )
             logger.info(
-                "[%s] 🎚️ 爆音高密度錄音（峰值 %.1f dBFS、動態範圍 %.1f dB、有效語音 %.0f%%），"
+                "[%s] 🎚️ 音量落差明顯（峰值 %.1f dBFS、動態範圍 %.1f dB、有聲活動 %.0f%%），"
                 "已建立首次語音聚焦轉錄副本",
                 job_id,
                 max_dbfs,
@@ -6162,7 +6146,10 @@ def _transcribe_segment_with_recovery(
     transient_fallback_models: Optional[list[str]] = None,
     response_models: Optional[list[str]] = None,
     recovery_depth: int = 0,
+    recovery_progress: Optional[RecoveryProgress] = None,
 ) -> str:
+    if recovery_progress is None:
+        recovery_progress = RecoveryProgress()
     if recovery_depth >= TRANSCRIPT_RECOVERY_MAX_DEPTH:
         transcript, event = _recovery_depth_limit_fallback(
             segment_index=seg_index, offset_seconds=offset_seconds,
@@ -6171,6 +6158,10 @@ def _transcribe_segment_with_recovery(
         logger.warning("[%s] ⚠️ %s", job_id, event["issue"])
         if quality_events is not None:
             quality_events.append(event)
+        recovery_progress.unresolved(
+            segment_index=seg_index, start_seconds=offset_seconds,
+            end_seconds=offset_seconds + duration_seconds,
+        )
         return transcript
     if _audio_has_insufficient_transcription_evidence(seg_path):
         logger.info("[%s] ⏭️ 本機確認分段幾乎沒有語音活動，略過模型轉錄", job_id)
@@ -6204,6 +6195,14 @@ def _transcribe_segment_with_recovery(
                 is_last_segment=is_last_segment,
                 audio_path=seg_path,
             )
+            if recovery_depth > 0:
+                if _transcript_is_uncertainty_only(transcript):
+                    recovery_progress.unresolved(
+                        segment_index=seg_index, start_seconds=offset_seconds,
+                        end_seconds=offset_seconds + duration_seconds,
+                    )
+                else:
+                    recovery_progress.resolved()
             return transcript
         except RuntimeError as exc:
             quality_error = exc
@@ -6214,7 +6213,12 @@ def _transcribe_segment_with_recovery(
                     "end_seconds": offset_seconds + duration_seconds,
                     "issue": str(quality_error),
                 })
-            if recovery_depth >= 3 and any(marker in str(quality_error) for marker in (TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER, TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER)): return f"[{_format_mmss(offset_seconds)}] **[發言者不明]**：[聽不清]"
+            if recovery_depth >= 3 and any(marker in str(quality_error) for marker in (TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER, TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER)):
+                recovery_progress.unresolved(
+                    segment_index=seg_index, start_seconds=offset_seconds,
+                    end_seconds=offset_seconds + duration_seconds,
+                )
+                return f"[{_format_mmss(offset_seconds)}] **[發言者不明]**：[聽不清]"
             critical_full_recovery = _requires_critical_segment_rerun_escalation(
                 [str(quality_error)]
             )
@@ -6308,6 +6312,7 @@ def _transcribe_segment_with_recovery(
                         recovery_plan_context=recovery_plan_context,
                         transient_fallback_models=transient_fallback_models,
                         response_models=response_models,
+                        recovery_progress=recovery_progress,
                     )
                     if repaired_transcript is not None:
                         if quality_events is not None:
@@ -6360,8 +6365,19 @@ def _transcribe_segment_with_recovery(
                 transient_fallback_models=transient_fallback_models,
                 response_models=response_models,
             )
-            return _offset_transcript_timestamps(transcript, offset_seconds)
-        if any(marker in str(quality_error) for marker in (TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER, TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER)): return f"[{_format_mmss(offset_seconds)}] **[發言者不明]**：[聽不清]"
+            transcript = _offset_transcript_timestamps(transcript, offset_seconds)
+            if recovery_depth > 0 and _transcript_is_uncertainty_only(transcript):
+                recovery_progress.unresolved(
+                    segment_index=seg_index, start_seconds=offset_seconds,
+                    end_seconds=offset_seconds + duration_seconds,
+                )
+            return transcript
+        if any(marker in str(quality_error) for marker in (TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER, TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER)):
+            recovery_progress.unresolved(
+                segment_index=seg_index, start_seconds=offset_seconds,
+                end_seconds=offset_seconds + duration_seconds,
+            )
+            return f"[{_format_mmss(offset_seconds)}] **[發言者不明]**：[聽不清]"
         raise quality_error
 
     if recovery_cache_output_dir is not None and recovery_plan_context is not None:
@@ -6466,6 +6482,7 @@ def _transcribe_segment_with_recovery(
                     recovery_cache_source_sha256=recovery_cache_source_sha256,
                     transient_fallback_models=transient_fallback_models,
                     response_models=response_models, recovery_depth=recovery_depth + 1,
+                    recovery_progress=recovery_progress,
                 )
             raise quality_error
 
@@ -6493,6 +6510,7 @@ def _transcribe_segment_with_recovery(
                 recovery_cache_source_sha256=recovery_cache_source_sha256,
                 transient_fallback_models=transient_fallback_models,
                 response_models=response_models, recovery_depth=recovery_depth + 1,
+                recovery_progress=recovery_progress,
             )
         raise quality_error
 
@@ -6548,23 +6566,8 @@ def _transcribe_segment_with_recovery(
             child_cache_candidates: list[tuple[str, dict[str, Any]]] = [
                 ("cache", child_cache_context)
             ]
-            transient_recovery_model = _resolve_transcription_recovery_model(model)
-            if transient_recovery_model:
-                fallback_child_cache_context = _recovery_subsegment_cache_context(
-                    sub_path,
-                    transient_recovery_model,
-                    parent_segment_index=seg_index,
-                    start_seconds=child_start_seconds,
-                    end_seconds=child_end_seconds,
-                    is_last_segment=child_is_last_segment,
-                    source_audio_sha256=recovery_cache_source_sha256,
-                    custom_vocabulary=custom_vocabulary,
-                    speaker_context=child_context,
-                    repair_focus=repair_focus,
-                    recovery_audio_profile=recovery_audio_profile,
-                )
-                if fallback_child_cache_context != child_cache_context:
-                    child_cache_candidates.append(("fallback_cache", fallback_child_cache_context))
+            child_cache_candidates.extend(_fallback_cache_candidates(
+                model, _resolve_transcription_recovery_model(model), child_cache_context))
             for cache_source, cache_context in child_cache_candidates:
                 child_transcript = _load_segment_transcript_cache(
                     output_dir=recovery_cache_output_dir,
@@ -6597,6 +6600,8 @@ def _transcribe_segment_with_recovery(
                     )
                     child_transcript = None
                 else:
+                    if not _transcript_is_uncertainty_only(child_transcript):
+                        recovery_progress.resolved()
                     logger.info(
                         "[%s] ♻️  補救第 %s/%s 段的小段 %s/%s 使用已驗證%s",
                         job_id,
@@ -6639,39 +6644,19 @@ def _transcribe_segment_with_recovery(
                 transient_fallback_models=transient_fallback_models,
                 response_models=child_response_models,
                 recovery_depth=recovery_depth + 1,
+                recovery_progress=recovery_progress,
             )
             if response_models is not None:
                 response_models.extend(child_response_models)
-            if child_cache_context is not None and child_cache_job_id is not None:
+            if (
+                child_cache_context is not None
+                and child_cache_job_id is not None
+                and not _transcript_is_uncertainty_only(child_transcript)
+            ):
                 child_cache_model = _single_transcription_response_model(
                     child_response_models
                 )
-                if child_cache_model:
-                    cache_context = (
-                        child_cache_context
-                        if child_cache_model == str(child_cache_context.get("model") or "")
-                        else _recovery_subsegment_cache_context(
-                            sub_path,
-                            child_cache_model,
-                            parent_segment_index=seg_index,
-                            start_seconds=child_start_seconds,
-                            end_seconds=child_end_seconds,
-                            is_last_segment=child_is_last_segment,
-                            source_audio_sha256=recovery_cache_source_sha256,
-                            custom_vocabulary=custom_vocabulary,
-                            speaker_context=child_context,
-                            repair_focus=repair_focus,
-                            recovery_audio_profile=recovery_audio_profile,
-                        )
-                    )
-                    _save_segment_transcript_cache(
-                        output_dir=recovery_cache_output_dir,
-                        job_id=child_cache_job_id,
-                        segment_index=0,
-                        context=cache_context,
-                        transcript=child_transcript,
-                    )
-                elif len(transient_fallback_models or []) != fallback_count_before_child:
+                if not child_cache_model and len(transient_fallback_models or []) != fallback_count_before_child:
                     logger.info(
                         "[%s] ℹ️ 補救第 %s/%s 段的小段 %s/%s 混用模型，未寫入快取",
                         job_id,
@@ -6681,14 +6666,16 @@ def _transcribe_segment_with_recovery(
                         len(subsegments),
                     )
                 else:
-                    # Compatibility with callers that provide a verified
-                    # primary result but do not expose per-response model
-                    # provenance (including older integrations and tests).
+                    # Without response provenance, retain the primary identity
+                    # only if the caller reports no model switch.
+                    cache_context = dict(child_cache_context)
+                    if child_cache_model:
+                        cache_context["model"] = child_cache_model
                     _save_segment_transcript_cache(
                         output_dir=recovery_cache_output_dir,
                         job_id=child_cache_job_id,
                         segment_index=0,
-                        context=child_cache_context,
+                        context=cache_context,
                         transcript=child_transcript,
                     )
         output_child_transcript = child_transcript
@@ -6734,11 +6721,8 @@ def _transcribe_segment_with_recovery(
                 "end_seconds": offset_seconds + duration_seconds,
                 "issue": str(exc),
             })
-        # A gap can straddle the boundary between two otherwise valid recovery
-        # chunks. It is only visible after their transcripts are merged. Apply
-        # the same bounded repair/escalation path for automatic recovery and a
-        # user-requested rerun, so a proven post-merge defect is not left for a
-        # second manual attempt merely because the first pass was automatic.
+        # Apply bounded local repair to gaps exposed only after child merging,
+        # for both automatic recovery and user-requested reruns.
         if allow_targeted_repair:
             merged_repair_ranges = _coalesce_transcript_repair_ranges([
                 *_speech_backed_timestamp_gap_quality_ranges(
@@ -6782,6 +6766,7 @@ def _transcribe_segment_with_recovery(
                     recovery_plan_context=recovery_plan_context,
                     transient_fallback_models=transient_fallback_models,
                     response_models=response_models,
+                    recovery_progress=recovery_progress,
                 )
                 if repaired_transcript is not None:
                     if quality_events is not None:
@@ -6799,16 +6784,9 @@ def _transcribe_segment_with_recovery(
                         "；".join(repair_notes),
                     )
                     return repaired_transcript
-            # A merged recovery can still fail even when only one or two
-            # windows are detectable.  In that case the bounded local repair
-            # above has already had its chance; retrying the same broad child
-            # chunks would simply preserve the known defect.  Escalate once to
-            # the next smaller stable size for every confirmed post-merge
-            # failure, not only for the many-gap case.  Keep an automatic
-            # failure explicit when no window can be safely located: splitting
-            # a non-localized hallucination again is costly and does not make
-            # the result more trustworthy.  A user-requested rerun can still
-            # opt into that bounded second pass.
+            # After local repair fails, allow a bounded smaller-chunk pass
+            # only for located gaps or an explicit rerun. Non-localized
+            # automatic failures remain explicit rather than blindly splitting.
             if (
                 direct_recovery_pass < TRANSCRIPT_DIRECT_RECOVERY_MAX_PASSES
                 and (direct_recovery or merged_repair_ranges)
@@ -6879,6 +6857,7 @@ def _transcribe_segment_with_recovery(
                         recovery_cache_output_dir=recovery_cache_output_dir,
                         recovery_cache_source_sha256=recovery_cache_source_sha256,
                         response_models=response_models, recovery_depth=recovery_depth + 1,
+                        recovery_progress=recovery_progress,
                     )
         if any(marker in str(exc) for marker in (TRANSCRIPT_SPEECH_DENSITY_ISSUE_MARKER, TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER)):
             return f"[{_format_mmss(offset_seconds)}] **[發言者不明]**：[聽不清]"
@@ -7127,6 +7106,7 @@ def _repair_existing_segment_timestamp_gaps(
     recovery_plan_context: Optional[dict[str, Any]] = None,
     transient_fallback_models: Optional[list[str]] = None,
     response_models: Optional[list[str]] = None,
+    recovery_progress: Optional[RecoveryProgress] = None,
 ) -> tuple[Optional[str], list[str]]:
     """Repair time-bounded transcript faults; return None to use a full rerun.
 
@@ -7251,6 +7231,7 @@ def _repair_existing_segment_timestamp_gaps(
                 recovery_plan_context=recovery_plan_context,
                 transient_fallback_models=transient_fallback_models,
                 response_models=response_models,
+                recovery_progress=recovery_progress,
             )
             repairs.append({
                 "start_seconds": gap_start_seconds,
@@ -7261,6 +7242,8 @@ def _repair_existing_segment_timestamp_gaps(
                     end_seconds=gap_end_seconds,
                 ),
             })
+    except (TranscriptionRequestBudgetExceeded, RecoveryNoProgressError, ModelsQuotaWaiting):
+        raise
     except Exception as exc:
         logger.warning(
             "[%s] ⚠️ 第 %s/%s 段局部補救失敗，改用整段穩定重跑：%s",
@@ -7327,6 +7310,10 @@ def _transcribe_segment(
         expected_duration_seconds=expected_duration_seconds,
     )
 
+    budget = ACTIVE_TRANSCRIPTION_BUDGET.get()
+    if budget is not None:
+        budget.ensure_available(seg_index)
+
     mime = SUPPORTED_MEDIA_FORMATS.get(seg_path.suffix.lower(), "audio/mpeg")
     uploaded = client.files.upload(
         file=str(seg_path),
@@ -7360,6 +7347,8 @@ def _transcribe_segment(
             job_id=job_id,
             segment_index=seg_index,
             total_segments=total_segs,
+            audio_duration_seconds=expected_duration_seconds or 0,
+            audio_scope=_sha256_file(seg_path)[:8] if seg_path.is_file() else "",
         )
         if response_models is not None:
             response_models.append(used_model)
@@ -7607,19 +7596,6 @@ def _infer_meeting_date(
                 except ValueError:
                     continue
     return fallback or datetime.now().date()
-
-
-def _transcript_turns(transcript: str) -> list[tuple[int, str, str]]:
-    turns: list[tuple[int, str, str]] = []
-    pattern = re.compile(
-        r"^\[(?P<minutes>\d{1,3}):(?P<seconds>[0-5]\d)\]\s*"
-        r"(?:\*{1,2})?\[(?P<speaker>[^\]]+)\](?:\*{1,2})?\s*[：:]\s*(?P<text>.*)$",
-        flags=re.MULTILINE,
-    )
-    for match in pattern.finditer(transcript or ""):
-        seconds = int(match.group("minutes")) * 60 + int(match.group("seconds"))
-        turns.append((seconds, match.group("speaker").strip(), match.group("text").strip()))
-    return turns
 
 
 def _nearest_transcript_turn(
@@ -8063,6 +8039,7 @@ Rules:
 """.strip() + previous_minutes_contract_addendum(previous_minutes_context)
 
 
+@checkpointed
 def _generate_meeting_content_from_transcript(
     client,
     *,
@@ -8162,7 +8139,7 @@ def _append_transcript_chinese_translation(
         client, meeting_content, full_transcript, job_id, primary_model, fallback_model,
         enabled=TRANSCRIPT_CHINESE_TRANSLATION_ENABLED, generate_text=_generate_text_with_fallback,
         check_active=check_active, update_status=update_job_status,
-        fatal_errors=(JobCancelled, JobLeaseLost),
+        fatal_errors=(JobCancelled, JobLeaseLost, ModelsQuotaWaiting),
     )
 
 
@@ -8184,6 +8161,8 @@ def _build_quality_report(
     _clear_semantic_review_segment_issues(segment_report)
     _merge_semantic_review_segments(segment_report, full_transcript, semantic_review)
     warnings = list(audio_report.get("warnings") or [])
+    if re.search(r"發言者 [A-H]（片段 \d+(?:-[a-f0-9]{8})?）", full_transcript):
+        warnings.append("專用轉錄的發言人標籤只對該片段有效；不同片段的 A 不代表同一人，標籤數不是整場實際人數。")
     silence_ratio = float(audio_report.get("silence_ratio") or 0)
     if silence_ratio >= 0.8:
         warnings.append("錄音中靜音比例偏高，建議抽查聲音較小的時段。")
@@ -8211,7 +8190,7 @@ def _build_quality_report(
         if has_review_signal or score < 90
         else "良好"
     )
-    speakers = sorted(set(re.findall(r"\*\*\[([^\]]+)\]\*\*", full_transcript or "")))
+    speakers = transcript_speaker_labels(full_transcript)
     return {
         "score": score,
         "label": label,
@@ -8848,7 +8827,8 @@ def review_saved_meeting_transcript_semantics(
     )
     client = genai.Client(
         api_key=api_key,
-        http_options=types.HttpOptions(timeout=GENAI_HTTP_TIMEOUT_SECONDS * 1000),
+        http_options=types.HttpOptions(timeout=GENAI_HTTP_TIMEOUT_SECONDS * 1000,
+                                       retry_options=types.HttpRetryOptions(attempts=1)),
     )
     response, model_used = _generate_text_with_fallback(
         client,
@@ -8999,7 +8979,12 @@ def process_audio_task(
     structured_summary: Optional[dict[str, Any]] = None
     actual_meeting_date = _infer_meeting_date(meeting_title, audio_path)
     previous_minutes_context: Optional[dict[str, Any]] = None
+    budget_token = ACTIVE_TRANSCRIPTION_BUDGET.set(TranscriptionRequestBudget(job_id))
+    checkpoint_token = ACTIVE_CHECKPOINTS.set(None)
     try:
+        ACTIVE_CHECKPOINTS.set(JobCheckpoints(output_dir, job_id, _sha256_file(audio_path),
+            (get_job(job_id) or {}).get("error_detail") or "",
+            bool(forced_segments or force_full_meeting_rerun or force_all_segments_full_rerun or full_rerun_ranges)))
         if previous_minutes_path is not None:
             previous_minutes_context = read_previous_minutes_context(
                 previous_minutes_path,
@@ -9021,6 +9006,7 @@ def process_audio_task(
             # leave a persistent queue worker in ``processing`` indefinitely.
             http_options=types.HttpOptions(
                 timeout=GENAI_HTTP_TIMEOUT_SECONDS * 1000,
+                retry_options=types.HttpRetryOptions(attempts=1),
             ),
         )
         logger.info(
@@ -9078,7 +9064,7 @@ def process_audio_task(
         if raw_segments is None:
             raw_segments = _split_audio_to_segments(
                 prepared_audio_path,
-                segment_minutes=SEGMENT_MINUTES,
+                segment_minutes=min(SEGMENT_MINUTES, 5) if model == TRANSCRIBE_MODEL and not preserve_existing_segment_layout else SEGMENT_MINUTES,
                 allow_dense_audio_initial_split=not preserve_existing_segment_layout,
             )
         legacy_segment_paths = all(not isinstance(item, AudioSlice) for item in raw_segments)
@@ -9279,7 +9265,9 @@ def process_audio_task(
                             total_segs,
                             segment_transcription_model,
                         )
-                if i not in forced_segments:
+                if i not in forced_segments or quota_resume():
+                    transcript = load_verified_segment(i, segment_cache_context)
+                    transcript_source = "job_cache" if transcript is not None else ""
                     # A resumable draft can deliberately switch to the
                     # configured recovery model.  Never revive a primary-model
                     # cache in front of that stronger candidate.  Conversely,
@@ -9288,21 +9276,11 @@ def process_audio_task(
                     cache_candidates: list[tuple[str, dict[str, Any]]] = [
                         ("cache", effective_segment_cache_context)
                     ]
-                    transient_recovery_model = _resolve_transcription_recovery_model(
-                        segment_transcription_model
-                    )
-                    if transient_recovery_model:
-                        fallback_cache_context = _segment_cache_context(
-                            audio_path,
-                            transient_recovery_model,
-                            total_segs,
-                            SEGMENT_MINUTES,
-                            segment_bounds=segment_bounds,
-                            custom_vocabulary=custom_vocabulary,
-                        )
-                        if fallback_cache_context != effective_segment_cache_context:
-                            cache_candidates.append(("fallback_cache", fallback_cache_context))
+                    cache_candidates.extend(_fallback_cache_candidates(segment_transcription_model,
+                        _resolve_transcription_recovery_model(segment_transcription_model), effective_segment_cache_context))
                     for cache_source, cache_context in cache_candidates:
+                        if transcript is not None:
+                            break
                         transcript = _load_segment_transcript_cache(
                             output_dir=output_dir,
                             job_id=job_id,
@@ -9314,7 +9292,7 @@ def process_audio_task(
                         transcript_source = cache_source
                         effective_segment_cache_context = cache_context
                         break
-                    if transcript is not None and transcript_source in {"cache", "fallback_cache"}:
+                    if transcript is not None and transcript_source in {"cache", "fallback_cache", "job_cache"}:
                         # Cache validation used to stop at structural checks made
                         # when it was written. Recheck it against this segment's
                         # audio so an older cache cannot silently preserve an
@@ -10110,6 +10088,7 @@ def process_audio_task(
                         candidate_model=selected_candidate_model,
                     )
                 if not segment_issues:
+                    save_verified_segment(i, segment_cache_context, transcript, transcript_response_models)
                     _clear_segment_recovery_plan(output_dir, recovery_plan_context)
                     cache_model = _single_transcription_response_model(
                         transcript_response_models
@@ -10290,7 +10269,9 @@ def process_audio_task(
                         job_id,
                         segment_transcription_model,
                     )
-            if 0 not in forced_segments:
+            if 0 not in forced_segments or quota_resume():
+                transcript = load_verified_segment(0, segment_cache_context)
+                transcript_source = "job_cache" if transcript is not None else ""
                 active_segment_cache_context = (
                     segment_cache_context
                     if segment_transcription_model == model
@@ -10306,21 +10287,11 @@ def process_audio_task(
                 cache_candidates: list[tuple[str, dict[str, Any]]] = [
                     ("cache", active_segment_cache_context)
                 ]
-                transient_recovery_model = _resolve_transcription_recovery_model(
-                    segment_transcription_model
-                )
-                if transient_recovery_model:
-                    fallback_cache_context = _segment_cache_context(
-                        audio_path,
-                        transient_recovery_model,
-                        total_segs,
-                        SEGMENT_MINUTES,
-                        segment_bounds=segment_bounds,
-                        custom_vocabulary=custom_vocabulary,
-                    )
-                    if fallback_cache_context != active_segment_cache_context:
-                        cache_candidates.append(("fallback_cache", fallback_cache_context))
+                cache_candidates.extend(_fallback_cache_candidates(segment_transcription_model,
+                    _resolve_transcription_recovery_model(segment_transcription_model), active_segment_cache_context))
                 for cache_source, cache_context in cache_candidates:
+                    if transcript is not None:
+                        break
                     transcript = _load_segment_transcript_cache(
                         output_dir=output_dir,
                         job_id=job_id,
@@ -10693,6 +10664,8 @@ def process_audio_task(
                     "；".join(segment_issues),
                 )
             else:
+                if transcript_source != "job_cache":
+                    save_verified_segment(0, segment_cache_context, transcript, transcript_response_models)
                 _clear_segment_recovery_plan(output_dir, single_recovery_plan_context)
                 cache_model = _single_transcription_response_model(
                     transcript_response_models
@@ -10723,7 +10696,7 @@ def process_audio_task(
                             job_id,
                             cache_model,
                         )
-                elif transient_fallback_models:
+                elif transient_fallback_models or transcript_source == "job_cache":
                     logger.info(
                         "[%s] ℹ️ 單段轉錄結果混用模型或沿用舊稿，未寫入任何模型快取",
                         job_id,
@@ -10922,6 +10895,12 @@ quality_label: {quality_report['label']}
         logger.info(f"[{job_id}] 🎉 任務完成")
         return output_path
 
+    except ModelsQuotaWaiting:
+        # Queue owns the atomic pending/lease transition. Never flash a failed
+        # state or remove the source while waiting for an eligible free model.
+        cleanup_source_audio = False
+        raise
+
     except JobLeaseLost as exc:
         logger.error("[%s] 🚫 放棄 stale worker 產出：%s", job_id, exc)
         return None
@@ -10936,6 +10915,9 @@ quality_label: {quality_report['label']}
         return None
 
     except Exception as e:
+        if is_quota_error(e):
+            cleanup_source_audio = False
+            raise wait_for_quota_error(e, [model]) from e
         error_msg = str(e)
         logger.error(f"[{job_id}] ❌ 任務失敗：{error_msg}")
         update_job_status(
@@ -10947,6 +10929,8 @@ quality_label: {quality_report['label']}
         return None
 
     finally:
+        ACTIVE_TRANSCRIPTION_BUDGET.reset(budget_token)
+        ACTIVE_CHECKPOINTS.reset(checkpoint_token)
         if pending_output_path is not None and pending_output_path.exists():
             try:
                 pending_output_path.unlink()

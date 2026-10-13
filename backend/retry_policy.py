@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import os
+from datetime import date, datetime, time, timedelta, timezone
+
+from backend.transcription_budget import BUDGET_ERROR_MARKER
+from backend.recovery_progress import NO_PROGRESS_ERROR_MARKER
 
 
 TRANSIENT_RETRY_MARKERS = (
@@ -26,6 +30,54 @@ TERMINAL_RETRY_MARKERS = (
     "音訊語音密度高但逐字稿文字量偏低",
     "逐字稿文字量明顯超過音訊語音活動可支持範圍",
 )
+
+DAILY_QUOTA_ID = "generaterequestsperdayperprojectpermodel"
+
+
+def is_daily_quota_error(error_detail: str) -> bool:
+    """Match the quota ID, not every 429 (which can also mean per-minute limits)."""
+    normalized = "".join(char for char in str(error_detail or "").casefold() if char.isalnum())
+    return DAILY_QUOTA_ID in normalized
+
+
+def is_transcription_budget_error(error_detail: str) -> bool:
+    return BUDGET_ERROR_MARKER in str(error_detail or "")
+
+
+def is_transcription_recovery_no_progress_error(error_detail: str) -> bool:
+    return NO_PROGRESS_ERROR_MARKER in str(error_detail or "")
+
+
+def _sunday(year: int, month: int, ordinal: int) -> date:
+    first = date(year, month, 1)
+    first_sunday = first + timedelta(days=(6 - first.weekday()) % 7)
+    return first_sunday + timedelta(weeks=ordinal - 1)
+
+
+def _pacific_offset_hours(now_utc: datetime) -> int:
+    """US Pacific UTC offset under the current March/November DST rules."""
+    year = now_utc.year
+    dst_start = datetime.combine(_sunday(year, 3, 2), time(10), timezone.utc)
+    dst_end = datetime.combine(_sunday(year, 11, 1), time(9), timezone.utc)
+    return -7 if dst_start <= now_utc < dst_end else -8
+
+
+def next_pacific_daily_reset_utc(now_utc: datetime | None = None) -> datetime:
+    """Next Pacific midnight plus five minutes, without requiring OS tzdata."""
+    current = now_utc or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        raise ValueError("now_utc must be timezone-aware")
+    current = current.astimezone(timezone.utc)
+    pacific_date = (current + timedelta(hours=_pacific_offset_hours(current))).date()
+    next_date = pacific_date + timedelta(days=1)
+    # DST changes at 02:00 local time.  Midnight on the transition Sunday
+    # still uses the previous day's offset.
+    daylight_at_midnight = (
+        _sunday(next_date.year, 3, 2) < next_date
+        <= _sunday(next_date.year, 11, 1)
+    )
+    offset = 7 if daylight_at_midnight else 8
+    return datetime.combine(next_date, time(0, 5), timezone.utc) + timedelta(hours=offset)
 
 
 def transient_retry_delay_seconds(attempts: int = 1) -> int:

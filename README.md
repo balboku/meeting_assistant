@@ -61,8 +61,10 @@ cp .env.example .env
 `.env` 內容如下（詳見各章節取得說明）：
 ```
 GEMINI_API_KEY=your_gemini_api_key_here
-TRANSCRIPTION_MODEL=gemini-3.1-flash-lite
-TRANSCRIPTION_RECOVERY_MODEL=gemini-3.5-flash
+TRANSCRIPTION_MODEL=gemini-3.5-transcribe
+TRANSCRIPTION_RECOVERY_MODEL=gemini-3.8-flash
+GEMINI_PROJECT_ID=your_google_project_id
+MODEL_QUOTA_ROUTING_ENABLED=1
 GENAI_HTTP_TIMEOUT_SECONDS=180
 SUMMARY_MODEL=gemma-4-31b-it
 SUMMARY_FALLBACK_MODEL=gemini-3.1-flash-lite
@@ -139,6 +141,7 @@ TRANSCRIPT_SPEECH_DENSITY_MIN_ACTIVE_RATIO=0.45
 TRANSCRIPT_SPEECH_DENSITY_MIN_CHARS_PER_ACTIVE_SECOND=2.5
 TRANSCRIPT_SPEECH_DENSITY_MIN_RELIABLE_ACTIVE_SECONDS=8
 TRANSCRIPT_SPEECH_DENSITY_MAX_CHARS_PER_ACTIVE_SECOND=8
+TRANSCRIPT_SPEECH_DENSITY_MAX_WORDS_PER_ACTIVE_SECOND=8
 TRANSCRIPT_SPEECH_DENSITY_EXCESS_MIN_CHARACTERS=8
 TRANSCRIPT_SPEECH_ACTIVITY_DBFS_FLOOR=-50
 TRANSCRIPT_LOCAL_SILENCE_SKIP_MIN_SECONDS=5
@@ -247,9 +250,11 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 
 | 變數 | 預設值 | 用途 |
 |------|--------|------|
-| `TRANSCRIPTION_MODEL` | `gemini-3.1-flash-lite` | 音訊轉逐字稿使用的模型。若未設定，會沿用舊的 `GEMINI_MODEL` 或預設值。 |
-| `TRANSCRIPTION_RECOVERY_MODEL` | `gemini-3.5-flash` | 第一轉錄模型完成局部/小段補救後仍有時間缺口、文字密度偏低、數列延伸或長重複迴圈等可驗證異常時，或遇到 `429`、`5xx`、逾時等暫時性上游錯誤時使用的備援轉錄模型。若此模型留下較佳但未完成的候選稿，後續佇列重試會以目前設定的同一補救模型接續剩餘區間，不會重做已證實較弱的主模型嘗試。設為與 `TRANSCRIPTION_MODEL` 相同即可停用。 |
-| `TRANSCRIPTION_FULL_RERUN_MODEL` | `gemini-3.5-flash` | 手動「完整重跑」指定分段時使用的模型；按整份「重跑」時，也只會套用到既有品質報告已用音訊證實有重大異常的時間區間。即使新版依語音密度重新切段，系統也會按原始媒體時間重新定位，不會誤用舊分段編號；原本的音訊品質證據會隨佇列保留。預設沿用補救模型，通常以約 60 秒小段轉錄；若本機已確認文字量極端偏低，會直接縮為 30 秒，避免先進行一次已知較不穩定的嘗試。設為與 `TRANSCRIPTION_MODEL` 相同可維持原模型。 |
+| `TRANSCRIPTION_MODEL` | `gemini-3.5-transcribe` | 專用語音轉錄使用 Interactions REST API，保留英文原文，中文以本機 OpenCC 轉繁體；逐字時間與片段內匿名發言人標籤來自音訊回應。既有 `GEMINI_MODEL` 設定仍相容。 |
+| `GEMINI_PROJECT_ID` | `configured-gemini-project` | 額度與冷卻狀態的專案範圍；同專案多個 API key 不能視為多份額度。模型冷卻保存於 SQLite `model_quota_state`，不儲存憑證或逐字稿。 |
+| `MODEL_QUOTA_ROUTING_ENABLED` | `1` | 啟用已確認免費的模型候選池與保守 RPM／TPM／RPD 排程。429 先換可用模型；全部受限則排入等待、不扣失敗次數，恢復後沿用已驗證進度。設 `0` 只保留主模型與既有指定備援，不擴展模型池。這不是保證雲端永遠可用或實際剩餘額度查詢。 |
+| `TRANSCRIPTION_RECOVERY_MODEL` | `gemini-3.8-flash` | 轉錄仍有可驗證品質異常時的獨立補救模型；額度路由也先使用此指定備援，再嘗試免費候選池。較佳候選稿可接續剩餘區間。設為與 `TRANSCRIPTION_MODEL` 相同只停用獨立品質補救；額度路由由 `MODEL_QUOTA_ROUTING_ENABLED` 控制。 |
+| `TRANSCRIPTION_FULL_RERUN_MODEL` | `gemini-3.8-flash` | 手動「完整重跑」指定分段時使用的模型；按整份「重跑」時，也只會套用到既有品質報告已用音訊證實有重大異常的時間區間。即使新版依語音密度重新切段，系統也會按原始媒體時間重新定位，不會誤用舊分段編號；原本的音訊品質證據會隨佇列保留。預設沿用補救模型，通常以約 60 秒小段轉錄；若本機已確認文字量極端偏低，會直接縮為 30 秒，避免先進行一次已知較不穩定的嘗試。設為與 `TRANSCRIPTION_MODEL` 相同可維持原模型。 |
 | `TRANSCRIPT_SEMANTIC_REVIEW_MODEL` | `gemma-4-31b-it` | 手動「語意檢核」使用的文字模型；只標示高度明確的語句失真時間位置，不會改寫逐字稿、摘要或待辦事項。 |
 | `TRANSCRIPT_SEMANTIC_REVIEW_FALLBACK_MODEL` | `gemini-3.5-flash` | 語意檢核主模型暫時失敗時使用的備援模型；只在主模型失敗時呼叫。 |
 | `GENAI_HTTP_TIMEOUT_SECONDS` | `180` | Gemini 單次 HTTP 請求的逾時秒數，涵蓋上傳、轉錄與摘要；逾時後交由既有任務佇列重試，避免工作永久停在處理中。 |
@@ -337,7 +342,8 @@ $env:BASE_URL = "http://127.0.0.1:8001"
 | `TRANSCRIPT_SPEECH_DENSITY_MIN_ACTIVE_RATIO` | `0.45` | 有效語音需佔分段的最小比例，避免背景雜訊造成誤判。 |
 | `TRANSCRIPT_SPEECH_DENSITY_MIN_CHARS_PER_ACTIVE_SECOND` | `2.5` | 低於此每秒有效語音文字量時，視為逐字稿可能被過度省略。 |
 | `TRANSCRIPT_SPEECH_DENSITY_MIN_RELIABLE_ACTIVE_SECONDS` | `8` | 有效語音少於此秒數時不使用「文字量偏低」速率判斷，避免把極短答覆誤判成漏字；過量文字 gate 仍會運作。 |
-| `TRANSCRIPT_SPEECH_DENSITY_MAX_CHARS_PER_ACTIVE_SECOND` | `8` | 高於此每秒有效語音文字量且總字數達過量門檻時，視為靜音／雜訊區段可能產生幻覺。 |
+| `TRANSCRIPT_SPEECH_DENSITY_MAX_CHARS_PER_ACTIVE_SECOND` | `8` | 中文字／數字的音訊活動字速上限；英文不以字母計數。這是可疑過量文字的啟發式檢查。 |
+| `TRANSCRIPT_SPEECH_DENSITY_MAX_WORDS_PER_ACTIVE_SECOND` | `8` | 英文以單字計算的音訊活動詞速上限；中英混合依各自上限合計所需時間，避免正常英文誤觸中文門檻。 |
 | `TRANSCRIPT_SPEECH_DENSITY_EXCESS_MIN_CHARACTERS` | `8` | 啟動過量文字 gate 的最小逐字稿字數；短答覆仍低於門檻，靜音區段的完整句子則會被攔截。 |
 | `TRANSCRIPT_SPEECH_ACTIVITY_DBFS_FLOOR` | `-50` | 音量高於此 dBFS 才計為可支持逐字稿的語音活動；避免語音聚焦或正規化後的底噪被誤認成發言。 |
 | `TRANSCRIPT_LOCAL_SILENCE_SKIP_MIN_SECONDS` | `5` | 至少達此長度的分段才啟用本機低資訊音訊略過；仍須同時符合活動秒數與比例門檻，避免合法短答覆被誤判。 |
@@ -464,6 +470,10 @@ open http://127.0.0.1:8001/docs
 
 `GET /livez` 只確認 API 程序存活；`GET /readyz` 驗證 schema 與全域 worker lease，未就緒時回 503。`GET /health` 回傳載入中的 Git commit、工作區 commit、程式碼指紋、`matches_workspace`、worker、schema、SQLite quick check、媒體工具、本機／異地備份與容量門檻。大型快照的完整驗證依路徑、大小與修改時間快取，檔案變更即失效。超過 8 天的備份若 durable record-state 與媒體 inventory 仍和現況相同，會標示 `state_current=true` 並維持健康；快照可讀但 manifest 有缺檔時仍會回報 `container_valid=true`、`recoverability_complete=false` 並降級。
 
+`/health`、`/metrics` 的同步檔案／統計工作在 thread pool 執行；備份完整驗證另由每個 API 行程的單一背景工作執行，狀態每 60 秒重新檢查。初次驗證或重新驗證尚未完成時，回傳 `verification_pending=true`、`ok=false`，不把未驗證的備份標示正常；重新驗證期間仍保留先前缺檔等警示。異地磁碟讀取緩慢不會佔住 API 的備份請求執行緒，會議列表與統計不必等待 ZIP 解壓縮／雜湊驗證完成。
+
+儀表板的任務與統計輪詢各自只允許一組進行中的請求；任務 15 秒、統計／健康檢查 60 秒逾時，期限涵蓋回應本文讀取。逾時／失敗會釋放輪詢狀態並取消尚未完成的同組請求，按任務區的「更新」可同時重試任務與統計；此機制只用於讀取，不取消錄製、上傳或重跑任務。
+
 啟動維護每次都會驗證現有備份；只有資料或媒體狀態已變更且距前份快照至少 7 天，才新增 `meetings_*.db` 與 `meeting_records_*.zip`，各保留 4 份。損壞／缺少備份會立即補建，未變更的已驗證備份可長期沿用；異地路徑缺檔時會從本機快照補同步。v2 ZIP 包含一致性資料庫、Markdown、補充附件及已連結原始錄音／錄影；媒體以 SHA-256 內容定址去重，manifest 保存逐檔雜湊。
 
 高風險操作前或需要立即建立備份時，先確認沒有 pending／processing 任務，再執行手動強制備份；此命令不受 7 天週期限制：
@@ -540,6 +550,8 @@ open http://127.0.0.1:8001/docs
 AI 會輸出「系統判斷」、「擷取重點」、「對會議記錄的影響」、「可能矛盾或待確認」與「來源註記」，並要求明確區分「逐字稿提到」、「補充資料顯示」、「系統推論」、「需人工確認」。系統不會自動改寫原摘要、決議或待辦事項，而是以佐證區塊保留 AI 建議，方便人工確認後再採用；追加佐證也會讓已核准記錄退回待複核。
 
 ### 多語言會議處理
+
+音訊文字密度檢查對中文按字、英文按單字計算；不以英文字母數套用中文字速門檻。只有 `[聽不清]` 的舊快取不視為完成，會隔離保存並重新辨識。Gemini 3 系列的轉錄、摘要及其備援呼叫採用官方預設取樣設定，避免沿用低溫度設定造成重複輸出迴圈；其他模型維持既有設定，所有內容品質檢查仍保留。參考 [Google 的 Gemini 3 溫度設定說明](https://ai.google.dev/gemini-api/docs/gemini-3#temperature)。
 
 系統會以繁體中文輸出摘要、決議與待辦事項；完整逐字稿則盡量保留實際發言語言：
 

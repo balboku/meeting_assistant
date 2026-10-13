@@ -79,6 +79,7 @@ def main() -> int:
             "output/previous_minutes",
         ),
         offsite_backup_dir=offsite_dir,
+        markdown_dir=_env_path("MEETING_OUTPUT_DIR", "output"),
         backup_keep=_positive_int("DB_BACKUP_KEEP", 4),
         backup_min_interval_hours=_positive_int(
             "BACKUP_MIN_INTERVAL_HOURS",

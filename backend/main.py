@@ -41,10 +41,12 @@ from fastapi.staticfiles import StaticFiles
 load_dotenv()
 
 from backend.exporter import content_with_quality_review_note, export_meeting_to_docx
+from backend.minutes_view import build_minutes_view
 from backend.evidence import SUPPORTED_EVIDENCE_EXTENSIONS, analyze_and_append_evidence
 from backend.build_info import APP_VERSION, build_info_payload
 from backend.capacity import capacity_health_checks
-from backend.transcript_diagnostics import transcript_repeated_turn_diagnostic
+from backend.backup_status import BackupHealthMonitor
+from backend.transcript_diagnostics import transcript_repeated_turn_diagnostic, transcript_speaker_labels
 from backend.access_tokens import create_access_token, validate_access_token
 
 from backend.database import (
@@ -228,6 +230,7 @@ FFPROBE_STREAM_CACHE_MAX = 256
 FFPROBE_STREAM_CACHE: dict[tuple[str, int, int], set[str]] = {}
 SOURCE_MEDIA_SHA256_CACHE_MAX = 1000
 SOURCE_MEDIA_SHA256_CACHE: dict[tuple[str, int, int], str] = {}
+backup_health_monitor = BackupHealthMonitor()
 TRUSTED_LOCAL_NETWORKS = tuple(
     ipaddress.ip_network(network.strip())
     for network in os.getenv("MEETING_AUTH_TRUSTED_LOCAL_NETWORKS", "").split(",")
@@ -324,6 +327,7 @@ async def lifespan(app: FastAPI):
                 BACKUP_DIR,
                 source_media_dir=SOURCE_AUDIO_DIR,
                 previous_minutes_dir=PREVIOUS_MINUTES_DIR,
+                markdown_dir=OUTPUT_DIR,
                 offsite_backup_dir=OFFSITE_BACKUP_DIR,
                 backup_keep=DB_BACKUP_KEEP,
                 backup_min_interval_hours=BACKUP_MIN_INTERVAL_HOURS,
@@ -368,7 +372,7 @@ app = FastAPI(
 - 📤 **媒體檔上傳**：非同步處理，立即回傳任務 ID
 - 📊 **狀態查詢**：即時追蹤處理進度
 - 📚 **歷史記錄**：查詢與瀏覽過去的會議記錄
-- 🤖 **AI 引擎**：Google Gemini 3.1 Flash Lite（語音辨識 + 摘要一體化）
+- 🤖 **AI 引擎**：專用語音轉錄與文字摘要模型；免費候選模型接續與額度等待
 
 ### 支援格式
 `.mp3` `.wav` `.m4a` `.aac` `.ogg` `.flac` `.webm` `.mp4` `.mov` `.avi` `.mkv` `.mpeg` `.mpg` `.wmv`
@@ -769,8 +773,8 @@ async def readiness_check():
     summary="健康檢查",
     tags=["系統"]
 )
-async def health_check():
-    """確認服務是否正常運行"""
+def health_check():
+    """Run blocking filesystem checks in FastAPI's sync-route thread pool."""
     checks = run_startup_health_checks(
         temp_dir=TEMP_DIR,
         output_dir=OUTPUT_DIR,
@@ -811,7 +815,7 @@ async def health_check():
             "detail": f"schema={schema_version}；expected={SCHEMA_VERSION}",
         },
     ])
-    backup_health, offsite_health = runtime_backup_health(DB_PATH, BACKUP_DIR, SOURCE_AUDIO_DIR, PREVIOUS_MINUTES_DIR, OFFSITE_BACKUP_DIR, max_age_hours=BACKUP_MIN_INTERVAL_HOURS + 24)
+    backup_health, offsite_health = backup_health_monitor.snapshot(runtime_backup_health, (DB_PATH, BACKUP_DIR, SOURCE_AUDIO_DIR, PREVIOUS_MINUTES_DIR, OFFSITE_BACKUP_DIR), max_age_hours=BACKUP_MIN_INTERVAL_HOURS + 24)
     checks.append({
         "name": "database_backup",
         "status": "ok" if backup_health["ok"] else "error",
@@ -1569,10 +1573,10 @@ def _storage_metrics() -> StorageMetrics:
     summary="系統統計",
     tags=["系統"],
 )
-async def metrics():
-    """回傳本機維運用的任務與會議統計。"""
+def metrics():
+    """Build local stats in the thread pool, leaving cheap probes responsive."""
     by_status = count_jobs_by_status()
-    backup_health, offsite_health = runtime_backup_health(DB_PATH, BACKUP_DIR, SOURCE_AUDIO_DIR, PREVIOUS_MINUTES_DIR, OFFSITE_BACKUP_DIR, max_age_hours=BACKUP_MIN_INTERVAL_HOURS + 24)
+    backup_health, offsite_health = backup_health_monitor.snapshot(runtime_backup_health, (DB_PATH, BACKUP_DIR, SOURCE_AUDIO_DIR, PREVIOUS_MINUTES_DIR, OFFSITE_BACKUP_DIR), max_age_hours=BACKUP_MIN_INTERVAL_HOURS + 24)
     return MetricsResponse(
         generated_at=datetime.now(),
         jobs=JobMetrics(
@@ -3069,6 +3073,8 @@ async def get_meeting_detail(meeting_id: int):
         "quality_report": quality_report or record.get("quality_report"),
     })
     transcript = _extract_transcript_section_body(full_content) or ""
+    if transcript and quality_report:
+        quality_report["speaker_labels"] = transcript_speaker_labels(transcript)
     base_quality_fields = apply_quality_preview_fields(
         {
             **record,
@@ -3221,6 +3227,7 @@ async def get_meeting_detail(meeting_id: int):
         quality_review_rerunnable_segments=quality_fields.get("quality_review_rerunnable_segments") or [],
         created_at=record["created_at"],
         full_content=full_content,
+        minutes_view=build_minutes_view({**record, **quality_fields, "full_content": full_content}),
         quality_report=quality_report or None,
         source_media_type=source_media_type,
         source_media_available=bool(source_path),
@@ -3737,7 +3744,7 @@ async def get_meeting_markdown(meeting_id: int):
     summary="下載 4-QA-005 V01 格式的 Word 檔",
     tags=["會議記錄"]
 )
-async def export_meeting_docx(meeting_id: int):
+async def export_meeting_docx(meeting_id: int, layout: str = Query("topics", pattern="^(topics|original)$")):
     """將會議記錄填入 4-QA-005 V01 會議紀錄.docx 並下載"""
     record = get_meeting(meeting_id)
     if not record:
@@ -3748,10 +3755,12 @@ async def export_meeting_docx(meeting_id: int):
 
     safe_title = record["title"].replace("/", "_").replace("\\", "_")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_filename = f"4-QA-005_V01_{safe_title}_{timestamp}.docx"
+    output_filename = f"4-QA-005_V01_{safe_title}_{layout}_{timestamp}.docx"
     output_filepath = output_dir / output_filename
 
-    success = export_meeting_to_docx(record, str(output_filepath))
+    if layout == "topics":
+        record = apply_quality_preview_fields(record, quality_report=record.get("quality_report"))
+    success = export_meeting_to_docx(record, str(output_filepath), layout=layout)
     if not success:
         raise HTTPException(status_code=500, detail="匯出 Word 檔失敗，請確認範本是否存在。")
 

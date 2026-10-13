@@ -31,9 +31,14 @@ from backend.confirmation_schema import (
 )
 from backend.security_policy import normalize_role
 from backend.schema_migrations import apply_schema_migrations
+from backend.model_availability import is_quota_error, quota_wait_until, daily_quota
 from backend.retry_policy import (
     effective_job_max_attempts as _effective_job_max_attempts,
+    is_daily_quota_error as _is_daily_quota_error,
+    is_transcription_budget_error as _is_transcription_budget_error,
+    is_transcription_recovery_no_progress_error as _is_transcription_recovery_no_progress_error,
     is_transient_error as _is_transient_error,
+    next_pacific_daily_reset_utc as _next_pacific_daily_reset_utc,
     transient_retry_delay_seconds as _transient_retry_delay_seconds,
 )
 
@@ -1968,6 +1973,9 @@ def update_job_status(
         ).fetchone()
         if previous is None:
             raise KeyError(f"找不到任務：{job_id}")
+        if status == "processing":
+            progress_current = previous["progress_current"] if progress_current is None else progress_current
+            progress_total = previous["progress_total"] if progress_total is None else progress_total
         same_terminal_state = (
             status in {"done", "failed", "cancelled"}
             and str(previous["status"] or "") == status
@@ -2505,6 +2513,79 @@ def retry_or_fail_job(job_id: str, error_detail: str) -> str:
             return "cancelled"
 
         attempts = int(row["attempts"] or 0)
+        if _is_transcription_recovery_no_progress_error(error_detail):
+            review_message = (
+                "❌ 補救轉錄連續未取得可用語句，已停止自動重試；"
+                "保留來源檔與已完成進度，需人工核聽。"
+            )
+            conn.execute(
+                """UPDATE jobs
+                      SET status='failed', message=?, error_detail=?,
+                          completed_at=?, updated_at=?, worker_id=NULL,
+                          worker_generation=NULL, heartbeat_at=NULL,
+                          lease_expires_at=NULL
+                    WHERE job_id=?""",
+                (review_message, error_detail, now, now, job_id),
+            )
+            _record_job_event(conn, job_id, "manual_review_required", review_message, error_detail)
+            return "failed"
+        daily_exhausted = _is_daily_quota_error(error_detail) or daily_quota(error_detail)
+        quota_retry_at = quota_wait_until(error_detail)
+        quota_exhausted = quota_retry_at is not None or is_quota_error(error_detail)
+        budget_exhausted = _is_transcription_budget_error(error_detail)
+        if quota_exhausted or budget_exhausted:
+            # A daily wait is not a failed short retry.  Preserve validated
+            # segments and give the next processing claim its attempt back.
+            event_type = "model_quota_deferred" if quota_exhausted else "transcription_budget_deferred"
+            maximum_deferrals = float("inf") if quota_exhausted else 1
+            last_manual_requeue = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM job_events "
+                "WHERE job_id=? AND event_type='requeued'",
+                (job_id,),
+            ).fetchone()[0]
+            previous_deferrals = conn.execute(
+                "SELECT COUNT(*) FROM job_events WHERE job_id=? "
+                "AND event_type=? AND id>?",
+                (job_id, event_type, last_manual_requeue),
+            ).fetchone()[0]
+            if previous_deferrals < maximum_deferrals:
+                retry_timestamp = quota_retry_at or (
+                    _next_pacific_daily_reset_utc().timestamp() if daily_exhausted or budget_exhausted
+                    else (datetime.now() + timedelta(seconds=65)).timestamp()
+                )
+                retry_at = datetime.fromtimestamp(retry_timestamp).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                reason = "等待可用模型額度恢復" if quota_exhausted else "自動轉錄補救請求已達安全上限"
+                retry_message = f"{reason}；已保留可用進度，預計 {retry_at} 後續跑。"
+                conn.execute(
+                    """UPDATE jobs
+                          SET status='pending', message=?, error_detail=?,
+                              attempts=?, queued_at=?, started_at=NULL,
+                              completed_at=NULL, updated_at=?, worker_id=NULL,
+                              worker_generation=NULL, heartbeat_at=NULL,
+                              lease_expires_at=NULL
+                        WHERE job_id=?""",
+                    (retry_message, error_detail, max(0, attempts - 1), retry_at, now, job_id),
+                )
+                _record_job_event(conn, job_id, event_type, retry_message, error_detail)
+                return "pending"
+
+            review_message = (
+                "❌ 轉錄補救請求再次達安全上限；保留來源檔與進度，需人工複核。"
+            )
+            conn.execute(
+                """UPDATE jobs
+                      SET status='failed', message=?, error_detail=?,
+                          completed_at=?, updated_at=?, worker_id=NULL,
+                          worker_generation=NULL, heartbeat_at=NULL,
+                          lease_expires_at=NULL
+                    WHERE job_id=?""",
+                (review_message, error_detail, now, now, job_id),
+            )
+            _record_job_event(conn, job_id, "manual_review_required", review_message, error_detail)
+            return "failed"
+
         max_attempts = _effective_job_max_attempts(
             error_detail,
             int(row["max_attempts"] or 1),

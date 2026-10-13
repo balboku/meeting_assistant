@@ -16,6 +16,10 @@ TRANSCRIPT_SPEECH_DENSITY_MAX_CHARS_PER_ACTIVE_SECOND = min(
     50.0,
     max(5.0, float(os.getenv("TRANSCRIPT_SPEECH_DENSITY_MAX_CHARS_PER_ACTIVE_SECOND", "8"))),
 )
+TRANSCRIPT_SPEECH_DENSITY_MAX_WORDS_PER_ACTIVE_SECOND = min(
+    20.0,
+    max(3.0, float(os.getenv("TRANSCRIPT_SPEECH_DENSITY_MAX_WORDS_PER_ACTIVE_SECOND", "8"))),
+)
 TRANSCRIPT_SPEECH_DENSITY_EXCESS_MIN_CHARACTERS = max(
     8,
     int(os.getenv("TRANSCRIPT_SPEECH_DENSITY_EXCESS_MIN_CHARACTERS", "8")),
@@ -42,12 +46,29 @@ _TIMED_TURN_PATTERN = re.compile(
 )
 
 
-def _spoken_character_count(transcript: str) -> int:
+def _spoken_text(transcript: str) -> str:
     text = _TIMESTAMP_PATTERN.sub("", transcript or "")
     text = re.sub(r"\*{0,2}\[[^\]]+\]\*{0,2}\s*[：:]", "", text)
     for marker in _UNCERTAINTY_MARKERS:
         text = text.replace(marker, "")
-    return len(re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]+", "", text))
+    return text
+
+
+def _spoken_character_count(transcript: str) -> int:
+    return len(re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]+", "", _spoken_text(transcript)))
+
+
+def _spoken_density_counts(transcript: str) -> tuple[int, int]:
+    """Count CJK/digits as characters, but alphabetic speech as whole words.
+
+    Latin letters are not comparable to Chinese characters. A normal English
+    presentation previously exceeded the Chinese character-rate limit and was
+    repeatedly retranscribed, then replaced by synthetic uncertainty markers.
+    """
+    text = _spoken_text(transcript)
+    characters = len(re.findall(r"[0-9\u3400-\u9fff]", text))
+    words = len(re.findall(r"[A-Za-z\u00c0-\u02af]+(?:['’][A-Za-z\u00c0-\u02af]+)*", text))
+    return characters, words
 
 
 def transcript_is_uncertainty_only(transcript: str) -> bool:
@@ -200,10 +221,22 @@ def speech_backed_transcript_excess_density_quality_issues(
     if spoken_characters < TRANSCRIPT_SPEECH_DENSITY_EXCESS_MIN_CHARACTERS:
         return []
 
-    rate = spoken_characters / max(1.0, active_seconds)
-    if rate <= TRANSCRIPT_SPEECH_DENSITY_MAX_CHARS_PER_ACTIVE_SECOND:
+    characters, words = _spoken_density_counts(transcript)
+    # Add the language-specific time requirements so mixed speech cannot use
+    # the full duration twice. These are conservative heuristics, not proof
+    # that the energy detector has recognized speech or understood its words.
+    minimum_seconds = (
+        characters / TRANSCRIPT_SPEECH_DENSITY_MAX_CHARS_PER_ACTIVE_SECOND
+        + words / TRANSCRIPT_SPEECH_DENSITY_MAX_WORDS_PER_ACTIVE_SECOND
+    )
+    if active_seconds > 0 and minimum_seconds <= max(1.0, active_seconds):
         return []
+    rate = spoken_characters / max(1.0, active_seconds)
+    detail = (
+        f"{characters} 個中文字／數字、{words} 個英文詞／{active_seconds:.0f} 秒音訊活動"
+        if words else
+        f"{spoken_characters} 字／{active_seconds:.0f} 秒有效語音，{rate:.1f} 字/秒"
+    )
     return [
-        f"{TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER}（{spoken_characters} 字／"
-        f"{active_seconds:.0f} 秒有效語音，{rate:.1f} 字/秒）"
+        f"{TRANSCRIPT_SPEECH_EXCESS_DENSITY_ISSUE_MARKER}（{detail}）"
     ]

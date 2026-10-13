@@ -74,6 +74,10 @@ jobs:
 
       - name: Frontend JavaScript syntax
         run: |
+          node --check static/dashboard-requests.js
+          node tests/dashboard_requests_test.js
+          node --check static/minutes-reader.js
+          node tests/minutes_reader_test.js
           node --check static/modal-accessibility.js
           node --check static/recording-recovery.js
           node --check static/previous_minutes.js

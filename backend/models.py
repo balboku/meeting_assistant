@@ -337,6 +337,7 @@ class MeetingRecord(BaseModel):
 class MeetingDetail(MeetingRecord):
     """會議記錄完整內容（用於單筆查詢）"""
     full_content: str = Field(..., description="完整 Markdown 會議記錄")
+    minutes_view: Optional[dict] = Field(None, description="唯讀議題式閱讀資料；不變更原稿或審查狀態")
     quality_report: Optional[dict] = Field(None, description="音訊與逐段品質報告")
     structured_summary: Optional[dict] = Field(None, description="摘要、決議與待辦的結構化資料")
     structured_items: list[dict[str, Any]] = Field(default_factory=list, description="可逐項審查的 D/R/A 索引")

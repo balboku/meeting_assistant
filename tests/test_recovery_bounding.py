@@ -9,9 +9,67 @@ from unittest import mock
 from pydub import AudioSegment
 
 from backend import tasks
+from backend.recovery_progress import RecoveryNoProgressError
 
 
 class RecoveryBoundingTests(unittest.TestCase):
+    def test_three_unclear_recovery_windows_stop_before_more_calls(self) -> None:
+        children = [(Path(f"child-{index}.wav"), index * 20, (index + 1) * 20)
+                    for index in range(4)]
+        unclear = "[00:00] **[發言者不明]**：[聽不清]"
+        with mock.patch.object(tasks, "_audio_has_insufficient_transcription_evidence", return_value=False), \
+             mock.patch.object(tasks, "_prepare_recovery_speech_focus_audio", return_value=(Path("segment.wav"), "original")), \
+             mock.patch.object(tasks, "_split_audio_to_subsegments", return_value=children), \
+             mock.patch.object(tasks, "_transcribe_segment", return_value=unclear) as transcribe, \
+             mock.patch.object(tasks, "_recovery_subsegment_cache_context", return_value={"model": "model"}), \
+             mock.patch.object(tasks, "_resolve_transcription_recovery_model", return_value=None), \
+             mock.patch.object(tasks, "_load_segment_transcript_cache", return_value=None), \
+             mock.patch.object(tasks, "_save_segment_transcript_cache") as save_cache, \
+             mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete"), \
+             mock.patch.object(tasks, "update_job_status"):
+            with self.assertRaises(RecoveryNoProgressError):
+                tasks._transcribe_segment_with_recovery(
+                    object(), Path("segment.wav"), 0, 1, "job", "model",
+                    offset_seconds=0, duration_seconds=80, is_last_segment=True,
+                    direct_recovery=True,
+                    recovery_cache_output_dir=Path("output"),
+                )
+        self.assertEqual(transcribe.call_count, 3)
+        save_cache.assert_not_called()
+
+    def test_real_recovery_text_resets_no_progress_counter(self) -> None:
+        children = [(Path(f"child-{index}.wav"), index * 20, (index + 1) * 20)
+                    for index in range(4)]
+        transcripts = iter([
+            "[00:00] **[發言者不明]**：[聽不清]",
+            "[00:00] **[發言者 A]**：確認這段內容。",
+            "[00:00] **[發言者不明]**：[聽不清]",
+            "[00:00] **[發言者不明]**：[聽不清]",
+        ])
+        with mock.patch.object(tasks, "_audio_has_insufficient_transcription_evidence", return_value=False), \
+             mock.patch.object(tasks, "_prepare_recovery_speech_focus_audio", return_value=(Path("segment.wav"), "original")), \
+             mock.patch.object(tasks, "_split_audio_to_subsegments", return_value=children), \
+             mock.patch.object(tasks, "_transcribe_segment", side_effect=lambda *_a, **_k: next(transcripts)) as transcribe, \
+             mock.patch.object(tasks, "_raise_if_segment_transcript_incomplete"), \
+             mock.patch.object(tasks, "update_job_status"):
+            result = tasks._transcribe_segment_with_recovery(
+                object(), Path("segment.wav"), 0, 1, "job", "model",
+                offset_seconds=0, duration_seconds=80, is_last_segment=True,
+                direct_recovery=True,
+            )
+        self.assertEqual(transcribe.call_count, 4)
+        self.assertIn("確認這段內容", result)
+
+    def test_unclear_recovery_cache_is_not_verified_when_audio_has_activity(self) -> None:
+        with mock.patch.object(tasks, "_audio_has_insufficient_transcription_evidence", return_value=False), \
+             mock.patch.object(tasks, "_audio_backed_transcript_quality_issues") as quality:
+            issues = tasks._recovery_subsegment_cached_audio_quality_issues(
+                Path("child.wav"), "[00:00] **[發言者不明]**：[聽不清]",
+                start_seconds=0, end_seconds=20,
+            )
+        self.assertTrue(issues)
+        quality.assert_not_called()
+
     def test_every_recursive_recovery_call_advances_depth(self) -> None:
         source = inspect.getsource(tasks._transcribe_segment_with_recovery)
         recursive_calls = source.count("return _transcribe_segment_with_recovery(")

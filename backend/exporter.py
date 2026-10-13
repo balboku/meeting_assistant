@@ -10,6 +10,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor, Twips
+from backend.minutes_view import topic_minutes_markdown
 
 logger = logging.getLogger("MeetingAssistant.Exporter")
 
@@ -30,7 +31,7 @@ def _template_path() -> Path:
     return Path(os.getenv("MEETING_DOCX_TEMPLATE_PATH", str(TEMPLATE_PATH)))
 
 
-def export_meeting_to_docx(meeting_record: dict, output_filepath: str) -> bool:
+def export_meeting_to_docx(meeting_record: dict, output_filepath: str, *, layout: str = "original") -> bool:
     """
     將會議記錄內容填入 4-QA-005 V01 會議紀錄.docx 範本，並儲存到 output_filepath。
     保留原本的格式，僅在特定的儲存格加入文字。
@@ -65,6 +66,8 @@ def export_meeting_to_docx(meeting_record: dict, output_filepath: str) -> bool:
         # 討論內容 (Row 5, Cell 0)
         if len(table.rows) > 5 and len(table.rows[5].cells) > 0:
             content = content_with_quality_review_note(meeting_record)
+            if layout == "topics":
+                content = topic_minutes_markdown({**meeting_record, "full_content": content})
             _set_cell_markdown(table.cell(5, 0), content)
 
         doc.save(output_filepath)

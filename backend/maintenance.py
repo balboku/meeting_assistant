@@ -28,6 +28,8 @@ _SNAPSHOT_VERIFICATION_CACHE: dict[
     dict[str, object],
 ] = {}
 _SNAPSHOT_VERIFICATION_CACHE_LOCK = threading.Lock()
+# Do not hold the cache lock while verifying: verification itself updates it.
+_SNAPSHOT_VERIFICATION_RUN_LOCK = threading.Lock()
 _RECORD_STATE_TABLES = (
     "app_meta",
     "jobs",
@@ -344,6 +346,7 @@ def create_record_snapshot(
     *,
     source_media_dir: Path | None = None,
     previous_minutes_dir: Path | None = None,
+    markdown_dir: Path | None = None,
     now: datetime | None = None,
     keep: int = 5,
 ) -> Path:
@@ -401,6 +404,12 @@ def create_record_snapshot(
         meeting_manifest: list[dict[str, object]] = []
         for row in meetings:
             output_path = Path(str(row["output_path"] or ""))
+            # Historical records may retain an absolute path from another host.
+            # Only fall back within the explicitly configured output directory.
+            if not output_path.is_file() and markdown_dir is not None and output_path.name:
+                relocated_output = Path(markdown_dir) / output_path.name
+                if relocated_output.is_file():
+                    output_path = relocated_output
             meeting_entry: dict[str, object] = {
                 "id": int(row["id"]),
                 "title": str(row["title"] or ""),
@@ -709,7 +718,14 @@ def _cached_record_snapshot_verification(snapshot_path: Path) -> dict[str, objec
         cached = _SNAPSHOT_VERIFICATION_CACHE.get(cache_key)
     if cached is not None:
         return dict(cached)
-    return verify_record_snapshot(path)
+    # Concurrent health/metrics callers share the cold verification rather than
+    # decompressing and hashing the same multi-GB archive at the same time.
+    with _SNAPSHOT_VERIFICATION_RUN_LOCK:
+        with _SNAPSHOT_VERIFICATION_CACHE_LOCK:
+            cached = _SNAPSHOT_VERIFICATION_CACHE.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+        return verify_record_snapshot(path)
 
 
 def restore_record_snapshot(snapshot_path: Path, target_dir: Path) -> dict[str, object]:
@@ -1286,6 +1302,7 @@ def run_startup_maintenance(
     backup_keep: int = 4,
     backup_min_interval_hours: int = 168,
     force_backup: bool = False,
+    markdown_dir: Path | None = None,
 ) -> dict[str, object]:
     """Run weekly changed-only backup policy, replication, and DB maintenance."""
     interval_hours = max(1, int(backup_min_interval_hours))
@@ -1339,6 +1356,7 @@ def run_startup_maintenance(
             backup_dir=backup_dir,
             source_media_dir=source_media_dir,
             previous_minutes_dir=previous_minutes_dir,
+            markdown_dir=markdown_dir,
             keep=backup_keep,
         )
     )

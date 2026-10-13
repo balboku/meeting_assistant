@@ -10,6 +10,7 @@ import re
 from typing import Any, Callable
 
 from google.genai import types
+from backend.job_checkpoints import checkpointed
 
 
 logger = logging.getLogger("MeetingAssistant.TranscriptTranslation")
@@ -155,6 +156,17 @@ def render_translation_section(turns: list[dict[str, str]], translations: dict[s
     return "\n".join(lines).rstrip() + "\n"
 
 
+@checkpointed
+def _validated_translation_batch(client, *, batch, primary_model, fallback_model, job_id, generate_text):
+    response, used_model = generate_text(
+        client, primary_model=primary_model, fallback_model=fallback_model,
+        contents=[build_translation_prompt(batch)],
+        config=types.GenerateContentConfig(temperature=0.0, top_p=0.8, max_output_tokens=16384),
+        job_id=job_id, stage="英文中譯對照",
+    )
+    return validate_translation_response(response.text or "", batch), used_model
+
+
 def append_chinese_translation(
     client, meeting_content: str, full_transcript: str, job_id: str,
     primary_model: str, fallback_model: str, *, enabled: bool,
@@ -178,13 +190,9 @@ def append_chinese_translation(
         check_active()
         update_status(job_id, "processing", f"🌐 正在產生英文中譯對照（第 {index + 1}/{len(batches)} 批，保留原文）...")
         try:
-            response, used_model = generate_text(
-                client, primary_model=primary_model, fallback_model=fallback_model,
-                contents=[build_translation_prompt(batch)],
-                config=types.GenerateContentConfig(temperature=0.0, top_p=0.8, max_output_tokens=16384),
-                job_id=job_id, stage="英文中譯對照",
-            )
-            translations.update(validate_translation_response(response.text or "", batch))
+            translated, used_model = _validated_translation_batch(client, batch=batch,
+                primary_model=primary_model, fallback_model=fallback_model, job_id=job_id, generate_text=generate_text)
+            translations.update(translated)
             models_used.append(used_model)
         except fatal_errors:
             raise
