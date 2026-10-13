@@ -294,6 +294,7 @@
       id: newSessionId(),
       title: String(metadata.title || '').trim() || `現場錄製_${new Date().toLocaleString('zh-TW').replace(/[/:]/g, '-')}`,
       customVocabulary: String(metadata.customVocabulary || '').trim(),
+      processingMode: metadata.processingMode === 'local' ? 'local' : 'cloud',
       mode: String(metadata.mode || 'audio'),
       profileId: String(metadata.profileId || 'audio_standard'),
       mimeType: String(metadata.mimeType || 'audio/webm'),
@@ -407,6 +408,7 @@
     const formData = new FormData();
     formData.append('file', file);
     formData.append('title', session.title || '中斷錄製');
+    formData.append('processing_mode', session.processingMode || 'cloud');
     if (session.customVocabulary) formData.append('custom_vocabulary', session.customVocabulary);
     if (session.profileId) formData.append('recording_profile', session.profileId);
     const warning = [

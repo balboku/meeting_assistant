@@ -25,6 +25,10 @@ temp/
 output/
 backups/
 logs/
+models/
+recordings/
+dist/
+build/
 *.log
 
 # OS/editor/tooling

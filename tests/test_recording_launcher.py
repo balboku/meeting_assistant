@@ -95,13 +95,14 @@ class RecordingLauncherTests(unittest.TestCase):
         self.assertIn(b"?bootstrap_token=bootstrap.", response.content)
         self.assertNotIn(b"api_key=", response.content)
 
-    def test_recording_ui_exposes_launcher_only_in_screen_options(self):
+    def test_recording_ui_offers_standard_desktop_capture_and_explicit_audio_check(self):
         html = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text(
             encoding="utf-8"
         )
         screen_options = html.split('id="rec-screen-options"', 1)[1].split("</div>", 1)[0]
-        self.assertIn("/downloads/windows-recording-launcher.cmd", screen_options)
-        self.assertIn("其他 Windows 電腦", screen_options)
+        self.assertIn("/static/knowledge.html#recording", screen_options)
+        self.assertIn("請確認分享音訊", screen_options)
+        self.assertNotIn("才會優先預設勾選", screen_options)
 
 
 if __name__ == "__main__":

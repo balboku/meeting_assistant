@@ -11,6 +11,7 @@
   <script src="/static/vendor/marked.min.js"></script>
   <script src="/static/vendor/purify.min.js"></script>
   <script defer src="/static/confirmation-queue.js"></script>
+  <script defer src="/static/recording-quality.js"></script>
   <script src="/static/recording-recovery.js"></script>
   <style>
     /* ── Reset & Base ── */
@@ -1761,6 +1762,7 @@
       <div class="badge">Powered by Gemini</div>
     </div>
     <div class="stats">
+      <a class="btn-primary" href="/static/knowledge.html">會議知識庫</a>
       <div class="stat">
         <div class="stat-num" id="total-count">–</div>
         <div class="stat-label">會議記錄</div>
@@ -2072,7 +2074,7 @@
           <input type="checkbox" id="rec-include-mic" checked />
           <span>同時錄麥克風，錄製中可關閉</span>
         </label>
-        <p class="rec-screen-audio-requirement" role="note"><strong>分享音訊為必要條件：</strong>其他 Windows 電腦請先<a href="/downloads/windows-recording-launcher.cmd" download>下載錄製專用 Chrome 啟動器</a>並由它開啟本系統，Chrome 分頁、視窗與整個螢幕才會優先預設勾選分享音訊；未取得聲音時不會開始錄製。</p>
+        <p class="rec-screen-audio-requirement" role="note"><strong>分享音訊為必要條件：</strong>選擇分頁、視窗或整個螢幕後，請確認分享音訊已開啟。也可使用<a href="/static/knowledge.html#recording">Windows 桌面錄音</a>直接收系統聲音。未取得音軌時不會開始錄製。</p>
       </div>
       <div class="rec-quality-box">
         <label class="form-label" for="rec-quality-profile">錄製品質</label>
@@ -6492,6 +6494,7 @@ async function startUpload() {
   if (customTitle) formData.append('title', customTitle);
   const customVocabulary = document.getElementById('custom-vocabulary').value.trim();
   if (customVocabulary) formData.append('custom_vocabulary', customVocabulary);
+  formData.append('processing_mode', MeetingQuality.mode());
   window.previousMinutesUpload?.appendTo(formData);
 
   try {
@@ -6597,6 +6600,7 @@ async function initializeDashboard() {
   setInterval(loadJobs, 10000);
   setInterval(loadMetrics, 10000);
   await initialLoads;
+  await window.MeetingQuality?.openCitation();
 }
 
 initializeDashboard().catch(err => console.error('初始化儀表板失敗', err));
@@ -6781,6 +6785,7 @@ function handleRecordingModeKeydown(event) {
 }
 
 function setRecordingConfigurationLocked(locked) {
+  window.MeetingQuality?.lock(locked);
   document.getElementById('tab-audio').disabled = locked;
   document.getElementById('tab-video').disabled = locked;
   document.getElementById('tab-screen').disabled = locked;
@@ -6910,6 +6915,7 @@ function startRecordingPreviewQualityMonitor() {
 }
 
 function releaseRecordingStreams() {
+  window.MeetingQuality?.stop();
   clearRecordingPreviewQualityMonitor(false);
   stopStreamTracks(recStream);
   recStream = null;
@@ -7133,6 +7139,7 @@ async function createRecordingStream() {
       const displayAudioTracks = displayStream.getAudioTracks();
       recScreenAudioCaptured = displayAudioTracks.length > 0;
       if (!recScreenAudioCaptured) throw new Error('未取得分頁／系統音訊，錄製尚未開始。');
+      await MeetingQuality.monitor(displayStream);
       const includeMic = Boolean(recIncludeMic?.checked);
       let micAudioTracks = [];
 
@@ -7222,7 +7229,7 @@ async function startRecording() {
       console.warn('瀏覽器不接受指定錄製位元率，改用瀏覽器預設值。', err);
       mediaRecorder = new MediaRecorder(recStream, mimeType ? { mimeType } : {});
     }
-    await RecordingRecovery.begin({ title: document.getElementById('rec-title').value, customVocabulary: document.getElementById('rec-vocabulary').value, mode: activeRecordingMode, profileId: activeRecordingProfileId, mimeType: mediaRecorder.mimeType }).catch(err => console.warn('Recording interruption protection is unavailable.', err));
+    await RecordingRecovery.begin({ title: document.getElementById('rec-title').value, customVocabulary: document.getElementById('rec-vocabulary').value, processingMode: MeetingQuality.mode(true), mode: activeRecordingMode, profileId: activeRecordingProfileId, mimeType: mediaRecorder.mimeType }).catch(err => console.warn('Recording interruption protection is unavailable.', err));
     mediaRecorder.ondataavailable = e => { if (e.data.size > 0) { recordedChunks.push(e.data); RecordingRecovery.captureChunk(e.data, recSeconds); } };
     mediaRecorder.onstop = onRecordingStopped;
     mediaRecorder.start(1000);  // 每秒收一次 chunk
@@ -7278,7 +7285,7 @@ async function onRecordingStopped() {
   const completedMode = activeRecordingMode || recMode;
   const completedProfileId = activeRecordingProfileId || getRecordingProfileId();
   const completedModeLabel = recordingModeLabel(completedMode);
-  const recordingWarning = recordingQualityWarningText(completedMode);
+  const recordingWarning = [recordingQualityWarningText(completedMode), MeetingQuality.warning()].filter(Boolean).join('；');
   // 決定副檔名
   const ext = (completedMode === 'video' || completedMode === 'screen') ? 'webm' : 'webm';
   const title = document.getElementById('rec-title').value.trim()
@@ -7327,6 +7334,7 @@ async function onRecordingStopped() {
   formData.append('title', title);
   if (customVocabulary) formData.append('custom_vocabulary', customVocabulary);
   formData.append('recording_profile', completedProfileId);
+  formData.append('processing_mode', MeetingQuality.mode(true));
   if (recordingWarning) formData.append('recording_warning', recordingWarning);
 
   try {

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>會議知識庫 · 會議助理</title>
+  <link rel="stylesheet" href="/static/knowledge.css"><script defer src="/static/knowledge.js"></script>
+</head>
+<body>
+<header><a href="/history">← 會議紀錄</a><span>AI 會議助理</span></header>
+<main>
+  <h1>會議知識庫</h1><p class="subtle">從會議原文找答案，讓修正成為下次辨識的參考。</p>
+  <nav aria-label="知識庫功能"><button data-page="ask" aria-current="page">跨會議查詢</button><button data-page="vocabulary">共用詞彙</button><button data-page="recording">收音與隱私</button></nav>
+  <div id="page-error" role="alert" hidden></div>
+  <section id="ask-page">
+    <form id="question-form">
+      <label for="question">想確認什麼？</label>
+      <textarea id="question" maxlength="500" rows="3" required minlength="2" placeholder="例如：Mercury 驗證進度與尚未完成的項目"></textarea>
+      <div class="options"><label><input id="approved-only" type="checkbox">只查已核准的紀錄</label><label><input id="use-cloud" type="checkbox">請 AI 挑選相關原文（使用雲端）</label></div>
+      <p id="cloud-note" class="subtle" hidden></p>
+      <details><summary>限定會議範圍</summary><p class="subtle">未選取時查詢全部會議。</p><div id="meeting-scope">正在載入會議…</div></details>
+      <button id="ask-button" class="primary">查找答案與來源</button>
+    </form>
+    <div id="answer-status" role="status" aria-live="polite">輸入議題或產品關鍵字，查找相關會議。</div>
+    <div id="statements"></div><div id="evidence"></div>
+  </section>
+  <section id="vocabulary-page" hidden>
+    <h2>修正一次，供後續會議使用</h2><p class="subtle">提出正確詞彙與常見誤聽，管理員核准後套用至新任務。既有逐字稿可在原會議編輯並保留版本。</p>
+    <form id="term-form">
+      <div class="columns"><div><label for="canonical">正確詞彙</label><input id="canonical" maxlength="80" required placeholder="例如：S-ring"></div><div><label for="aliases">常見誤聽（逗號分隔，可留白）</label><input id="aliases" maxlength="800" placeholder="例如：S rain"></div></div>
+      <label for="term-note">修正原因（備註）</label><input id="term-note" maxlength="1000" placeholder="例如：產品零件名稱">
+      <label for="term-meeting">來源會議（選填）</label><select id="term-meeting"><option value="">不指定</option></select>
+      <button id="propose-button" class="primary">提出詞彙修正</button>
+    </form>
+    <p id="term-status" role="status" aria-live="polite">正在載入詞彙…</p><button id="refresh-terms" type="button">重新整理詞彙</button>
+    <div id="terms"></div>
+  </section>
+  <section id="recording-page" hidden>
+    <h2>完整收錄線上發言</h2>
+    <p>Windows 桌面錄音可直接收錄喇叭／耳機播放的同仁聲音，並另外保存自己的麥克風。錄完再從會議系統上傳。</p>
+    <a class="button primary" href="/downloads/desktop-recorder">下載 Windows 桌面錄音</a>
+    <p class="subtle">啟動後選擇實際播放會議的裝置。請同仁說話，確認「系統音訊」音量表有反應。</p>
+    <details><summary>繼續使用瀏覽器錄製</summary><p>螢幕分享視窗由瀏覽器控制，網站無法強制勾選分享音訊。選擇分頁、視窗或螢幕後，請確認分享音訊；沒有音軌時系統會阻止開始，錄製期間會監看系統聲音。</p></details>
+    <h2>選擇資料處理方式</h2>
+    <p>一般會議沿用雲端轉錄與摘要；機密會議選擇「本地」，音訊與文字不傳送到模型供應商。本地模式提供逐字稿，決議與待辦需人工整理。</p>
+    <p id="local-capability" role="status">正在確認本地模型…</p>
+    <p class="subtle">發言人代號只在同一場會議內使用。聲音重疊或無法明確分辨時，保留待確認標記。</p>
+  </section>
+</main>
+<dialog id="review-dialog"><form method="dialog"><h2 id="review-title">核准共用詞彙</h2><p id="review-impact"></p><div class="options"><button value="cancel">取消</button><button id="review-confirm" class="primary" value="confirm">確認</button></div></form></dialog>
+</body></html>

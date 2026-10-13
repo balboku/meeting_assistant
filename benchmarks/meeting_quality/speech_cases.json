@@ -1,0 +1,3 @@
+[
+  {"name":"中英混合與跨片段匿名代號（演算法驗證）","reference":"speech_reference.json","prediction":"speech_prediction.json","terms":["Mercury","S-ring"],"maximum":{"mixed_token_error_rate":0,"chinese_cer":0,"english_wer":0,"number_sequence_error_rate":0,"der":0},"minimum":{"term_recall":1}}
+]

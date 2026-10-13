@@ -37,7 +37,16 @@ class JobCheckpoints:
         self.quota_resume = is_quota_error(error_detail) or quota_wait_until(error_detail) is not None
 
     def path(self, stage, arguments):
+        from backend.company_vocabulary import ACTIVE_VOCABULARY
+        from backend.local_speech import processing_profile
+        # Preserve verified ASR journals from previous releases. Speaker
+        # clustering happens after ASR; changing it must not spend ASR quota again.
+        if stage == "verified_segment" and not arguments.get("context", {}).get("dictionary_sha256"):
+            arguments = dict(arguments, context={k: v for k, v in arguments.get("context", {}).items()
+                                                if k != "dictionary_sha256"})
         identity = {"version": 1, "source": self.source_sha256, "stage": stage, "arguments": arguments}
+        if stage == "_generate_meeting_content_from_transcript":
+            identity.update(vocabulary=(ACTIVE_VOCABULARY.get() or {}).get("sha256"), speech=processing_profile())
         digest = hashlib.sha256(json.dumps(identity, sort_keys=True, default=str,
                                           ensure_ascii=False).encode()).hexdigest()
         return self.root / f"{digest}.json"

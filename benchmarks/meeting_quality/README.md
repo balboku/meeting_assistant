@@ -38,3 +38,15 @@
 - 禁用誤聽詞是否不存在，例如 `加斯達`, `IEC 6304`。
 
 這個工具適合在修改 prompt、模型或摘要格式後使用。它不能取代人工審查，但可以擋掉常見退步。
+
+## 語音文字與發言人評分
+
+```powershell
+.\.venv\Scripts\python.exe scripts/evaluate_speech.py benchmarks/meeting_quality/speech_cases.json
+```
+
+新增工具比較分開的 reference / prediction JSON，輸出中文 CER、英文 WER、混語 token error rate、術語召回率、數字序列錯誤率，以及包含重疊語音、零 collar 的 DER。匿名 A/B 會先做整場最佳配對，不因代號互換扣分；漏人、多人被合併或誤加人會扣分。門檻失敗會回傳非零結束碼。
+
+目前 `speech_reference.json` 明確標為 `synthetic_algorithm_fixture_not_audio_accuracy`，只檢查演算法，不能拿零分誤差當作實際辨識率。
+
+實測請另建不提交 Git 的資料集：至少中文、英文、混語、專業名詞、遠端收音、重疊發言各一段。人工聽寫原文及 speaker start/end（秒），填 `human_verified: true`、原錄音 `audio_sha256`；預測必須由待驗模型獨立產生。評分結果同時保存 reference / prediction SHA-256，才能比較同一資料與模型版本。不得用同一份 AI 文字同時當標準答案與預測。

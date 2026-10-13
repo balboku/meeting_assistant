@@ -43,6 +43,9 @@ _RECORD_STATE_TABLES = (
     "meeting_confirmation_tasks",
     "app_users",
     "audit_logs",
+    "company_vocabulary",
+    "vocabulary_events",
+    "private_sources",
 )
 
 

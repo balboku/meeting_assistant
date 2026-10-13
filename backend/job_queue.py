@@ -112,6 +112,7 @@ def enqueue_audio_job(
     recording_profile: Optional[str] = None,
     client_recording_warning: Optional[str] = None,
     custom_vocabulary: Optional[list[str]] = None,
+    processing_mode: str = "cloud",
     force_segment_indices: Optional[list[int]] = None,
     force_full_segment_indices: Optional[list[int]] = None,
     force_full_segment_ranges: Optional[list[dict[str, Any]]] = None,
@@ -126,6 +127,11 @@ def enqueue_audio_job(
     regeneration_context: Optional[dict[str, Any]] = None,
 ) -> None:
     """Persist an uploaded audio job for the local worker."""
+    from backend.company_vocabulary import snapshot, prompt_terms
+    from backend.processing_policy import source_mode
+    if audio_path.is_file():
+        processing_mode = source_mode(audio_path, processing_mode)
+    frozen_vocabulary = snapshot(local_only=processing_mode == "local")
     selected_summary_model = summary_model or SUMMARY_MODEL
     selected_summary_fallback_model = summary_fallback_model or SUMMARY_FALLBACK_MODEL
     selected_summary_verifier_model = summary_verifier_model or SUMMARY_VERIFIER_MODEL
@@ -142,7 +148,9 @@ def enqueue_audio_job(
             "summary_verifier_model": selected_summary_verifier_model,
             "recording_profile": recording_profile,
             "client_recording_warning": client_recording_warning,
-            "custom_vocabulary": list(custom_vocabulary or []),
+            "custom_vocabulary": prompt_terms(custom_vocabulary, frozen_vocabulary),
+            "vocabulary_snapshot": frozen_vocabulary,
+            "processing_mode": processing_mode,
             "meeting_title": meeting_title,
             "force_segment_indices": sorted(set(force_segment_indices or [])),
             "force_full_segment_indices": sorted(set(force_full_segment_indices or [])),

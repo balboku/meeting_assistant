@@ -1,0 +1,8 @@
+# Optional Windows CPython 3.14 CPU speech/desktop runtime.
+# Install after requirements.lock; no changes to cloud-only dependencies.
+sherpa-onnx==1.13.8 \
+    --hash=sha256:1ced230bdd02f4d50106ce5c41e5f9142b45248e67ca532c84439d0475932bb8
+sherpa-onnx-core==1.13.8 \
+    --hash=sha256:5579e80196d516e6dae23c8f629292ce3142ab8869925d32b94612fd86f93733
+soundcard==0.4.6 \
+    --hash=sha256:ab44b8c1033ac6ec49c5d618ce096dab9b60c7d7a427c92bef15856e5ebb3e09

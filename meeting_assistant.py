@@ -254,6 +254,10 @@ def upload_audio_file(client: genai.Client, audio_path: Path, mime_type: str) ->
     Raises:
         RuntimeError: 上傳失敗或處理逾時時
     """
+    from backend.processing_policy import require_cloud, source_mode
+    require_cloud()
+    if source_mode(audio_path) == "local":
+        raise PermissionError("此錄音已標記為本地處理，請使用 Web 機密轉錄流程。")
     file_size_mb = audio_path.stat().st_size / (1024 * 1024)
     logger.info(f"📤 開始上傳音檔（{file_size_mb:.2f} MB）...")
 
@@ -395,6 +399,8 @@ def generate_meeting_notes(
     Raises:
         RuntimeError: API 呼叫失敗或回傳內容異常時
     """
+    from backend.processing_policy import require_cloud
+    require_cloud()
     logger.info("🤖 正在呼叫 Gemini API 生成會議記錄...")
     logger.info(f"   使用模型：{GEMINI_MODEL}")
 

@@ -25,6 +25,7 @@ os.environ["MEETING_OFFSITE_BACKUP_DIR"] = ""
 # Never allow a developer's real credential to escape through a test double.
 os.environ["GEMINI_API_KEY"] = "unit-test-not-a-credential"
 os.environ["TRANSCRIPTION_MODEL"] = "gemini-3.1-flash-lite"
+os.environ["MEETING_DIARIZATION_ENABLED"] = "0"
 
 TEST_ATTACHMENT_SHA256 = (
     "ea80334363eed145dfeee51ebae7dc3f1cd7d0c7879f8bfd2070c061d3c33f56"

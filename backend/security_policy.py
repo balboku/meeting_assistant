@@ -7,6 +7,7 @@ from typing import Optional
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
     "admin": {
+        "vocabulary:manage",
         "meeting:read",
         "meeting:write",
         "meeting:delete",
@@ -58,6 +59,14 @@ def permission_for_request(method: str, path: str) -> Optional[str]:
     ):
         return None
 
+    if route == "/downloads/desktop-recorder":
+        return "meeting:read"
+    if route.startswith("/knowledge"):
+        if route.startswith("/knowledge/vocabulary") and verb == "PATCH":
+            return "vocabulary:manage"
+        if route == "/knowledge/vocabulary" and verb == "POST":
+            return "meeting:write"
+        return "meeting:read"
     if route.startswith("/admin/users"):
         return "user:manage"
     if route.startswith("/admin/audit-logs"):

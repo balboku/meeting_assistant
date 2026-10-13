@@ -95,6 +95,8 @@ def render_transcription(payload, *, segment_index=0, total_segments=1, audio_sc
 
 
 def generate_transcription(client, uploaded, *, segment_index=0, total_segments=1, audio_scope=""):
+    from backend.processing_policy import require_cloud
+    require_cloud()
     # REST is official and avoids dropping new transcription_config fields in
     # the pinned SDK's older Interactions schema. SDK still manages file upload.
     api_key = getattr(getattr(client, "_api_client", None), "api_key", None) or os.getenv("GEMINI_API_KEY")

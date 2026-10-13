@@ -280,6 +280,8 @@ class ModelContinuationTests(unittest.TestCase):
             # model shared cache when summary generation resumes after quota.
             split.return_value = [tasks.AudioSlice(audio, 0, 60)]
             enqueue_audio_job("single", audio, output, model=AUDIO_MODELS[1], force_full_meeting_rerun=True)
+            from backend.company_vocabulary import vocabulary_context
+            stack.enter_context(vocabulary_context(database.get_job("single")["payload"]["vocabulary_snapshot"]))
             context = tasks._segment_cache_context(audio, AUDIO_MODELS[1], 1, tasks.SEGMENT_MINUTES,
                                                    segment_bounds=[[0, 60]])
             token = ACTIVE_CHECKPOINTS.set(JobCheckpoints(output, "single", tasks._sha256_file(audio)))

@@ -41,15 +41,18 @@ RUNTIME_ARTIFACT_PATTERNS = (
 
 
 def _tracked_files() -> list[Path]:
+    arguments = ["git", "-c", "core.quotepath=false", "ls-files", "-z"]
+    if "--include-untracked" in sys.argv:
+        arguments.extend(["--cached", "--others", "--exclude-standard"])
     result = subprocess.run(
-        ["git", "ls-files"],
+        arguments,
         cwd=ROOT,
         check=True,
         capture_output=True,
         text=True,
         encoding="utf-8",
     )
-    return [ROOT / line for line in result.stdout.splitlines() if line.strip()]
+    return [ROOT / line for line in result.stdout.split("\0") if line.strip()]
 
 
 def _should_skip(path: Path) -> bool:

@@ -186,6 +186,8 @@ def generate_evidence_markdown(
     model: Optional[str] = None,
 ) -> str:
     """Ask Gemini to inspect the uploaded evidence and return appendable Markdown."""
+    from backend.processing_policy import require_cloud_for_meeting
+    require_cloud_for_meeting(meeting_record)
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("未設定 GEMINI_API_KEY，無法分析補充資料。")

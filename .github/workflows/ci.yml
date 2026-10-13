@@ -80,6 +80,8 @@ jobs:
           node tests/minutes_reader_test.js
           node --check static/modal-accessibility.js
           node --check static/recording-recovery.js
+          node --check static/recording-quality.js
+          node --check static/knowledge.js
           node --check static/previous_minutes.js
           node --check static/previous_minutes_rerun.js
 

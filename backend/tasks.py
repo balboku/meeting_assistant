@@ -52,6 +52,10 @@ from backend.model_routing import candidates as _model_candidates, cache_candida
 from backend.transcribe_adapter import MODEL as TRANSCRIBE_MODEL, generate_transcription
 from backend.job_checkpoints import ACTIVE_CHECKPOINTS, JobCheckpoints, checkpointed, quota_resume, shared_cache_allowed, load_verified_segment, save_verified_segment
 from backend.database import get_job
+from backend.company_vocabulary import ACTIVE_VOCABULARY, preserve_approved_terms
+from backend.processing_context import processing_context
+from backend.processing_policy import require_cloud, require_cloud_for_meeting
+from backend.local_speech import diarize_transcript, speech_report
 from backend.transcript_translation import append_chinese_translation
 from backend.transcript_diagnostics import transcript_turns as _transcript_turns, transcript_speaker_labels
 from backend.transcript_sections import (
@@ -781,6 +785,7 @@ def clean_hallucinated_loops(text: str) -> str:
     return text
 
 
+@preserve_approved_terms
 def _normalize_domain_terms(text: str) -> str:
     """Normalize common STT/LLM mistakes for Maxima medical-device meetings."""
     if not text:
@@ -1260,6 +1265,7 @@ def _generate_text_with_fallback(
     job_id: str,
     stage: str,
 ) -> tuple[Any, str]:
+    require_cloud()
     store = _model_quota_store(client)
     return generate_with_pool(
         _model_candidates(primary_model, fallback_model, audio=False, expanded=store is not None),
@@ -1294,6 +1300,7 @@ def _generate_transcript_with_transient_fallback(
     budget = ACTIVE_TRANSCRIPTION_BUDGET.get()
     store = _model_quota_store(client)
     def before_call():
+        require_cloud()
         _raise_if_cancelled(job_id)
         if budget is not None:
             budget.reserve(segment_index)
@@ -4243,6 +4250,7 @@ def _shared_segment_cache_file(
             or context.get("audio_preprocessing_version")
         ),
         "recovery_audio_profile": context.get("recovery_audio_profile") or "original",
+        "dictionary_sha256": context.get("dictionary_sha256"),
     }
     custom_vocabulary = normalize_custom_vocabulary(context.get("custom_vocabulary"))
     if custom_vocabulary:
@@ -4294,6 +4302,7 @@ def _segment_cache_context(
 
     return {
         "cache_version": SEGMENT_CACHE_VERSION,
+        "dictionary_sha256": (ACTIVE_VOCABULARY.get() or {}).get("sha256"),
         "source_audio_path": source_path,
         "source_audio_name": audio_path.name,
         "source_audio_size": stat.st_size,
@@ -4551,6 +4560,7 @@ def _segment_recovery_plan_context(
         return None
     return {
         "plan_version": SEGMENT_RECOVERY_PLAN_VERSION,
+        "dictionary_sha256": (ACTIVE_VOCABULARY.get() or {}).get("sha256"),
         "audio_preprocessing_profile": _audio_preprocessing_profile(),
         "source_audio_sha256": source_sha256,
         "model": str(model or "").strip(),
@@ -7315,6 +7325,7 @@ def _transcribe_segment(
         budget.ensure_available(seg_index)
 
     mime = SUPPORTED_MEDIA_FORMATS.get(seg_path.suffix.lower(), "audio/mpeg")
+    require_cloud()
     uploaded = client.files.upload(
         file=str(seg_path),
         config=types.UploadFileConfig(display_name=seg_path.name, mime_type=mime)
@@ -8053,6 +8064,7 @@ def _generate_meeting_content_from_transcript(
     high_quality: bool = False,
     return_structured: bool = False,
 ):
+    full_transcript = diarize_transcript(full_transcript)
     low_information_summary = _uncertainty_dominated_summary_payload(full_transcript)
     if low_information_summary:
         meeting_content = _prepend_transcript_quality_notice(_replace_transcript_section(_summary_json_to_markdown(low_information_summary), full_transcript), full_transcript)
@@ -8803,6 +8815,7 @@ def review_saved_meeting_transcript_semantics(
     record = get_meeting(meeting_id)
     if not record:
         raise RuntimeError(f"找不到會議記錄：ID={meeting_id}")
+    require_cloud_for_meeting(record)
     transcript = _extract_transcript_section_body(record.get("full_content") or "") or ""
     if not transcript.strip():
         raise RuntimeError("此會議紀錄缺少完整逐字稿，無法進行語意品質檢核。")
@@ -8915,6 +8928,7 @@ def review_saved_meeting_transcript_semantics(
     return semantic_review
 
 
+@processing_context
 def process_audio_task(
     job_id: str,
     audio_path: Path,
@@ -10772,6 +10786,7 @@ def process_audio_task(
             # A repair can rewrite D/R/A. Avoid persisting JSON that no longer
             # exactly represents the delivered Markdown.
             structured_summary = None
+        full_transcript = diarize_transcript(full_transcript)
         meeting_content = _finalize_meeting_content(meeting_content, full_transcript, job_id)
         meeting_content, translation_report = _append_transcript_chinese_translation(
             client, meeting_content, full_transcript, job_id,
@@ -10803,6 +10818,10 @@ def process_audio_task(
 
         quality_report = _build_quality_report(audio_report, segment_report, full_transcript)
         quality_report["transcript_translation"] = translation_report
+        quality_report["diarization"] = speech_report()
+        if speech_report().get("message"): quality_report["warnings"].append(speech_report()["message"])
+        quality_report["vocabulary_snapshot"] = ACTIVE_VOCABULARY.get()
+        quality_report["processing_policy"] = {"mode": "cloud"}
         _refresh_quality_report_summary_warnings(quality_report, meeting_content)
         quality_report["summary_quality_mode"] = "high" if high_quality_summary else "standard"
         if previous_minutes_context:

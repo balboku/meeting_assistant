@@ -383,6 +383,14 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 app.include_router(confirmation_router)
+from backend.knowledge_api import router as knowledge_router
+app.include_router(knowledge_router)
+from backend.desktop_download import router as desktop_router
+app.include_router(desktop_router)
+
+@app.exception_handler(PermissionError)
+async def outbound_policy_error(request: Request, exc: PermissionError):
+    return JSONResponse(status_code=403, content={"detail": str(exc)})
 app.include_router(recording_launcher_router)
 app.include_router(source_media_recovery_router)
 
@@ -1861,6 +1869,7 @@ async def upload_media(
     custom_vocabulary: Optional[str] = Form(default=None, description="本次會議專有詞彙，使用逗號或換行分隔"),
     recording_profile: Optional[str] = Form(default=None, description="瀏覽器錄音品質 profile"),
     recording_warning: Optional[str] = Form(default=None, description="瀏覽器錄製期間偵測到的非阻斷品質警示"),
+    processing_mode: str = Form(default="cloud", description="cloud 一般會議；local 機密本地轉錄"),
     content_length: Optional[int] = Header(default=None, alias="Content-Length"),
 ):
     """
@@ -1868,6 +1877,13 @@ async def upload_media(
 
     請使用 `GET /status/{job_id}` 輪詢結果。
     """
+    from backend.local_speech import capabilities
+    from backend.processing_policy import cloud_enabled
+    processing_mode = processing_mode if isinstance(processing_mode, str) else "cloud"
+    if processing_mode not in {"cloud", "local"}:
+        raise HTTPException(400, "請選擇一般或機密本地處理。")
+    if (processing_mode == "local" or not cloud_enabled()) and not capabilities()["local_transcription"]:
+        raise HTTPException(409, capabilities()["message"])
     # --- 驗證副檔名 ---
     if not file.filename:
         raise HTTPException(status_code=400, detail="未提供檔案名稱")
@@ -1986,6 +2002,7 @@ async def upload_media(
             recording_profile=selected_recording_profile,
             client_recording_warning=client_recording_warning,
             custom_vocabulary=custom_vocabulary_terms,
+            processing_mode=processing_mode,
             previous_minutes_path=(
                 Path(previous_minutes_context["stored_path"])
                 if previous_minutes_context
@@ -3443,6 +3460,8 @@ async def enqueue_meeting_transcript_semantic_review(meeting_id: int):
     record = get_meeting(meeting_id)
     if not record:
         raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
+    from backend.processing_policy import require_cloud_for_meeting
+    require_cloud_for_meeting(record)
     transcript = _extract_transcript_section_body(record.get("full_content") or "") or ""
     if not transcript.strip():
         raise HTTPException(status_code=409, detail="此會議紀錄缺少完整逐字稿，無法進行語意品質檢核。")
@@ -4094,6 +4113,11 @@ async def add_meeting_evidence(
     content_length: Optional[int] = Header(default=None, alias="Content-Length"),
 ):
     """分析補充資料，將判讀結果追加到指定會議 Markdown。"""
+    from backend.processing_policy import require_cloud_for_meeting
+    record = get_meeting(meeting_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"找不到會議記錄：ID={meeting_id}")
+    require_cloud_for_meeting(record)
     if not file.filename:
         raise HTTPException(status_code=400, detail="未提供檔案名稱")
 

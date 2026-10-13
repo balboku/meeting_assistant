@@ -312,6 +312,38 @@ class MaintenanceHardeningTests(unittest.TestCase):
             self.assertIsNotNone(initial)
             self.assertNotEqual(initial, after_restore)
 
+    def test_record_fingerprint_tracks_vocabulary_and_private_sources(self) -> None:
+        from backend import company_vocabulary as vocabulary
+        from backend.processing_policy import private_source
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            db_path = root / "meetings.db"
+            with mock.patch.object(database, "DB_PATH", db_path):
+                database.init_db()
+                initial = record_state_fingerprint(db_path, immutable=False)
+                term_id = vocabulary.propose("Mercury", ["Mecury"], "", "tester")
+                proposed = record_state_fingerprint(db_path, immutable=False)
+                self.assertNotEqual(initial, proposed)
+                with database.get_db() as conn:
+                    conn.execute("UPDATE company_vocabulary SET note='corrected' WHERE id=?", (term_id,))
+                edited = record_state_fingerprint(db_path, immutable=False)
+                self.assertNotEqual(proposed, edited)
+                with database.get_db() as conn:
+                    vocabulary._event(conn, term_id, "tester", "checked", {})
+                audited = record_state_fingerprint(db_path, immutable=False)
+                self.assertNotEqual(edited, audited)
+                private_source("a" * 64, mark=True)
+                private = record_state_fingerprint(db_path, immutable=False)
+                self.assertNotEqual(audited, private)
+                private_source("b" * 64, mark=True)
+                second_private = record_state_fingerprint(db_path, immutable=False)
+                self.assertNotEqual(private, second_private)
+                backup = backup_database(db_path, root / "backups")
+                verification = verify_database_backup(backup)
+                self.assertTrue(verification["ok"])
+                self.assertEqual(second_private, verification["record_state_sha256"])
+
 
 if __name__ == "__main__":
     unittest.main()

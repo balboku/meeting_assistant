@@ -1,0 +1,21 @@
+會議助理桌面錄音（Windows 10/11 x64）
+
+解壓縮整個資料夾後，開啟 MeetingRecorder.exe。請保留 _internal 資料夾。
+不需要錄製專用 Chrome，也不需要另裝 Python。
+
+1. 選擇正在播放會議聲音的喇叭或耳機。
+2. 選擇自己的麥克風；不需要收錄自己時可取消勾選。
+3. 按開始錄音，請同仁說話，確認「系統音訊」音量表有反應。
+4. 按停止並儲存，開啟錄音資料夾。
+5. 在既有瀏覽器開啟會議系統，上傳 meeting.flac，選擇一般或機密處理。
+
+錄音存在 %LOCALAPPDATA%\MeetingAssistant\recordings。
+system.wav 與 microphone.wav 是原始獨立聲道，recording.json 記錄來源與開始時間差。
+程式中斷時保留已寫入檔案。若合併失敗，可直接上傳原始 WAV 檢查。
+本程式不會自動上傳錄音、啟動日曆或背景錄音。關閉視窗前先停止並儲存。
+更換耳機或會議音訊輸出後，請停止錄音、重開程式並重新選擇裝置。
+
+依賴授權：Python (PSF)、NumPy (BSD)、SoundCard (BSD-3-Clause)、
+SoundFile (BSD-3-Clause)、libsndfile (LGPL-2.1-or-later)、CFFI (MIT)。
+各套件授權保留於 _internal 對應 package metadata；libsndfile 使用可替換的動態 DLL。
+來源與建置指令：https://github.com/balboku/meeting_assistant
