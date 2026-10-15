@@ -4,10 +4,10 @@
 
 ## 總任務清單
 
-- ◇ DEV-007 [開發點] [驗證中] [P0] [待正式切換] 本地語音運算隔離與中斷恢復
+- ✓ DEV-007 [開發點] [完成] [P0] [已部署] 本地語音運算隔離與中斷恢復
   - 摘要：修復發言人分群佔用共用程序造成網站及 worker 心跳無回應。
   - 父任務：DEV-002、DEV-005。
-  - 下一步：候選及備份通過，部署後檢查前端；指定任務已自然完成，不再重跑。
+  - 下一步：可用性及資料保全已驗證；指定任務已自然完成，不再重跑。備份容量警示與內容品質複核分開處理。
   - 計入交付：否，不改變六項品質升級完成率。
 
 - ◇ DEV-001 [交付點] [驗證中] [P1] [待實機驗收] 收音完整性
@@ -124,3 +124,9 @@
 - 備份：正式副本 `backups/hotfix_20261015_speech/`；63 份既有會議完整快照、61 個來源、缺檔 0，加上指定任務來源及 12 個 checkpoint。`backup-verification.json` 已確認可恢復。
 - 目標任務在舊程序於 14:55:56 自行完成（attempts=1），新增會議 ID 64；本輪未重啟前已完成，不能歸因於 hotfix。完成後另做 SQLite 備份及新 Markdown／來源雜湊驗證（`completed-before-cutover.json`），不再重跑此任務。分群產生 30 個代號僅為模型輸出，不代表準確率驗收通過。
 - 切換前 `preservation-check.json`：原 63 份會議、其他任務、來源、原 Markdown、`.env` 及 12 個 checkpoint 全部未變；切換後還須核對剛完成的第 64 份紀錄及其任務完全不變。
+- 正式切換完成：產品提交 `aeff63a8297a05cc488c8bd40a0e1c3876b4d81f` 已 fast-forward 至正式分支；在無 active job 下停止已核對的舊 supervisor／server 並以既有 `start.py` 啟動。首次額外帶入 `-X utf8` 導致 Windows `netstat` 的 cp950 輸出解碼失敗；撤掉此旗標、沿用正常啟動方式後成功，未修改啟動器程式。服務 PID 6160 於 15:08:55 就緒，正常啟動階段約 76 秒。
+- 正式驗證：LAN 的 `/livez`、`/readyz`、`/health`、`/metrics`、首頁皆 HTTP 200；ready、worker leadership／lease 正常，載入提交與正式工作區一致且乾淨，身份驗證仍開啟。共 64 份會議、66 筆任務（64 done、1 既有 failed、1 cancelled），無 pending／processing；見 `backups/hotfix_20261015_speech/smoke.json`。
+- 切換後資料保全：原 63 份加上剛完成的第 64 份資料列、其任務與 Markdown、來源雜湊、`.env` 及 checkpoint 均與各自切換前基線一致；`preservation-check.json` 通過。本輪沒有呼叫任務重跑、內容修訂或詞庫寫入。
+- 正式 UI：重新載入使用者原本分頁，顯示 64 份清單，可開啟第 64 份詳情；1920×912 CSS viewport 無水平溢出，無可見載入錯誤，console error／warn 0。證據 `tmp/ui-qc-20261015/hotfix-restored.png` 保存在本機忽略目錄。沿用既存樣式，未新增 UI 改動；本輪技能要求的同頁複驗未用 API 成功替代。
+- 保留警示：health 仍為 degraded，唯一未通過項是 `backup_capacity`：本次保全快照後備份約 22,302,423,201 bytes（20.77 GiB），高於 20 GiB 警戒值；未刪任何備份、未提高門檻掩蓋警示。第 64 份第 4／9 段仍含「聽不清」，既存 1 筆 failed 任務未重跑；這些不屬本次網站可用性修復的成功範圍。
+- 收尾版本：正式程式維持已驗證的 `aeff63a`；後續僅在開發分支提交本驗證紀錄，不為文件變更再次中斷正式服務。未 push，遠端仍在本次基線。實機收音與語音／分群準確率仍待人工驗收，DEV-007 不計入六項交付完成率。
