@@ -4,11 +4,11 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
-import subprocess
-import tempfile
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
+
+from backend.speech_process import SpeechWorkerError, SpeechWorkerTimeout, run_speech, timeout_seconds
 
 ACTIVE_SPEECH = ContextVar("meeting_speech", default=None)
 
@@ -37,7 +37,8 @@ def processing_profile():
         if name in {"segmentation", "embedding"}:
             stat = path.stat() if path.is_file() else None
             files[name] = [str(path), stat.st_size, stat.st_mtime_ns] if stat else None
-    return {"version": 2, "enabled": os.getenv("MEETING_DIARIZATION_ENABLED", "1"),
+    return {"version": 3, "enabled": os.getenv("MEETING_DIARIZATION_ENABLED", "1"),
+            "timeout_seconds": timeout_seconds("diarize"),
             "threshold": os.getenv("SPEAKER_CLUSTER_THRESHOLD", "0.9"), "models": files}
 
 
@@ -50,38 +51,15 @@ def speech_context(path):
         ACTIVE_SPEECH.reset(token)
 
 
-@contextmanager
-def decoded_audio(path):
-    import soundfile as sf
-    with tempfile.TemporaryDirectory(prefix="meeting-speech-") as folder:
-        destination = Path(folder) / "audio.wav"
-        subprocess.run([os.getenv("FFMPEG_BINARY", "ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error",
-                        "-i", str(path), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(destination)],
-                       check=True, capture_output=True, timeout=1800,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        samples, rate = sf.read(destination, dtype="float32")
-        yield samples, rate
+def set_speech_check(check):
+    state = ACTIVE_SPEECH.get()
+    if state is not None:
+        state["check_cancelled"] = check
 
 
 def infer_segments(path):
-    import sherpa_onnx as sherpa
-    paths = model_paths()
-    threads = min(4, max(1, int(os.getenv("LOCAL_SPEECH_THREADS", "2"))))
-    config = sherpa.OfflineSpeakerDiarizationConfig(
-        segmentation=sherpa.OfflineSpeakerSegmentationModelConfig(
-            pyannote=sherpa.OfflineSpeakerSegmentationPyannoteModelConfig(model=str(paths["segmentation"])),
-            num_threads=threads, provider="cpu"),
-        embedding=sherpa.SpeakerEmbeddingExtractorConfig(model=str(paths["embedding"]), num_threads=threads, provider="cpu"),
-        clustering=sherpa.FastClusteringConfig(num_clusters=-1, threshold=float(os.getenv("SPEAKER_CLUSTER_THRESHOLD", "0.9"))),
-        min_duration_on=0.3, min_duration_off=0.5)
-    if not config.validate():
-        raise RuntimeError("本地發言人模型設定無效。")
-    engine = sherpa.OfflineSpeakerDiarization(config)
-    with decoded_audio(path) as (samples, rate):
-        if rate != engine.sample_rate:
-            raise ValueError("本地模型取樣率不符。")
-        segments = engine.process(samples).sort_by_start_time()
-        return [{"start": float(s.start), "end": float(s.end), "speaker": int(s.speaker)} for s in segments]
+    check = (ACTIVE_SPEECH.get() or {}).get("check_cancelled", lambda: None)
+    return run_speech("diarize", path, models=model_paths(), check_cancelled=check)
 
 
 TURN = re.compile(r"^(\[(\d{1,3}):([0-5]\d)\]\s*\*{0,2})\[[^\]\n]+\](\*{0,2}\s*[：:]\s*.*)$", re.MULTILINE)
@@ -140,8 +118,12 @@ def diarize_transcript(transcript):
                     "segments": state["segments"], "identity_scope": "this_meeting_only"}
                 if not state["segments"]:
                     state["report"].update(status="no_speech", message="分群未取得有效人聲區間，發言人保留不明，請人工核對。")
-            except Exception as exc:
-                state.update(segments=None, report={"status": "failed", "message": "本地分群未完成，請人工確認片段代號。", "error_type": type(exc).__name__})
+            except (SpeechWorkerError, OSError, ValueError) as exc:
+                status = "timed_out" if isinstance(exc, SpeechWorkerTimeout) else "failed"
+                state.update(segments=[], report={"status": status,
+                    "message": "發言人辨識逾時，已保留逐字稿並繼續整理；發言人待人工確認。" if status == "timed_out"
+                    else "發言人辨識未完成，已保留逐字稿並繼續整理；發言人待人工確認。",
+                    "error_type": type(exc).__name__, "timeout_seconds": timeout_seconds("diarize")})
     return align_speakers(transcript, state["segments"]) if state["segments"] is not None else transcript
 
 
@@ -150,30 +132,8 @@ def speech_report():
 
 
 def transcribe_locally(path, *, check_cancelled=lambda: None):
-    import sherpa_onnx as sherpa
-    from opencc import OpenCC
     if not capabilities()["local_transcription"]:
         raise RuntimeError(capabilities()["message"])
-    paths = model_paths()
-    engine = sherpa.OfflineRecognizer.from_whisper(encoder=str(paths["encoder"]), decoder=str(paths["decoder"]),
-        tokens=str(paths["tokens"]), language="", task="transcribe", num_threads=2, provider="cpu")
-    converter = OpenCC("s2t")
-    lines = []
-    with decoded_audio(path) as (samples, rate):
-        # Bound memory per decode; preserve original language. Conservative RMS
-        # silence skip avoids Whisper's silence hallucinations.
-        import numpy as np
-        for start in range(0, len(samples), 25 * rate):
-            check_cancelled()
-            chunk = samples[start:start + 25 * rate]
-            if not len(chunk) or float(np.sqrt(np.mean(chunk * chunk))) < 0.0005:
-                continue
-            stream = engine.create_stream()
-            stream.accept_waveform(rate, chunk)
-            engine.decode_stream(stream)
-            text = converter.convert(stream.result.text.strip()) or "[聽不清]"
-            seconds = start // rate
-            lines.append(f"[{seconds // 60:02d}:{seconds % 60:02d}] **[發言者不明]**：{text}")
-    if not lines:
-        raise ValueError("未偵測到可轉錄的聲音，請檢查錄音來源。")
-    return diarize_transcript("\n\n".join(lines))
+    set_speech_check(check_cancelled)
+    text = run_speech("transcribe", path, models=model_paths(), check_cancelled=check_cancelled)
+    return diarize_transcript(text)

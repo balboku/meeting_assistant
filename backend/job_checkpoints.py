@@ -31,10 +31,16 @@ def _write_checkpoint(path, value):
 
 
 class JobCheckpoints:
-    def __init__(self, output_dir, job_id, source_sha256, error_detail="", forced=False):
+    def __init__(self, output_dir, job_id, source_sha256, error_detail="", forced=False, resume_verified=False):
         self.root = Path(output_dir) / "job_checkpoints" / hashlib.sha256(job_id.encode()).hexdigest()
         self.source_sha256, self.forced = source_sha256, forced
         self.quota_resume = is_quota_error(error_detail) or quota_wait_until(error_detail) is not None
+        self.resume_verified = resume_verified and not forced
+
+    @classmethod
+    def for_job(cls, output_dir, job_id, source_sha256, job, forced=False):
+        return cls(output_dir, job_id, source_sha256, job.get("error_detail") or "", forced,
+                   resume_verified=int(job.get("attempts") or 0) > 1)
 
     def path(self, stage, arguments):
         from backend.company_vocabulary import ACTIVE_VOCABULARY
@@ -86,7 +92,7 @@ def shared_cache_allowed():
 
 def load_verified_segment(index, context):
     scope = ACTIVE_CHECKPOINTS.get()
-    if not scope or not scope.quota_resume:
+    if not scope or not (scope.quota_resume or scope.resume_verified):
         return None
     try:
         value = _read_checkpoint(scope.path("verified_segment", {"index": index, "context": context}))

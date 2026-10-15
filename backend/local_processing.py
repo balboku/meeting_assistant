@@ -48,6 +48,8 @@ def process_local(values):
               "recording": {"profile": values.get("recording_profile") or "local_upload", "source_audio_name": audio.name,
                             "source_audio_size_bytes": audio.stat().st_size, "source_audio_sha256": source_sha(audio),
                             "custom_vocabulary": values.get("custom_vocabulary") or []}}
+    if speech_report().get("message"):
+        report["warnings"].append(speech_report()["message"])
     output.mkdir(parents=True, exist_ok=True)
     path = output / f"local_{job_id}.md"
     temporary = path.with_suffix(f".{uuid.uuid4().hex}.tmp")

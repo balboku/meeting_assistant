@@ -55,7 +55,7 @@ from backend.database import get_job
 from backend.company_vocabulary import ACTIVE_VOCABULARY, preserve_approved_terms
 from backend.processing_context import processing_context
 from backend.processing_policy import require_cloud, require_cloud_for_meeting
-from backend.local_speech import diarize_transcript, speech_report
+from backend.local_speech import diarize_transcript, speech_report, set_speech_check
 from backend.transcript_translation import append_chinese_translation
 from backend.transcript_diagnostics import transcript_turns as _transcript_turns, transcript_speaker_labels
 from backend.transcript_sections import (
@@ -8996,9 +8996,9 @@ def process_audio_task(
     budget_token = ACTIVE_TRANSCRIPTION_BUDGET.set(TranscriptionRequestBudget(job_id))
     checkpoint_token = ACTIVE_CHECKPOINTS.set(None)
     try:
-        ACTIVE_CHECKPOINTS.set(JobCheckpoints(output_dir, job_id, _sha256_file(audio_path),
-            (get_job(job_id) or {}).get("error_detail") or "",
+        ACTIVE_CHECKPOINTS.set(JobCheckpoints.for_job(output_dir, job_id, _sha256_file(audio_path), get_job(job_id) or {},
             bool(forced_segments or force_full_meeting_rerun or force_all_segments_full_rerun or full_rerun_ranges)))
+        set_speech_check(lambda: (_raise_if_cancelled(job_id), _raise_if_job_lease_lost(job_id, worker_id, worker_generation)))
         if previous_minutes_path is not None:
             previous_minutes_context = read_previous_minutes_context(
                 previous_minutes_path,

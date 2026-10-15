@@ -1,10 +1,12 @@
 # 會議品質升級
 
-目前工作：使用者已授權六項品質升級 commit／push／部署，日曆自動化除外。開發副本分支 `feat/meeting-quality-upgrades`，正式分支 `feat/transcript-chinese-translation`，部署前基線 `43d4e38`。
+目前工作：2026-10-15 使用者同意修復／部署本地語音運算造成的前端阻塞（DEV-007）。開發副本分支 `feat/meeting-quality-upgrades`，正式分支 `feat/transcript-chinese-translation`，本次基線 `d6e301d`。日曆自動化除外；本輪不 push。
 
 - 工作與驗收契約：[dev_task.md](dev_task.md)
 - 六項程式實作完成，最終 706 項全套回歸通過（含備份內容變動偵測）。產品提交 `22e677a` 已推送；收音硬體及實際會議準確率仍待驗收，詳見工作契約的 QC 證據與限制。
 - 操作／安裝說明：[meeting-quality-upgrades.md](../docs/meeting-quality-upgrades.md)
 - 功能測試使用隔離資料庫與虛構資料；語音整合僅用公開模型樣本，沒有處理公司錄音。真實準確率需要人工標註，不以格式測試代替。
 - 本輪發版順序、停止條件、備份、回復與正式環境驗證，集中於 `dev_task.md` 的發版契約；未驗證項目不計為完成。正式資料不重跑、不重寫，原有權限與雲端設定不變。
-- 實際切換結果讀取正式主機 `backups/release_20261013_quality/` 下的 `backup-verification.json`、`preservation-check.json`、`smoke.json`，不得只用「已推送」推定「已部署」。下一個品質驗收是實機雙來源收音及真實會議人工標註；瀏覽器工具恢復後補正式站畫面複驗。
+- 實際切換結果讀取正式主機 `backups/release_20261013_quality/` 下的 `backup-verification.json`、`preservation-check.json`、`smoke.json`，不得只用「已推送」推定「已部署」。下一個品質驗收是實機雙來源收音及真實會議人工標註；正式站畫面複驗結果見下一項。
+- 2026-10-15 已補正式站只讀 UI 複驗：同一舊分頁重載後恢復 63 筆；知識庫 12 段來源、03:02 播放器定位、詞庫／隱私入口及手機／低高度錄製對話框通過。詳見 `dev_task.md` 最後一節與本機 `tmp/ui-qc-20261015/`。剩餘為真實雙來源收音及人工標註的辨識準確率；本輪僅更新驗收文件，沒有再次部署或重跑正式資料。
+- 同日後續故障：分群與網站共用 Python 程序，長推論阻塞心跳／HTTP；已用隔離合成案例補證 GIL 阻塞。DEV-007 將原生推論移到有逾時、取消回收的獨立程序；最終 716 tests 通過，正式切換證據集中 `dev_task.md` 的 DEV-007 與正式機 `backups/hotfix_20261015_speech/`。指定任務已在舊版自然完成為第 64 份，部署不再重跑；其內容及原 63 份均須保全。
