@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>教育訓練 · AI 會議助理</title>
+  <link rel="stylesheet" href="/static/training.css">
+  <script src="/static/vendor/marked.min.js"></script><script src="/static/vendor/purify.min.js"></script>
+  <script src="/static/recording-recovery.js"></script>
+  <script defer src="/static/training.js"></script>
+</head>
+<body>
+<header><a href="/history">← 會議紀錄</a><span>AI 會議助理</span><a href="/static/knowledge.html">會議知識庫</a></header>
+<main>
+  <h1>教育訓練</h1><p class="subtle">將分次錄製的課程收在一起，結課後整理完整筆記。</p>
+  <p id="page-error" role="alert" hidden></p>
+  <div class="workspace">
+    <section id="courses-panel" aria-label="課程清單">
+      <details id="create-section"><summary>建立課程</summary>
+        <form id="create-course">
+          <label for="course-title">課程名稱</label><input id="course-title" maxlength="200" required placeholder="例如：AI 企業流程實作">
+          <label for="course-mode">資料處理方式</label>
+          <select id="course-mode"><option value="cloud">一般：雲端轉錄與課程筆記</option><option value="local">機密：本地逐字稿，筆記人工整理</option></select>
+          <button class="primary" type="submit">建立課程</button>
+        </form>
+      </details>
+      <h2>我的課程</h2><p id="course-list-status" role="status">正在載入課程…</p><ul id="course-list"></ul>
+    </section>
+    <section id="course-detail" aria-label="課程內容" hidden>
+      <button id="back-courses" type="button">← 課程清單</button>
+      <h2 id="detail-title"></h2><p id="course-status" role="status" aria-live="polite"></p>
+      <div class="actions"><a id="record-part" class="button primary">開始本段錄製</a><button id="finish-course">結束課程並整理筆記</button><button id="refresh-course">更新狀態</button></div>
+      <p id="local-pending" role="status" hidden></p><div id="local-recordings"></div>
+      <details id="add-source"><summary>加入錄好的檔案或既有紀錄</summary>
+        <form id="upload-parts"><label for="part-files">課程影音（可選多個檔案）</label><input id="part-files" type="file" accept="audio/*,video/*,.mkv,.wmv" multiple required><button type="submit">上傳並加入課程</button></form>
+        <form id="attach-meeting"><label for="meeting-source">既有紀錄（複製逐字稿，不重新轉錄）</label><select id="meeting-source"><option value="">請選擇</option></select><button type="submit">加入既有紀錄</button></form>
+      </details>
+      <p id="part-status" role="status" aria-live="polite"></p>
+      <h3>課程段落</h3><ol id="part-list"></ol>
+      <section id="player-panel" hidden><h3 id="player-title"></h3><video id="course-player" controls preload="metadata"></video><p id="player-error" role="alert" hidden></p><button id="show-transcript">查看本段逐字稿</button><pre id="part-transcript" hidden></pre></section>
+      <section aria-label="整合課程筆記"><div class="note-header"><h3>整合課程筆記</h3><a id="download-notes" hidden>下載 Markdown</a></div><p id="notes-status" role="status"></p><div id="course-notes"></div></section>
+    </section>
+    <p id="choose-course" class="subtle">選擇課程或建立新課程，開始加入第一段。</p>
+  </div>
+</main>
+</body></html>

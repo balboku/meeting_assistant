@@ -1,6 +1,6 @@
 # 會議品質升級
 
-目前工作：2026-10-15 本地語音運算造成的前端阻塞（DEV-007）已修復／部署，產品提交 `aeff63a`。開發副本分支 `feat/meeting-quality-upgrades`，正式分支 `feat/transcript-chinese-translation`，本次基線 `d6e301d`。日曆自動化除外；本輪未 push。
+目前工作：2026-10-21 教育訓練模式第一版（DEV-008）本地完成：課程歸檔、休息分段、背景處理、課程筆記模板。738 項測試與桌面／低高度／手機核心流程通過；完整工程契約及 QC 見 [DEV-008 歸檔](archived/dev-008-training-v1.md)。真實硬體／實際模型品質及本機選檔工具限制保留。開發副本 `feat/meeting-quality-upgrades`；正式服務仍為 `aeff63a`，本輪未 push／部署，後續進共用批次發版 gate。
 
 - 工作與驗收契約：[dev_task.md](dev_task.md)
 - 六項程式實作完成，最終 706 項全套回歸通過（含備份內容變動偵測）。產品提交 `22e677a` 已推送；收音硬體及實際會議準確率仍待驗收，詳見工作契約的 QC 證據與限制。

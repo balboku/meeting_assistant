@@ -61,6 +61,10 @@ def permission_for_request(method: str, path: str) -> Optional[str]:
 
     if route == "/downloads/desktop-recorder":
         return "meeting:read"
+    if route.startswith("/training/"):
+        if verb in {"GET", "HEAD"}:
+            return "meeting:export" if route.endswith("/notes.md") else "meeting:read"
+        return "meeting:write"
     if route.startswith("/knowledge"):
         if route.startswith("/knowledge/vocabulary") and verb == "PATCH":
             return "vocabulary:manage"

@@ -113,6 +113,7 @@ def enqueue_audio_job(
     client_recording_warning: Optional[str] = None,
     custom_vocabulary: Optional[list[str]] = None,
     processing_mode: str = "cloud",
+    training_part_id: Optional[str] = None,
     force_segment_indices: Optional[list[int]] = None,
     force_full_segment_indices: Optional[list[int]] = None,
     force_full_segment_ranges: Optional[list[dict[str, Any]]] = None,
@@ -151,6 +152,7 @@ def enqueue_audio_job(
             "custom_vocabulary": prompt_terms(custom_vocabulary, frozen_vocabulary),
             "vocabulary_snapshot": frozen_vocabulary,
             "processing_mode": processing_mode,
+            "training_part_id": training_part_id,
             "meeting_title": meeting_title,
             "force_segment_indices": sorted(set(force_segment_indices or [])),
             "force_full_segment_indices": sorted(set(force_full_segment_indices or [])),
@@ -431,6 +433,11 @@ class JobQueueWorker:
                 self._process_audio_job(job)
                 return
 
+            if task_type == "training_notes":
+                from backend.training_processing import process_notes
+                process_notes(job)
+                return
+
             if task_type == "meeting_quality_recheck":
                 self._process_meeting_quality_recheck_job(job)
                 return
@@ -455,6 +462,9 @@ class JobQueueWorker:
 
     def _process_audio_job(self, job: dict[str, Any]) -> None:
         job_id = job["job_id"]
+        from backend.training_store import completed_output
+        if completed_output(job_id):
+            return
         payload = job.get("payload") or {}
         existing_meeting = get_meeting_by_job_id(job_id)
         if existing_meeting:

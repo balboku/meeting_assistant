@@ -146,6 +146,8 @@ from backend.auth import (
 from backend.confirmation_api import router as confirmation_router
 from backend.recording_launcher import router as recording_launcher_router
 from backend.source_media_recovery import router as source_media_recovery_router
+from backend.training_api import router as training_router
+from backend import training_store
 from backend.cleanup import (
     SOURCE_AUDIO_TEMP_PREFIXES,
     cleanup_stale_source_audio_temp_segments,
@@ -393,6 +395,7 @@ async def outbound_policy_error(request: Request, exc: PermissionError):
     return JSONResponse(status_code=403, content={"detail": str(exc)})
 app.include_router(recording_launcher_router)
 app.include_router(source_media_recovery_router)
+app.include_router(training_router)
 
 def _host_without_port(host: str) -> str:
     host = host.strip()
@@ -889,6 +892,7 @@ def _directory_file_stats(
     normalized_suffixes = {suffix.lower() for suffix in allowed_suffixes}
     source_refs = _source_audio_refs_by_name() if path == SOURCE_AUDIO_DIR else None
     active_refs = _active_source_audio_refs_by_name(path) if path == SOURCE_AUDIO_DIR else None
+    course_refs = training_store.source_references() if path == SOURCE_AUDIO_DIR else {}
     for entry in entries:
         if entry.name.startswith("."):
             continue
@@ -909,7 +913,7 @@ def _directory_file_stats(
         if active_ref is not None:
             active_count += 1
             active_bytes += int(stat.st_size)
-        if source_refs is not None and linked_ref is None and active_ref is None:
+        if source_refs is not None and linked_ref is None and active_ref is None and entry.name not in course_refs:
             unlinked_count += 1
             unlinked_bytes += int(stat.st_size)
         if largest_limit > 0:
@@ -924,6 +928,8 @@ def _directory_file_stats(
                     source_media_type=_storage_source_media_type(entry, linked_ref) if source_refs is not None else None,
                     linked_meeting_id=int(linked_ref["id"]) if linked_ref else None,
                     linked_meeting_title=str(linked_ref["title"]) if linked_ref else None,
+                    linked_course_id=course_refs.get(entry.name, {}).get("course_id"),
+                    linked_course_title=course_refs.get(entry.name, {}).get("title"),
                     active_job_id=str(active_ref["job_id"]) if active_ref else None,
                     active_job_status=str(active_ref["status"]) if active_ref else None,
                     active_job_count=int(active_ref.get("count", 0)) if active_ref else 0,
@@ -1095,6 +1101,7 @@ def _source_media_inventory(limit: int = 100, offset: int = 0) -> SourceMediaInv
     digest_names: dict[str, list[str]] = {}
     source_refs = _source_audio_refs_by_name()
     active_refs = _active_source_audio_refs_by_name(SOURCE_AUDIO_DIR)
+    course_refs = training_store.source_references()
     normalized_suffixes = {suffix.lower() for suffix in SUPPORTED_MEDIA_FORMATS}
 
     try:
@@ -1124,7 +1131,7 @@ def _source_media_inventory(limit: int = 100, offset: int = 0) -> SourceMediaInv
         if active_ref is not None:
             active_count += 1
             active_bytes += file_bytes
-        if linked_ref is None and active_ref is None:
+        if linked_ref is None and active_ref is None and entry.name not in course_refs:
             unlinked_count += 1
             unlinked_bytes += file_bytes
         source_sha256 = _source_media_sha256(entry)
@@ -1139,6 +1146,8 @@ def _source_media_inventory(limit: int = 100, offset: int = 0) -> SourceMediaInv
                 source_media_sha256=source_sha256,
                 linked_meeting_id=int(linked_ref["id"]) if linked_ref else None,
                 linked_meeting_title=str(linked_ref["title"]) if linked_ref else None,
+                linked_course_id=course_refs.get(entry.name, {}).get("course_id"),
+                linked_course_title=course_refs.get(entry.name, {}).get("title"),
                 active_job_id=str(active_ref["job_id"]) if active_ref else None,
                 active_job_status=str(active_ref["status"]) if active_ref else None,
                 active_job_count=int(active_ref.get("count", 0)) if active_ref else 0,
@@ -1459,6 +1468,8 @@ def _restore_source_media_archive(archive_id: str) -> SourceMediaRestoreResponse
 
 def _delete_unlinked_source_media(filename: str) -> SourceMediaDeleteResponse:
     source_path = _source_media_file_by_name(filename)
+    if course_ref := training_store.source_references().get(source_path.name):
+        raise HTTPException(409, f"原始檔已歸檔至課程「{course_ref['title']}」，不能當作未連結檔案封存。")
     linked_ref = _source_audio_refs_by_name().get(source_path.name)
     if linked_ref:
         raise HTTPException(
@@ -1494,6 +1505,7 @@ def _delete_unlinked_source_media(filename: str) -> SourceMediaDeleteResponse:
 
 def _unlinked_source_media_names() -> list[str]:
     source_refs = _source_audio_refs_by_name()
+    course_refs = training_store.source_references()
     active_refs = _active_source_audio_refs_by_name(SOURCE_AUDIO_DIR)
     normalized_suffixes = {suffix.lower() for suffix in SUPPORTED_MEDIA_FORMATS}
     names: list[str] = []
@@ -1515,7 +1527,7 @@ def _unlinked_source_media_names() -> list[str]:
                 continue
         except OSError:
             continue
-        if entry.name in source_refs or entry.name in active_refs:
+        if entry.name in source_refs or entry.name in active_refs or entry.name in course_refs:
             continue
         names.append(entry.name)
 
@@ -1870,6 +1882,7 @@ async def upload_media(
     recording_profile: Optional[str] = Form(default=None, description="瀏覽器錄音品質 profile"),
     recording_warning: Optional[str] = Form(default=None, description="瀏覽器錄製期間偵測到的非阻斷品質警示"),
     processing_mode: str = Form(default="cloud", description="cloud 一般會議；local 機密本地轉錄"),
+    training_part_id: Optional[str] = Form(default=None, description="教育訓練預約段落識別碼"),
     content_length: Optional[int] = Header(default=None, alias="Content-Length"),
 ):
     """
@@ -1880,6 +1893,15 @@ async def upload_media(
     from backend.local_speech import capabilities
     from backend.processing_policy import cloud_enabled
     processing_mode = processing_mode if isinstance(processing_mode, str) else "cloud"
+    training_part_id = training_part_id if isinstance(training_part_id, str) else None
+    training_part = None
+    if training_part_id:
+        try:
+            training_part = training_store.upload_target(training_part_id, processing_mode)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if existing := get_job(training_part["job_id"]):
+            return JobResponse(job_id=existing["job_id"], status=existing["status"], message="此段已接收，請查看課程狀態。")
     if processing_mode not in {"cloud", "local"}:
         raise HTTPException(400, "請選擇一般或機密本地處理。")
     if (processing_mode == "local" or not cloud_enabled()) and not capabilities()["local_transcription"]:
@@ -1907,7 +1929,7 @@ async def upload_media(
         )
 
     # --- 生成唯一任務 ID ---
-    job_id = str(uuid.uuid4())
+    job_id = training_part["job_id"] if training_part else str(uuid.uuid4())
 
     # --- 儲存至原始媒體檔保留資料夾 ---
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1992,6 +2014,14 @@ async def upload_media(
         selected_recording_profile = None
     client_recording_warning = normalize_client_recording_warning(recording_warning)
     custom_vocabulary_terms = normalize_custom_vocabulary(custom_vocabulary)
+    if training_part:
+        from backend.processing_policy import source_mode
+        try:
+            training_store.bind_upload(training_part_id, source_audio_path, upload_sha256,
+                mode=source_mode(source_audio_path, processing_mode), warning=client_recording_warning)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        title = f"{training_store.get_course(training_part['course_id'])['title']} · {training_part['title']}"
     try:
         enqueue_audio_job(
             job_id=job_id,
@@ -2003,6 +2033,7 @@ async def upload_media(
             client_recording_warning=client_recording_warning,
             custom_vocabulary=custom_vocabulary_terms,
             processing_mode=processing_mode,
+            training_part_id=training_part_id,
             previous_minutes_path=(
                 Path(previous_minutes_context["stored_path"])
                 if previous_minutes_context
@@ -2016,6 +2047,8 @@ async def upload_media(
             ),
         )
     except Exception as e:
+        if training_part and (existing := get_job(job_id)):
+            return JobResponse(job_id=job_id, status=existing["status"], message="此段已接收，請查看課程狀態。")
         if created_new_source_audio:
             logger.warning(
                 "任務排入佇列失敗，保留內容定址原始媒體供復原：%s",

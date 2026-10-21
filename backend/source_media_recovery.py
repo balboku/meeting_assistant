@@ -51,6 +51,9 @@ def _retained_source_path(filename: str) -> Path:
 
 
 def _source_is_linked(source_path: Path) -> bool:
+    from backend.training_store import source_references
+    if source_path.name in source_references():
+        raise HTTPException(409, "此來源已歸檔至課程，請從教育訓練頁重試該段，避免產生重複會議。")
     return any(
         Path(str(record.get("source_audio") or "")).name == source_path.name
         for record in list_meeting_source_audio_refs()

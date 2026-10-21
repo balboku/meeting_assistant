@@ -122,6 +122,8 @@ class StorageFileMetric(BaseModel):
     duplicate_source_media_names: list[str] = Field(default_factory=list)
     linked_meeting_id: Optional[int] = None
     linked_meeting_title: Optional[str] = None
+    linked_course_id: Optional[int] = None
+    linked_course_title: Optional[str] = None
     active_job_id: Optional[str] = None
     active_job_status: Optional[str] = None
     active_job_count: int = 0

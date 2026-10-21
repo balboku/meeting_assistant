@@ -14,6 +14,7 @@
     maxUploadBytes: 500 * 1024 * 1024,
     busySessionId: null,
     initialized: false,
+    uploadQueue: Promise.resolve(),
   };
 
   function requestResult(request) {
@@ -181,6 +182,7 @@
   }
 
   function statusLabel(session) {
+    if (session.status === 'uploading' && state.busySessionId === session.id) return '正在背景上傳';
     if (session.status === 'upload_failed') return '上傳失敗，可重啟';
     if (session.status === 'uploading') return '上傳可能中斷，可重啟';
     if (session.status === 'ready') return '等待重新送出';
@@ -295,6 +297,8 @@
       title: String(metadata.title || '').trim() || `現場錄製_${new Date().toLocaleString('zh-TW').replace(/[/:]/g, '-')}`,
       customVocabulary: String(metadata.customVocabulary || '').trim(),
       processingMode: metadata.processingMode === 'local' ? 'local' : 'cloud',
+      trainingCourseId: metadata.trainingCourseId || null,
+      trainingClientId: metadata.trainingClientId || null,
       mode: String(metadata.mode || 'audio'),
       profileId: String(metadata.profileId || 'audio_standard'),
       mimeType: String(metadata.mimeType || 'audio/webm'),
@@ -388,7 +392,7 @@
     }
   }
 
-  async function restart(sessionId) {
+  async function restart(sessionId, resumed = true) {
     const session = await getSession(sessionId);
     if (!session) throw new Error('找不到這筆中斷錄製。');
     const chunks = await getSessionChunks(sessionId);
@@ -413,11 +417,20 @@
     if (session.profileId) formData.append('recording_profile', session.profileId);
     const warning = [
       session.warning,
-      '此錄製曾在瀏覽器端中斷，已從本機中斷保護儲存區重新送出。',
+      resumed ? '此錄製曾在瀏覽器端中斷，已從本機中斷保護儲存區重新送出。' : '',
     ].filter(Boolean).join('\n');
     formData.append('recording_warning', warning);
 
     try {
+      if (session.trainingCourseId) {
+        const reservation = await fetch(`/training/courses/${encodeURIComponent(session.trainingCourseId)}/parts`, {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({client_id:session.trainingClientId || session.id,title:session.title}),
+        });
+        if (!reservation.ok) throw new Error(await apiErrorMessage(reservation));
+        const part = await reservation.json();
+        formData.append('training_part_id', part.id);
+      }
       const response = await fetch('/upload-media', { method: 'POST', body: formData });
       if (!response.ok) throw new Error(await apiErrorMessage(response));
       const payload = await response.json();
@@ -443,6 +456,16 @@
     if (!window.confirm(`刪除中斷錄製「${session.title}」？刪除後無法從此瀏覽器恢復。`)) return;
     await deleteSession(sessionId);
     await refresh();
+  }
+
+  async function download(sessionId) {
+    const session = await getSession(sessionId);
+    const chunks = await getSessionChunks(sessionId);
+    if (!session || !chunks.length) throw new Error('這一段沒有可下載的錄製資料。');
+    const blob = new Blob(chunks.map(item=>item.blob), {type:session.mimeType || chunks[0].blob.type});
+    const url = URL.createObjectURL(blob), link = document.createElement('a');
+    link.href=url;link.download=`course-recording-${sessionId}.${extensionForMimeType(blob.type)}`;
+    link.click();setTimeout(()=>URL.revokeObjectURL(url),30000);
   }
 
   async function handlePanelClick(event) {
@@ -506,5 +529,14 @@
     refresh,
     removeActive,
     restartServerMedia,
+    listSessions,
+    restart,
+    download,
+    detachActive: () => { const id=state.activeSessionId; state.activeSessionId=null; state.activeChunkIndex=0; return id; },
+    queueUpload: sessionId => {
+      const work = state.uploadQueue.catch(() => {}).then(() => restart(sessionId, false));
+      state.uploadQueue = work;
+      return work;
+    },
   };
 }());

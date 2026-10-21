@@ -10,6 +10,7 @@ from backend.company_vocabulary import ACTIVE_VOCABULARY, apply_approved_aliases
 from backend.local_speech import speech_report, transcribe_locally
 from backend.processing_policy import source_sha
 from backend.transcript_sections import _extract_transcript_section_body, _replace_transcript_section
+from backend.training_store import finish_transcript as finish_training_transcript
 
 
 class LocalProcessingStopped(RuntimeError):
@@ -36,6 +37,8 @@ def process_local(values):
         transcript = transcribe_locally(audio, check_cancelled=check)
     transcript = apply_approved_aliases(transcript)
     check()
+    if training_output := finish_training_transcript(job_id, transcript, audio, output, check_active=check):
+        return training_output
     title = str(values.get("meeting_title") or audio.stem).replace("\n", " ")
     content = f"# {title}\n\n> 本地轉錄草稿：請人工核對逐字稿、整理議題並確認決議與待辦。\n\n"
     content += "## 一、討論摘要 (Discussion Summary)\n待人工整理，請參照下方原始逐字稿。\n\n"

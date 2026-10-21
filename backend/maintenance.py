@@ -21,6 +21,7 @@ import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Mapping
+from backend.training_backup import snapshot_parts as snapshot_training_parts, restore_parts as restore_training_parts
 
 
 _SNAPSHOT_VERIFICATION_CACHE: dict[
@@ -46,6 +47,9 @@ _RECORD_STATE_TABLES = (
     "company_vocabulary",
     "vocabulary_events",
     "private_sources",
+    "training_courses",
+    "training_parts",
+    "training_note_cache",
 )
 
 
@@ -557,6 +561,7 @@ def create_record_snapshot(
                     "source_path": str(stored_path),
                 })
 
+        training_parts = snapshot_training_parts(backup_path, archive, source_media_dir, entries, missing, archived_source_media)
         manifest = {
             "format_version": 2,
             "created_at": (now or datetime.now()).isoformat(timespec="seconds"),
@@ -571,6 +576,7 @@ def create_record_snapshot(
             "source_media_policy": "已連結會議的原始媒體以 SHA-256 內容定址去重納入快照。",
             "previous_minutes_policy": "已連結會議的前次 DOCX 以記錄的 SHA-256 驗證後納入快照。",
             "meetings": meeting_manifest,
+            "training_parts": training_parts,
             "entries": entries,
             "missing": missing,
         }
@@ -882,6 +888,7 @@ def restore_record_snapshot(snapshot_path: Path, target_dir: Path) -> dict[str, 
                 (str(destination), evidence_id),
             )
 
+        restored_files += restore_training_parts(conn, manifest, target, runtime_output, runtime_source_media)
         integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
         foreign_key_violations = conn.execute(
             "PRAGMA foreign_key_check"

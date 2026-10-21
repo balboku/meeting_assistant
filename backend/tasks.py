@@ -45,6 +45,8 @@ from backend.database import (
     save_meeting
 )
 from backend.exporter import content_with_quality_review_note
+from backend.training_store import finish_transcript as finish_training_transcript
+from backend.training_context import ACTIVE_TRAINING
 from backend.audio_preparation import needs_initial_speech_focus
 from backend.generation_config import for_model as _generation_config_for_model
 from backend.model_availability import ModelsQuotaWaiting, generate_with_pool, is_quota_error, wait_for_quota_error
@@ -788,6 +790,8 @@ def clean_hallucinated_loops(text: str) -> str:
 @preserve_approved_terms
 def _normalize_domain_terms(text: str) -> str:
     """Normalize common STT/LLM mistakes for Maxima medical-device meetings."""
+    if ACTIVE_TRAINING.get():
+        return text
     if not text:
         return ""
     for source, target in TERMINOLOGY_REPLACEMENTS:
@@ -4280,6 +4284,8 @@ def _audio_preprocessing_profile() -> str:
         "speech_focus_target_lufs": RECOVERY_SPEECH_FOCUS_TARGET_LUFS,
         "speech_focus_true_peak_db": RECOVERY_SPEECH_FOCUS_TRUE_PEAK_DB,
     }
+    if ACTIVE_TRAINING.get():
+        settings["training_text_policy"] = 1
     digest = hashlib.sha256(
         json.dumps(settings, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:12]
@@ -10207,9 +10213,8 @@ def process_audio_task(
             _raise_if_delivery_blocked_by_segment_quality(segment_report)
             _raise_if_full_transcript_unsafe(full_transcript, job_id)
 
-            # ------------------------------------------------------------------
-            # 步驟 5：用完整逐字稿生成摘要/決議/待辦
-            # ------------------------------------------------------------------
+            if training_output := finish_training_transcript(job_id, full_transcript, audio_path, output_dir, audio_report, segment_report, lambda: (_raise_if_cancelled(job_id), _raise_if_job_lease_lost(job_id, worker_id, worker_generation))): return training_output
+            # 步驟 5：一般會議生成摘要/決議/待辦
             meeting_content, summary_model_used, structured_summary = _meeting_generation_values(
                 _generate_meeting_content_from_transcript(
                     client=client,
@@ -10756,6 +10761,7 @@ def process_audio_task(
             )
             _raise_if_delivery_blocked_by_segment_quality(segment_report)
             _raise_if_full_transcript_unsafe(full_transcript, job_id)
+            if training_output := finish_training_transcript(job_id, full_transcript, audio_path, output_dir, audio_report, segment_report, lambda: (_raise_if_cancelled(job_id), _raise_if_job_lease_lost(job_id, worker_id, worker_generation))): return training_output
             meeting_content, summary_model_used, structured_summary = _meeting_generation_values(
                 _generate_meeting_content_from_transcript(
                     client=client,

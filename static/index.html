@@ -12,6 +12,7 @@
   <script src="/static/vendor/purify.min.js"></script>
   <script defer src="/static/confirmation-queue.js"></script>
   <script defer src="/static/recording-quality.js"></script>
+  <script defer src="/static/training-recording.js"></script>
   <script src="/static/recording-recovery.js"></script>
   <style>
     /* ── Reset & Base ── */
@@ -1763,6 +1764,7 @@
     </div>
     <div class="stats">
       <a class="btn-primary" href="/static/knowledge.html">會議知識庫</a>
+      <a class="btn-primary" href="/static/training.html">教育訓練</a>
       <div class="stat">
         <div class="stat-num" id="total-count">–</div>
         <div class="stat-label">會議記錄</div>
@@ -2217,7 +2219,7 @@ function sourceStorageTitle(sourceFiles = 0, sourceBytes = 0, unlinkedFiles = 0,
     lines.push('最大檔案：');
     largest.forEach(file => {
       const activeJobCount = Number(file.active_job_count || 0);
-      const meeting = file.linked_meeting_title
+      const meeting = file.linked_course_title ? `課程 ${file.linked_course_title}` : file.linked_meeting_title
         ? `#${file.linked_meeting_id || '?'} ${file.linked_meeting_title}`
         : activeJobCount > 0
           ? `任務使用中 ${file.active_job_id || ''}`.trim()
@@ -2432,6 +2434,7 @@ async function restoreSourceMediaArchive(archiveId = '', name = '') {
 
 function renderSourceStorageFile(file) {
   const meetingId = Number(file.linked_meeting_id || 0);
+  const courseId = Number(file.linked_course_id || 0);
   const linked = meetingId > 0 && file.linked_meeting_title;
   const filename = String(file.name || '');
   const sourceUrl = `${API}/source-media/inventory/${encodeURIComponent(filename)}`;
@@ -2457,16 +2460,16 @@ function renderSourceStorageFile(file) {
   const duplicateBadge = duplicateCount > 1
     ? `<span class="source-storage-badge duplicate" title="相同內容檔案：${escapeHtml(duplicateNames.join('、'))}">內容重複 ${duplicateCount} 個</span>`
     : '';
-  const meetingBadge = linked
+  const meetingBadge = courseId ? `<span class="source-storage-badge">課程 ${escapeHtml(file.linked_course_title)}</span>` : linked
     ? `<span class="source-storage-badge">會議 #${meetingId} ${escapeHtml(file.linked_meeting_title)}</span>`
     : '<span class="source-storage-badge unlinked">未連結會議</span>';
-  const deleteAction = linked
+  const deleteAction = courseId ? `<a class="source-media-action" href="/static/training.html?course=${courseId}">開課程</a>` : linked
     ? `<button type="button" class="source-media-action" aria-label="開啟連結會議" onclick="openMeetingFromSourceStorage(${meetingId})">開會議</button>`
     : active
       ? `<button type="button" class="source-media-action" aria-label="原始檔任務使用中，完成前不可封存" title="任務 ${escapeHtml(activeJobId || activeJobStatus || '使用中')} 使用中，完成前不可封存" disabled>使用中</button>`
       : `<button type="button" class="source-media-action danger" aria-label="封存未連結原始檔" data-source-file="${escapeHtml(filename)}" onclick="deleteUnlinkedSourceMedia(this.dataset.sourceFile)">封存</button>`;
   const actions = [
-    !linked && !active ? `<button type="button" class="source-media-action" aria-label="重新處理未連結原始檔" data-source-file="${escapeHtml(filename)}" onclick="RecordingRecovery.restartServerMedia(this.dataset.sourceFile)">重新處理</button>` : '',
+    !linked && !active && !courseId ? `<button type="button" class="source-media-action" aria-label="重新處理未連結原始檔" data-source-file="${escapeHtml(filename)}" onclick="RecordingRecovery.restartServerMedia(this.dataset.sourceFile)">重新處理</button>` : '',
     `<button type="button" class="source-media-action" aria-label="預覽${mediaActionLabel}" data-source-url="${escapeHtml(sourceUrl)}" data-source-type="${escapeHtml(mediaType)}" data-source-file="${escapeHtml(filename)}" onclick="previewSourceMedia(this.dataset.sourceUrl, this.dataset.sourceType, this.dataset.sourceFile)">預覽</button>`,
     `<a class="source-media-action" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer" aria-label="在新分頁開啟${mediaActionLabel}">新分頁</a>`,
     `<a class="source-media-action" href="${escapeHtml(downloadUrl)}" download aria-label="下載${mediaActionLabel}">下載</a>`,
@@ -2523,6 +2526,7 @@ function sourceStorageSearchText(file) {
     file.name,
     file.archived_name,
     file.linked_meeting_title,
+    file.linked_course_title,
     file.linked_meeting_id,
     file.active_job_id,
     file.active_job_status,
@@ -2544,6 +2548,7 @@ function sourceStorageLiveFilterMatches(file, filter) {
   const meetingId = Number(file.linked_meeting_id || 0);
   const linked = meetingId > 0 && file.linked_meeting_title;
   const active = Number(file.active_job_count || 0) > 0 || Boolean(file.active_job_id);
+  if (Number(file.linked_course_id || 0) > 0) return filter === 'all' || filter === 'linked' || (filter === 'active' && active);
   if (filter === 'linked') return linked;
   if (filter === 'unlinked') return !linked && !active;
   if (filter === 'active') return active;
@@ -6651,6 +6656,7 @@ const recIncludeMic = document.getElementById('rec-include-mic');
 
 function openRecordModal() {
   resetRecorder(); RecordingRecovery.refresh();
+  window.TrainingRecording?.opened();
   openAccessibleModal(recModal, document.getElementById('rec-title'));
 }
 
@@ -7193,6 +7199,7 @@ async function createRecordingStream() {
 
 async function startRecording() {
   try {
+    await window.TrainingRecording?.prepare();
     recordedChunks = [];
     clearRecordingAudioQualityState();
     activeRecordingMode = recMode;
@@ -7229,7 +7236,7 @@ async function startRecording() {
       console.warn('瀏覽器不接受指定錄製位元率，改用瀏覽器預設值。', err);
       mediaRecorder = new MediaRecorder(recStream, mimeType ? { mimeType } : {});
     }
-    await RecordingRecovery.begin({ title: document.getElementById('rec-title').value, customVocabulary: document.getElementById('rec-vocabulary').value, processingMode: MeetingQuality.mode(true), mode: activeRecordingMode, profileId: activeRecordingProfileId, mimeType: mediaRecorder.mimeType }).catch(err => console.warn('Recording interruption protection is unavailable.', err));
+    await RecordingRecovery.begin({ title: document.getElementById('rec-title').value, customVocabulary: document.getElementById('rec-vocabulary').value, processingMode: MeetingQuality.mode(true), mode: activeRecordingMode, profileId: activeRecordingProfileId, mimeType: mediaRecorder.mimeType, ...window.TrainingRecording?.metadata() }).catch(err => console.warn('Recording interruption protection is unavailable.', err));
     mediaRecorder.ondataavailable = e => { if (e.data.size > 0) { recordedChunks.push(e.data); RecordingRecovery.captureChunk(e.data, recSeconds); } };
     mediaRecorder.onstop = onRecordingStopped;
     mediaRecorder.start(1000);  // 每秒收一次 chunk
@@ -7291,7 +7298,7 @@ async function onRecordingStopped() {
   const title = document.getElementById('rec-title').value.trim()
     || `現場錄製_${new Date().toLocaleString('zh-TW').replace(/[/:]/g, '-')}`;
   const customVocabulary = document.getElementById('rec-vocabulary').value.trim();
-  await RecordingRecovery.finish({ title, customVocabulary, seconds: recSeconds, warning: recordingWarning }).catch(err => console.warn('Unable to finalize recording recovery data.', err));
+  const savedRecording = await RecordingRecovery.finish({ title, customVocabulary, seconds: recSeconds, warning: recordingWarning }).catch(err => console.warn('Unable to finalize recording recovery data.', err));
 
   const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
   const file = new File([blob], `recording.${ext}`, { type: blob.type });
@@ -7307,6 +7314,7 @@ async function onRecordingStopped() {
     setRecordingProgressBusy(false);
     return;
   }
+  if (await window.TrainingRecording?.saved(savedRecording, blob)) return;
   if (file.size > runtimeConfig.max_upload_bytes) {
     setRecordingResult(`❌ ${completedModeLabel}檔案過大`, 'error');
     recProg.classList.add('show');

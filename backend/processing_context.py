@@ -7,6 +7,7 @@ from backend import database
 from backend.company_vocabulary import vocabulary_context
 from backend.local_speech import speech_context
 from backend.processing_policy import outbound_context, source_mode
+from backend.training_context import training_context
 
 
 def processing_context(function):
@@ -18,7 +19,7 @@ def processing_context(function):
         mode = payload.get("processing_mode", "cloud")
         if path.is_file():
             mode = source_mode(path, mode)
-        with vocabulary_context(payload.get("vocabulary_snapshot")), speech_context(path), outbound_context(mode == "local"):
+        with vocabulary_context(payload.get("vocabulary_snapshot")), speech_context(path), outbound_context(mode == "local"), training_context(payload.get("training_part_id")):
             if mode == "local":
                 from backend.local_processing import LocalProcessingStopped, process_local
                 try:
