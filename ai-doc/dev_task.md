@@ -4,10 +4,10 @@
 
 ## 總任務清單
 
-- ✓ DEV-008 [交付點] [本地完成] [P1] [待批次發版] 教育訓練模式第一版
+- ✓ DEV-008 [交付點] [完成] [P1] [已部署] 教育訓練模式第一版
   - 摘要：同一課程歸檔多段錄製，休息保存後可續錄，背景轉錄並產生課程筆記。
   - 來源 ID：2026-10-21 使用者明確同意四項第一版範圍。
-  - 下一步：核心 QC 已通過，進入後續共用批次發版 gate。
+  - 下一步：可從首頁教育訓練建立課程；實際收音／模型品質與選檔 UI 的待驗界線保留。
   - 證據：738 項測試、三種 viewport、合成錄製續錄及課程筆記來源定位。
   - 歸檔：ai-doc/archived/dev-008-training-v1.md。
   - 計入交付：是，獨立新增交付，不回算前六項品質升級完成率。
@@ -146,3 +146,18 @@
 - 完整工程／架構決策、QA 契約與 QC 證據已歸檔至 [DEV-008](archived/dev-008-training-v1.md)。
 - 使用方式見 [meeting-quality-upgrades.md](../docs/meeting-quality-upgrades.md#教育訓練模式第一版)。
 - 本輪僅開發副本；正式服務仍為 `aeff63a`。後續共用批次發版 gate 才處理正式切換，未 push／部署。
+
+## 教育訓練第一版發版（2026-10-21）
+
+- 使用者要求 push／部署，另明確同意正式 SQLite 新增 `training_courses`、`training_parts`、`training_note_cache`；不回填／重跑既有會議、不更改身份、雲端外送與免費模型政策。
+- 發版目標沿用 Windows 正式副本、8001、`start.py` 與原 `.env`。候選產品 `368ba29`，正式基線 `aeff63a`；兩條既有 feature branch 以正常 push／fast-forward 同步，不改 main。專用 deployment-release-gate 技能未安裝，沿用本文件既有備份、保全、切換與回復流程，屬既有規則相容延伸，非更換發版政策，無需新 ADR。
+- 證據重用：同一產品提交 738 tests 通過、三種 viewport 與兩段合成錄製／背景處理已驗證；本輪再查 architecture、security、依賴、JS syntax 與正式 runtime。無 lockfile／啟動器差異，不安裝新依賴。
+- 切換前：正式工作目錄乾淨、無 pending／processing，建立專屬 `backups/release_20261021_training/` SQLite online backup、完整記錄快照並驗證零缺檔，保存既有資料表、output 及 `.env` 指紋；不清除舊備份。正式健康基線為 degraded（備份過期、備份容量超過 20 GiB），不得當成新功能造成。
+- 切換：備份／保全通過後才停止已核對的正式 supervisor／server，fast-forward 候選，新增三表並確認既有資料不變，以原 Python 正常啟動（不額外加 `-X utf8`）。待 ready／worker lease／載入提交一致後，驗證 LAN 原清單、新課程頁及錄製入口；正式課程清單預期空，不建立合成課程或呼叫模型。
+- 停止／回復：active job、來源變動、備份缺檔、工作目錄髒、版本／權限／UI錯誤即停止切換或回復；保留正式資料、新表與產物，不還原 DB、不 hard reset。若新版不可用，停止核對程序後以乾淨工作目錄切到基線的獨立回復分支啟動，保留新增資料待後續評估。正式資料還原需另行確認。
+- 完成證據：主機專屬目錄保留 backup-verification、baseline、preservation-check、migration、smoke 收據；正式 UI 截圖留本地忽略目錄。未完成的硬體收音、實際模型品質及選檔 UI 驗收沿用，不以部署 smoke 取代。
+- 發版結果：22 項課程專項測試再驗通過（8.349 秒），architecture／security／雙副本 pip check／三個 JS syntax 通過；兩條遠端 feature branch 的產品均已至 `368ba29`。完整快照 67 份會議／69 筆任務／65 個來源、133 entries、缺檔 0；新增三表及舊表資料／設定指紋保全通過。正式服務實際載入 `368ba29`、工作區乾淨、來源指紋一致、auth 仍開啟；LAN ready／worker／課程 API 通過，leader generation=53，任務維持 67 done／1 既有 failed／1 cancelled，沒有重跑。
+- 資料保全：正式 smoke 後再次核對 13,433 個 output 檔案的大小與 SHA-256、既有持久資料表與 `.env`，零變更／缺漏，見 `preservation-check.json`。三個課程表為預期空表；未建立合成正式課程、未改寫或重跑既有會議、未呼叫雲端模型。
+- 正式 UI：重新載入使用者原本的 LAN 分頁，恢復 67 份會議、77 個原始檔與 69 筆任務，新教育訓練入口可見。課程頁 1920×842、scrollWidth=1920，預期空課程清單與建立入口清楚；一般／機密選項切換後恢復預設，未送出表單。兩頁可見錯誤 0、console error／warn 0，正式截圖 `tmp/training-release-qc-20261021/production-training.png`。沿用同一產品的三種 viewport／兩段錄製隔離證據，不宣稱完成正式硬體或模型品質驗收。
+- 工具限制：只讀 DOM 探測的 `checkVisibility` 在工具代理上不可用，已改用尺寸／hidden 檢查，並以實際 screenshot／AX／console 複核；非產品前端錯誤。啟動維護同步驗證、建立並複製多 GB 備份，從 18:29:58 到 18:36:36 才 ready；保留此停機時間事實，不以 push 時間冒充恢復時間。
+- 剩餘健康警示：只有既有 backup_capacity 超標（約 26.0 GB／20 GiB 門檻）；正常本機／異地備份已更新。未為清除警示刪除資料或更改容量政策。正式副本保留已驗證產品 `368ba29`，後續僅在開發分支提交發版紀錄，不因文件再次重啟。
