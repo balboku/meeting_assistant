@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create an immediate verified database and full record backup."""
+"""Create an immediate verified backup set (ZIP plus media_objects directory)."""
 
 from __future__ import annotations
 
@@ -88,7 +88,8 @@ def main() -> int:
         force_backup=True,
     )
     database_verification = verify_database_backup(Path(result["backup_path"]))
-    payload = {**result, "database_verification": database_verification}
+    payload = {**result, "database_verification": database_verification,
+               "backup_set_note": "v3 ZIP 與同目錄 media_objects/ 是一組完整備份；搬移須一併保存。"}
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     snapshot_ok = bool(
         result["snapshot_verification"].get("recoverability_complete")

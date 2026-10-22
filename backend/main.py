@@ -42,6 +42,7 @@ load_dotenv()
 
 from backend.exporter import content_with_quality_review_note, export_meeting_to_docx
 from backend.minutes_view import build_minutes_view
+from backend.backup_storage import backup_storage_metrics
 from backend.evidence import SUPPORTED_EVIDENCE_EXTENSIONS, analyze_and_append_evidence
 from backend.build_info import APP_VERSION, build_info_payload
 from backend.capacity import capacity_health_checks
@@ -1584,6 +1585,7 @@ def _storage_metrics() -> StorageMetrics:
         source_media_largest_files=source_largest_files,
         meeting_markdown_files=markdown_count,
         meeting_markdown_bytes=markdown_bytes,
+        backup_storage=backup_storage_metrics(BACKUP_DIR),
     )
 
 

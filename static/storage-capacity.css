@@ -1,0 +1,13 @@
+.backup-capacity-dialog { margin: auto; background: var(--bg-card, #24283b); color: var(--text, #c0caf5); border: 1px solid var(--border, #565f89); border-radius: 10px; padding: 24px; width: min(520px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; box-sizing: border-box; }
+.backup-capacity-dialog::backdrop { background: #0009; }
+.backup-capacity-dialog h2 { margin: 0 0 16px; font-size: 1.2rem; }
+.backup-capacity-dialog p { line-height: 1.6; margin: 12px 0; overflow-wrap: anywhere; }
+.backup-capacity-dialog dl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; margin: 20px 0; }
+.backup-capacity-dialog dd { margin: 0; font-variant-numeric: tabular-nums; }
+.backup-capacity-dialog button { display: block; margin: 16px 0 0 auto; min-height: 44px; padding: 8px 20px; color: inherit; background: var(--bg, #1a1b26); border: 1px solid var(--border, #565f89); border-radius: 6px; font: inherit; cursor: pointer; }
+.backup-capacity-dialog button:focus-visible { outline: 2px solid var(--blue, #7aa2f7); outline-offset: 3px; }
+@media (max-width: 640px) {
+  #ops-backup-storage-tile, #ops-source-storage-tile { min-height: 44px; align-items: center; }
+}
+.ops-dashboard { flex-wrap: wrap; overflow-x: visible; row-gap: 8px; }
+#ops-backup-storage-tile { background: transparent; color: inherit; border: 0; border-right: 1px solid var(--border); font: inherit; }

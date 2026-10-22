@@ -23,11 +23,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Mapping
 from backend.backup_policy import local_snapshot_keep
+from backend.snapshot_media import SnapshotArchive, file_digest, shared_objects, shared_signature, materialize_media, replicate_media, safe_member
 from backend.training_backup import snapshot_parts as snapshot_training_parts, restore_parts as restore_training_parts
 
 
 _SNAPSHOT_VERIFICATION_CACHE: dict[
-    tuple[str, int, int],
+    tuple[str, int, int, tuple],
     dict[str, object],
 ] = {}
 _SNAPSHOT_VERIFICATION_CACHE_LOCK = threading.Lock()
@@ -358,8 +359,9 @@ def create_record_snapshot(
     markdown_dir: Path | None = None,
     now: datetime | None = None,
     keep: int = 5,
+    shared_media: bool = True,
 ) -> Path:
-    """Bundle DB, Markdown, attachments, prior DOCX, and referenced media."""
+    """Snapshot records; v3 shares independent media copies per backup root."""
     backup_path = Path(backup_path)
     verification = verify_database_backup(backup_path)
     if not verification["ok"]:
@@ -367,6 +369,8 @@ def create_record_snapshot(
 
     timestamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
     snapshot_path = Path(backup_dir) / f"meeting_records_{timestamp}.zip"
+    if snapshot_path.exists():
+        snapshot_path = Path(backup_dir) / f"meeting_records_{timestamp}_{datetime.now():%f}.zip"
     entries: list[dict[str, object]] = []
     missing: list[dict[str, object]] = []
     archived_source_media: dict[str, str] = {}
@@ -395,9 +399,11 @@ def create_record_snapshot(
     finally:
         conn.close()
 
-    with zipfile.ZipFile(
+    with SnapshotArchive(
         snapshot_path,
-        mode="w",
+        shared_media=shared_media,
+        validator=verify_record_snapshot,
+        mode="x",
         compression=zipfile.ZIP_DEFLATED,
         compresslevel=6,
     ) as archive:
@@ -565,7 +571,8 @@ def create_record_snapshot(
 
         training_parts = snapshot_training_parts(backup_path, archive, source_media_dir, entries, missing, archived_source_media)
         manifest = {
-            "format_version": 2,
+            "format_version": 3 if shared_media else 2,
+            "shared_media": archive.media_objects,
             "created_at": (now or datetime.now()).isoformat(timespec="seconds"),
             "database_verification": verification,
             "record_state_sha256": record_state_fingerprint(backup_path),
@@ -587,7 +594,8 @@ def create_record_snapshot(
             json.dumps(manifest, ensure_ascii=False, indent=2),
         )
 
-    if not verify_record_snapshot(snapshot_path).get("recoverability_complete"):
+    _remember_record_snapshot_verification(snapshot_path, archive.verification)
+    if not archive.verification.get("recoverability_complete"):
         return snapshot_path  # A degraded replacement must not evict good history.
     snapshots = sorted(
         Path(backup_dir).glob("meeting_records_*.zip"),
@@ -614,13 +622,18 @@ def verify_record_snapshot(snapshot_path: Path) -> dict[str, object]:
                     "detail": f"ZIP CRC 失敗：{bad_member}",
                 }
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
-            if int(manifest.get("format_version") or 0) not in {1, 2}:
+            if int(manifest.get("format_version") or 0) not in {1, 2, 3}:
                 return {
                     "ok": False,
                     "path": str(path),
                     "detail": "不支援的快照格式版本",
                 }
             archive_names = set(archive.namelist())
+            for name in archive_names:
+                safe_member(name)
+            external = shared_objects(path, manifest)
+            if set(external) & archive_names:
+                raise ValueError("快照包含重複影音路徑")
             if "database/meetings.db" not in archive_names:
                 return {
                     "ok": False,
@@ -629,14 +642,21 @@ def verify_record_snapshot(snapshot_path: Path) -> dict[str, object]:
                 }
             for entry in manifest.get("entries") or []:
                 archive_path = str(entry.get("archive_path") or "")
-                if not archive_path or archive_path not in archive_names:
+                if not archive_path or (archive_path not in archive_names and archive_path not in external):
                     return {
                         "ok": False,
                         "path": str(path),
                         "detail": f"manifest 指向不存在的檔案：{archive_path}",
                     }
                 expected = str(entry.get("sha256") or "")
-                actual = hashlib.sha256(archive.read(archive_path)).hexdigest()
+                if archive_path in external:
+                    media = external[archive_path]
+                    if media.stat().st_size != entry.get("bytes"):
+                        raise ValueError(f"共用影音容量不一致：{archive_path}")
+                    actual = file_digest(media)
+                else:
+                    with archive.open(archive_path) as member:
+                        actual = hashlib.file_digest(member, "sha256").hexdigest()
                 if not expected or actual != expected:
                     return {
                         "ok": False,
@@ -647,7 +667,7 @@ def verify_record_snapshot(snapshot_path: Path) -> dict[str, object]:
                 embedded_db = Path(temp_dir) / "meetings.db"
                 embedded_db.write_bytes(archive.read("database/meetings.db"))
                 database_check = verify_database_backup(embedded_db)
-    except (OSError, KeyError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
+    except (OSError, KeyError, ValueError, TypeError, zipfile.BadZipFile) as exc:
         return {"ok": False, "path": str(path), "detail": str(exc)}
     missing_count = len(manifest.get("missing") or [])
     container_valid = bool(database_check["ok"])
@@ -684,6 +704,9 @@ def verify_record_snapshot(snapshot_path: Path) -> dict[str, object]:
         ),
         "meetings": database_check.get("meetings"),
         "jobs": database_check.get("jobs"),
+        "format_version": manifest.get("format_version"),
+        "shared_media_files": len(external),
+        "shared_media_bytes": sum(int(e["bytes"]) for e in (manifest.get("shared_media") or {}).values()),
         "record_state_sha256": manifest.get("record_state_sha256"),
         "source_media_inventory_sha256": manifest.get(
             "source_media_inventory_sha256"
@@ -704,8 +727,8 @@ def _remember_record_snapshot_verification(
     path = Path(snapshot_path)
     try:
         stat = path.stat()
-        cache_key = (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
-    except OSError:
+        cache_key = (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size), _snapshot_media_signature(path))
+    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile):
         return
     cached_result = dict(verification)
     cached_result["path"] = str(path)
@@ -720,12 +743,23 @@ def _remember_record_snapshot_verification(
             )
 
 
+def _snapshot_media_signature(path: Path) -> tuple:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+        return shared_signature(path, manifest)
+    except zipfile.BadZipFile:
+        # Actual verification rejects an invalid ZIP; no successful result is
+        # cached for it. Keep verification single-flight even for invalid input.
+        return ()
+
+
 def _cached_record_snapshot_verification(snapshot_path: Path) -> dict[str, object]:
     path = Path(snapshot_path)
     try:
         stat = path.stat()
-        cache_key = (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
-    except OSError:
+        cache_key = (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size), _snapshot_media_signature(path))
+    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile):
         return verify_record_snapshot(path)
     with _SNAPSHOT_VERIFICATION_CACHE_LOCK:
         cached = _SNAPSHOT_VERIFICATION_CACHE.get(cache_key)
@@ -763,6 +797,7 @@ def restore_record_snapshot(snapshot_path: Path, target_dir: Path) -> dict[str, 
         archive.extractall(target)
 
     manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
+    materialize_media(Path(snapshot_path), manifest, target)
     runtime_root = target / "runtime"
     runtime_output = runtime_root / "output"
     runtime_source_media = runtime_output / "source_audio"
@@ -950,6 +985,10 @@ def replicate_record_snapshot(
     )
     source_digest = _sha256_file(source)
     try:
+        with zipfile.ZipFile(source) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+        # Publish all independently verified objects before the referring ZIP.
+        replicate_media(source, manifest, destination)
         destination_matches = False
         if destination.is_file() and destination.stat().st_size == source.stat().st_size:
             try:
@@ -1323,7 +1362,7 @@ def run_startup_maintenance(
     interval_hours = max(1, int(backup_min_interval_hours))
     snapshot_keep = local_snapshot_keep(backup_keep)
     logging.getLogger("MeetingAssistant.Backup").info(
-        "備份保留：SQLite=%s；本機完整 ZIP=%s；異地完整 ZIP=%s",
+        "備份保留：SQLite=%s；本機快照 ZIP=%s；異地快照 ZIP=%s（新快照影音共用）",
         backup_keep, snapshot_keep, backup_keep,
     )
     state = current_backup_state(

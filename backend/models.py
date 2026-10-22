@@ -142,6 +142,7 @@ class StorageMetrics(BaseModel):
     source_media_largest_files: list[StorageFileMetric] = Field(default_factory=list)
     meeting_markdown_files: int
     meeting_markdown_bytes: int
+    backup_storage: Optional[dict[str, object]] = None
 
 
 class SourceMediaInventoryResponse(BaseModel):
