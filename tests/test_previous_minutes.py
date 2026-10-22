@@ -271,7 +271,7 @@ class PreviousMinutesUploadTests(unittest.TestCase):
         script = (root / "static" / "previous_minutes.js").read_text(encoding="utf-8")
         self.assertIn('id="previous-minutes-input"', html)
         self.assertIn('accept=".docx,', html)
-        self.assertIn('script src="/previous_minutes.js"', html)
+        self.assertIn('script src="/static/previous_minutes.js"', html)
         self.assertIn("previous_minutes_file", script)
         self.assertIn("本次狀態仍以本次逐字稿為準", script)
 
@@ -390,7 +390,7 @@ class PreviousMinutesUploadTests(unittest.TestCase):
         )
         self.assertIn('id="previous-minutes-rerun-button"', html)
         self.assertIn('id="previous-minutes-rerun-input"', html)
-        self.assertIn('script src="/previous_minutes_rerun.js"', html)
+        self.assertIn('script src="/static/previous_minutes_rerun.js"', html)
         self.assertIn("/previous-minutes-rerun", script)
         self.assertIn("high_quality", script)
         self.assertIn("regenerated_with_previous_minutes", script)
