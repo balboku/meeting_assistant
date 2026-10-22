@@ -53,7 +53,7 @@
    - 證據：隔離外送阻擋測試、正式 UI 本地就緒與模式切換；計入交付：是。
 - ◇ DEV-006 [交付點] [驗證中] [P1] [待人工標註] 可重現品質基準
   - 摘要：人工逐字稿對照的中英文錯字率、術語/數字保持率、發言人錯誤率與回歸門檻。
-  - 下一步：離線防呆本地驗證完成；實際辨識率仍需人工聽寫的中文／英文／混語資料。
+  - 下一步：離線防呆已部署 `75cebc7` 且未重跑會議；實際辨識率仍需人工聽寫的中文／英文／混語資料。
   - 驗收：標準答案與預測分離；匿名代號置換不扣分；錯誤會使檢查失敗。
   - 證據：762 項全套測試通過，合成評分明示不代表錄音準確率；計入交付但尚未完成真實錄音驗收。
 
@@ -68,6 +68,11 @@
 - QC 結果：先以新增測試重現舊行為（16 tests，包含 subtests 的 38 failures／15 errors，屬修正前負向證據）；修正後新增 20 項測試與既有語音評分 7 項共 27 tests / 4.093 秒 / OK。第一輪全套 761 tests / 264.774 秒通過；補上無對應語言／數字資料不算零錯誤後，最終同一產品來源全套 762 tests / 158.859 秒 / OK，分別保存 `tmp/speech-benchmark-ci-20261022.log`、`tmp/speech-benchmark-final-ci-20261022.log`。architecture／security（含新檔）／diff 通過，主檔上限未變；AST 核對 `distance`、`text_metrics`、`best_mapping`、`diarization_error` 與基線完全相同。
 - 驗收界線／續接：庫內合成 CLI 通過並列 `human_reference_case_count=0`／`synthetic_case_count=1`／`evaluation_scope=synthetic_algorithm_only`，不是實際會議辨識達標；輸入錯誤／分數不過／正常分別以 CLI exit 2／1／0 驗證。正式副本 `bc65681` 乾淨不動，未呼叫模型、重跑會議或新增正式資料。本輪變更保留於開發分支未提交：本契約與 documentation_map、兩份操作 README、離線評分腳本、新測試；未 push／部署。下一步需要實際錄音、人工正確原文及匿名 A／B 切換時間，才能驗證 DEV-001／002／006，不自行把它們標為完成。
 - Git 續接（2026-10-22）：使用者後續明確要求 commit／push 本次品質驗證防呆；前述未提交為開發結束時狀態。本輪僅提交上述六檔並推送既有 `feat/meeting-quality-upgrades`，重用 762 項完整回歸證據及複驗相關 27 項／安全／diff；不提交本機資料或操作日誌，不更新正式分支／副本、不部署、不重啟、不重跑會議。成功以實際提交與遠端同一 SHA 驗證，不新增 PR／交付點或變更待人工驗收狀態。
+- 部署契約（2026-10-22）：使用者另明確要求部署此修改且不重跑既有會議。候選 `75cebc7` 已 push，正式基線 `bc65681`；變更僅六檔離線工具／測試／文件，無 DB migration、依賴、UI、權限、模型或 `.env` 調整。沿用 Windows 正式副本、8001 與 supervisor。先核對 67 份會議／69 筆任務、active=0、版本／健康，建立 `backups/release_20261022_benchmark/` 小型 online DB／設定備份與所有原始輸出／歷史 DB／完整 jobs rows 指紋，重用健康檢查已確認完整的影音快照，不新增多 GB ZIP、不刪除任何備份。快轉至候選並短暫重啟以更新版本指紋；不呼叫 retry／rerun／入列端點。停止條件為 active job、資料變動、髒工作區、程序身分不符或備份／驗收失敗。切換後比對設定、會議、jobs（含 attempts）與檔案指紋，核對 ready／worker／版本／API 及實際部署 CLI 正負案例；重用 762 tests 與 27 項複驗，不因無 UI 變更重做完整響應式驗收。異常時保留資料，以基線的獨立本地回復分支恢復程式；不得 hard reset 或還原正式 DB。此輪發版紀錄僅本地更新，不額外 push。
+- 部署結果：2026-10-22 11:37–11:42（Asia/Taipei）正式分支 fast-forward 至 `75cebc7fa97aff170e5bf4ecbf6a83d8b5657d73`，既有 supervisor 隱藏啟動，PID=16008、worker leader generation=55。ready、health=ok、載入／工作區提交及來源指紋一致；本機／異地備份與容量檢查正常（受管備份約 19.07 GB／20 GiB）。既有 67 份會議／69 筆任務（67 done、1 failed、1 cancelled）、0 課程、active=0；所有 jobs rows（含 attempts）SHA-256 `e505c4475a741dc449b3ff38c90af13b93d9b9c3de6c35f3ab4e7c2581008828` 前後一致，沒有重跑／重試／新增任務。
+- 部署後保全／工具驗收：13,449 個受保護輸出與歷史 DB 無變更，持久資料指紋仍為 `4ec1af84ab1bea809b56383e513a306ffb171f9c7584e13c49420984cd5879cc`，`.env` byte-identical。正式副本 20 tests / 11.317 秒 / OK；已部署 CLI 合成案例 exit=0、真人參考案例 0／scope=synthetic_algorithm_only，空 manifest exit=2／passed=false。未呼叫模型、未跑正式資料，亦不把演算法測試宣稱為實際錄音準確率。
+- 驗收失敗／恢復證據保留：首次工具測試因受限執行環境的 AC Temp 目錄無寫入權而 20 tests / 91 errors，保留 `tool-tests.log`；改用工作區內受控暫存路徑後通過，未改產品／測試原碼或放寬門檻。首次 smoke 把 API 預設一頁 20 筆誤當全部，唯讀確認 total=67 後僅修正驗收 helper，保留 `smoke-first-check.json`；最終 smoke 通過。啟動後的備份完整驗證 pending 按既有機制等待後恢復 ok，未把暫態當成新的容量故障。最初 localhost 查詢受執行環境 socket／代理限制，核准同一目的地唯讀檢查後確認服務基線正常，沒有停用系統防護。
+- 發版證據／Git 邊界：正式機 `backups/release_20261022_benchmark/` 的 baseline、小型 online DB／設定備份、deployment-plan、stopped-processes、startup logs、兩次工具測試 log、smoke 與 preservation-after 收據皆留本機忽略目錄。正式產品保持 `75cebc7`、乾淨；本輪後續僅在開發分支提交兩份發版文件，不再次重啟、不額外 push，也不改 DEV-001／002／006 待實機／人工驗收狀態。
 
 ### DEV-009 執行／QA／發版契約（2026-10-22）
 
