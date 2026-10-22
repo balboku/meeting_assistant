@@ -1,6 +1,6 @@
 # DEV-011 既有備份去重遷移
 
-2026-10-22 完成。使用者明確選 A：新副本完整驗證及逐份還原通過後，永久替換精確五份本機舊 ZIP；不刪原始錄音與會議紀錄。獨立後續交付，不回算原六項品質升級完成率。
+2026-10-22 完成資料遷移，後續工具部署結果見「工具與文件正式部署」節。使用者明確選 A：新副本完整驗證及逐份還原通過後，永久替換精確五份本機舊 ZIP；不刪原始錄音與會議紀錄。獨立後續交付，不回算原六項品質升級完成率。
 
 ## 最終結果與資料保全
 
@@ -39,6 +39,17 @@
 使用者另要求「commit／push 這次既有備份去重的工具與文件」。本次提交僅含 scripts/deduplicate_record_snapshot.py、tests/test_snapshot_deduplication.py、README.md、dev_task.md、documentation_map.md 與 DEV-010／DEV-011 歸檔，共七檔，推送既有 feat/meeting-quality-upgrades 分支。正式副本仍757bce5；不部署、不重啟、不重跑遷移或會議，不提交正式備份、影音、設定、收據與ignored helper。
 
 提交前確認轉換工具SHA與實際執行留存副本一致；既有791項全套證據對應同一版工具／測試。另複跑27項去重及共用備份測試，46.357秒通過，architecture／security（含untracked）通過。新證據 tmp/dedup-git-focused-20261022.log 僅留本機。Git提交／推送成功與否以當次交付回報及遠端分支核對為準，不把提交視為正式部署。
+
+## 工具與文件正式部署（2026-10-22）
+
+- 使用者後續明確要求部署這次工具與文件，不重跑既有會議、不刪原始錄音及會議紀錄。候選2869b3a995b585ba146aeb0f4070008d0337d224已push開發分支；正式feat/transcript-chinese-translation自757bce5安全fast-forward，僅前述七檔，無backend／UI／schema／依賴／權限／模型／設定調整。不執行正式轉換器、資料遷移、備份替換、保留規則或費用變更。
+- 先核對active0、基線health／ready，新增小型online DB與設定備份、原始輸出及歷史DB全量指紋；不新增大型影音ZIP。回復方案為保留資料、以基線建立獨立本地回復分支及重啟，不hard reset或還原正式DB。任務／資料變動、髒工作區、程序身分不符、保全或健康失敗即停止驗收。
+- 來源指紋含scripts，故需短暫重啟更新載入版本。預先確認原啟動流程會同步異地與清理；部署期間用既有meeting-assistant-startup-maintenance互斥lease（15分鐘TTL）保留此輪工具限定邊界，不改queue lease／保留設定。隔離合成DB驗證「其他startup owner無法取鎖、queue獨立、可正常釋放」後才操作正式。精確核對四個原supervisor／uvicorn PID及建立時間後停止，隱藏啟動原start.py；新PID100、16:01:51 ready、16:02:42 leader generation58。啟動日誌確認略過重複維護，服務就緒即釋放本輪lease，不遺留部署鎖；正常後續維護機制不變。
+- 重用同工具／測試791項全套與提交前27項證據，正式副本另跑27 tests／23.949秒／OK，使用隔離暫存DB及假金鑰，不呼叫模型。部署CLI --help exit0、LAN /static/index.html HTTP200；七檔與候選提交逐一核對一致。ready／worker／health全項ok、auth啟用、載入提交及來源指紋與工作區相符；無UI變更，不宣稱重新執行三種viewport或實際辨識品質驗收。
+- 最終13,500個基線輸出／歷史DB大小與SHA全部未變；68會議／70任務、active0、全部jobs rows含attempts／設定均不變。持久資料SHA63020031110203ec00a18e0230a6cb5817b43524df13f160e092fbc7ab04f57f、jobs SHA6feceb90bc37230cddeeac3d9a70de3f40bc504f2c4709707244161ed71f4919。226個既有非啟動日誌備份及13個異地檔stat均不變；兩個原啟動日誌允許本次GET存取紀錄增長，新發版備份／收據另列。不刪任何原始影音／會議／備份，不重跑或新增任務。
+- 首次保全集合全等驗收失敗：多出Word匯出及seekable播放衍生檔兩個，無缺檔／大小變動。舊服務存取日誌2940、2943–2945及兩檔16:00:35建立時間證明，是其他LAN客戶端在新服務16:01:51啟動前對第68份的匯出200／播放206操作，非部署重跑。保留失敗收據及兩檔，不刪除或重設基線；驗收helper改為每個原基線檔案精確SHA不變，僅允許這兩個確定路徑／SHA的新增檔，未知新增仍失敗。再次全量驗證通過，13,502個現存受保護檔案stat於最終smoke仍一致；未修改產品／測試原碼或豁免原始檔保全。
+- 備份健康非同步暖機曾回degraded／完整驗證進行中，ready已正常，保留startup-first-observation.json；一次後續smoke亦碰到60秒refresh而未通過，不當成正式故障修產品或跳過檢查。完整驗證完成後最終smoke全項ok。完整SHA驗證與最後健康採分離證據、檔案stat bookend，避免長時間hash跨刷新週期重跑同一全量步驟。
+- 證據留正式backups/release_20261022_dedup_tool/，含baseline、online DB、.env.before、deployment-plan、lease取得／釋放、stopped-processes、startup logs、artifact-tests.log、首次觀測／保全失敗、observed-additions、preservation-after與smoke。實際工具2869b3a正式工作副本乾淨；發版後僅在開發分支本地提交本節及兩份入口更新，不額外push正式／開發分支、不再部署或重啟；ignored helper與私人收據不推Git。
 
 ## 原始契約與階段記錄
 
