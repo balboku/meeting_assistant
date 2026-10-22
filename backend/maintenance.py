@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -21,6 +22,7 @@ import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Mapping
+from backend.backup_policy import local_snapshot_keep
 from backend.training_backup import snapshot_parts as snapshot_training_parts, restore_parts as restore_training_parts
 
 
@@ -585,6 +587,8 @@ def create_record_snapshot(
             json.dumps(manifest, ensure_ascii=False, indent=2),
         )
 
+    if not verify_record_snapshot(snapshot_path).get("recoverability_complete"):
+        return snapshot_path  # A degraded replacement must not evict good history.
     snapshots = sorted(
         Path(backup_dir).glob("meeting_records_*.zip"),
         key=lambda path: path.name,
@@ -984,9 +988,10 @@ def replicate_record_snapshot(
         key=lambda path: path.name,
         reverse=True,
     )
-    for stale in snapshots[max(keep, 1):]:
-        stale.unlink()
-        stale.with_suffix(f"{stale.suffix}.sha256").unlink(missing_ok=True)
+    if verification.get("recoverability_complete"):
+        for stale in snapshots[max(keep, 1):]:
+            stale.unlink()
+            stale.with_suffix(f"{stale.suffix}.sha256").unlink(missing_ok=True)
     return destination
 
 
@@ -1316,6 +1321,11 @@ def run_startup_maintenance(
 ) -> dict[str, object]:
     """Run weekly changed-only backup policy, replication, and DB maintenance."""
     interval_hours = max(1, int(backup_min_interval_hours))
+    snapshot_keep = local_snapshot_keep(backup_keep)
+    logging.getLogger("MeetingAssistant.Backup").info(
+        "備份保留：SQLite=%s；本機完整 ZIP=%s；異地完整 ZIP=%s",
+        backup_keep, snapshot_keep, backup_keep,
+    )
     state = current_backup_state(
         db_path,
         source_media_dir,
@@ -1367,7 +1377,7 @@ def run_startup_maintenance(
             source_media_dir=source_media_dir,
             previous_minutes_dir=previous_minutes_dir,
             markdown_dir=markdown_dir,
-            keep=backup_keep,
+            keep=snapshot_keep,
         )
     )
     offsite_path = (
@@ -1388,6 +1398,7 @@ def run_startup_maintenance(
         "data_changed": data_changed,
         "interval_due": interval_due,
         "force_backup": bool(force_backup),
+        "retention": {"database": backup_keep, "local_snapshot": snapshot_keep, "offsite_snapshot": backup_keep},
         "snapshot_verification": _cached_record_snapshot_verification(snapshot_path),
         "offsite_snapshot_path": str(offsite_path) if offsite_path else None,
         "offsite_snapshot_verification": (
