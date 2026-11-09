@@ -5,7 +5,26 @@
   let course = null, canWrite = false, selectedPart = null, uploading = false;
   const params = new URLSearchParams(location.search);
   let courseId = Number(params.get('course')) || null;
-  const labels = {done:'逐字稿完成',saved:'等待送出檔案',pending:'背景等待中',processing:'正在轉錄',failed:'轉錄失敗，請重試',cancelled:'已取消，可重試'};
+  const labels = {done:'逐字稿完成',saved:'等待送出檔案',pending:'背景等待中',processing:'正在轉錄',failed:'轉錄失敗',cancelled:'轉錄已取消'};
+  const needsReview = part => part.failure?.code === 'needs_review';
+  const partStatus = part => needsReview(part) ? '待核聽' :
+    (part.state === 'done' && !part.has_transcript ? '缺少逐字稿' : labels[part.state] || '逐字稿尚未就緒');
+  const notesFailed = c => ['failed','cancelled'].includes(c.notes_job?.status ?? c.notes_job_status);
+  function notesPhase(c, completed, total) {
+    if (c.notes_current && total > 0 && completed === total) return '整合筆記已完成';
+    if (c.status === 'open' || !total || completed < total) return '整合筆記尚未開始';
+    if (notesFailed(c)) return '整合筆記未完成';
+    const jobStatus = c.notes_job?.status ?? c.notes_job_status;
+    if (jobStatus === 'processing') return '整合筆記整理中';
+    if (jobStatus === 'pending') return '整合筆記已排隊';
+    return '整合筆記尚未產出';
+  }
+
+  function timeLabel(seconds) {
+    const pad = n => String(n).padStart(2, '0');
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes >= 60 ? `${Math.floor(minutes / 60)}:` : ''}${pad(minutes % 60)}:${pad(seconds % 60)}`;
+  }
 
   async function api(path, options = {}) {
     const response = await fetch(path, options);
@@ -17,6 +36,7 @@
     return response.json();
   }
   const json = (method, data) => ({method,headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  function setText(element, value) { if (element && element.textContent !== value) element.textContent = value; }
   function error(err) { $('page-error').textContent = err.message || String(err); $('page-error').hidden = false; }
   async function action(operation) { $('page-error').hidden = true; try { await operation(); } catch (err) { error(err); } }
 
@@ -26,7 +46,7 @@
     $('create-section').hidden = !canWrite;
     if (!result.cloud_enabled) { $('course-mode').value = 'local'; $('course-mode').disabled = true; }
     $('course-list-status').textContent = result.courses.length ? `共 ${result.courses.length} 門課程` : '尚無課程，請先建立第一門課。';
-    $('course-list').innerHTML = result.courses.map(c => `<li><button type="button" data-course="${c.id}" aria-current="${c.id===courseId}">${escape(c.title)}<span class="course-meta">${c.status==='open'?'可接續錄製':'已結課'} · ${c.completed_parts}/${c.part_count} 段已轉錄</span></button></li>`).join('');
+    $('course-list').innerHTML = result.courses.map(c => `<li><button type="button" data-course="${c.id}" aria-current="${c.id===courseId}">${escape(c.title)}<span class="course-meta" data-course-progress>${c.status==='open'?'開課中':'已結課'} · ${c.completed_parts}/${c.part_count} 段逐字稿完成</span><span class="course-meta" data-course-notes>${notesPhase(c,c.completed_parts,c.part_count)}</span></button></li>`).join('');
     if (!result.courses.length && canWrite) $('create-section').open = true;
   }
 
@@ -38,22 +58,34 @@
     return sessions.length;
   }
 
-  function notesStatus(c) {
-    if (!c.parts.length) return '請先錄製或加入第一段，完成後才能結束課程並整理筆記。';
-    if (c.notes_current) return c.notes_job?.message || '課程筆記已完成，請複核。';
-    if (c.status==='open') return c.notes_markdown ? '課程已新增或調整，以下為舊版筆記；結束課程後可更新。' : '可繼續加入段落，結束課程後產生整合筆記。';
-    if (c.parts.some(p => !p.has_transcript)) return '正在等待各段逐字稿。失敗或未送出的段落需先補送／重試。';
-    if (c.notes_job?.status==='failed' || c.notes_job?.status==='cancelled') return '筆記尚未完成；逐字稿已保留，可按「重試課程筆記」。';
-    return c.notes_job?.message || '已收齊逐字稿，等待背景整理課程筆記。';
+  function notesStatus(c, completed) {
+    const phase = notesPhase(c, completed, c.parts.length);
+    if (phase === '整合筆記已完成') return phase;
+    if (!c.parts.length) return `${phase}：請先加入第一段。`;
+    const missing = c.parts.filter(p => !p.has_transcript);
+    if (missing.length) return `${phase}：${missing.map(p => `第 ${p.position} 段${partStatus(p)}`).join('、')}。`;
+    if (c.status === 'open') return `${phase}：結課後才會整理。`;
+    if (notesFailed(c)) return `${phase}：筆記整理未成功，已完成的逐字稿仍保留。`;
+    if (!['processing','pending'].includes(c.notes_job?.status)) return `${phase}：逐字稿已齊，但尚無可用筆記。`;
+    return phase;
   }
 
   function partRow(part, index) {
     const editable = canWrite && course.status === 'open';
-    const progress = part.progress_total ? ` · ${part.progress_current || 0}/${part.progress_total}` : '';
+    const progress = part.state === 'processing' && part.progress_total ? ` · 處理至第 ${part.progress_current || 0}/${part.progress_total} 個切片` : '';
     const warning = part.warnings.length
       ? `<p class="warning">來源需複核：${escape(part.warnings.join('；'))}</p>` : '';
-    const play = part.source_audio ? `<button data-play="${part.id}">播放／查看逐字稿</button>` : '';
-    const retry = canWrite && ['failed', 'cancelled'].includes(part.state)
+    const play = part.source_audio ? `<button data-play="${part.id}">${part.has_transcript ? '播放／查看逐字稿' : '從頭播放'}</button>` : '';
+    const issue = part.failure;
+    const hasRange = Number.isInteger(issue?.start_seconds) && Number.isInteger(issue?.end_seconds)
+      && issue.start_seconds >= 0 && issue.end_seconds > issue.start_seconds;
+    const start = hasRange ? timeLabel(issue.start_seconds) : '';
+    const failure = issue ? `<p class="part-issue">${escape(issue.reason)}${hasRange
+      ? `<br>錄音內第 ${escape(issue.segment_number)} 個切片，最近補救範圍：<span class="time-range">${start}–${timeLabel(issue.end_seconds)}</span>。${part.source_audio ? '' : ' 本段沒有可供播放的來源檔。'}`
+      : needsReview(part) ? ' 系統未留下可跳播的時間點。' : ''}</p>` : '';
+    const review = needsReview(part) && hasRange && part.source_audio
+      ? `<button class="review-jump" data-play="${part.id}" data-seek="${issue.start_seconds}" aria-label="第 ${part.position} 段，跳到 ${start} 核聽">跳到 ${start} 核聽</button>` : '';
+    const retry = canWrite && !needsReview(part) && ['failed', 'cancelled'].includes(part.state)
       ? `<button data-retry="${part.job_id}">重試本段</button>` : '';
     const missing = canWrite && part.state === 'saved'
       ? `<label>補送本段原始檔<input type="file" data-part-file="${part.id}" accept="audio/*,video/*,.mkv,.wmv" aria-label="補送第 ${part.position} 段原始檔"></label>` : '';
@@ -61,9 +93,9 @@
       <button data-move="${part.id}" data-direction="-1" ${index === 0 ? 'disabled' : ''} aria-label="第 ${part.position} 段上移">上移</button>
       <button data-move="${part.id}" data-direction="1" ${index === course.parts.length - 1 ? 'disabled' : ''} aria-label="第 ${part.position} 段下移">下移</button>` : '';
     return `<li>
-      <div class="part-main"><span class="part-title">第 ${part.position} 段 · ${escape(part.title)}</span><span>${escape(labels[part.state] || part.state)}</span></div>
-      <span class="course-meta">${escape(part.created_at)}${progress}</span>${warning}
-      <div class="part-actions">${play}${retry}${move}</div>${missing}
+      <div class="part-main"><span class="part-title">第 ${part.position} 段 · ${escape(part.title)}</span><span class="part-state${issue?' warning':''}">${escape(partStatus(part))}</span></div>
+      <span class="course-meta">${escape(part.created_at)}${progress}</span>${failure}${warning}
+      <div class="part-actions">${review}${play}${retry}${move}</div>${missing}
     </li>`;
   }
 
@@ -73,18 +105,27 @@
     document.body.classList.add('has-course'); $('choose-course').hidden = true; $('course-detail').hidden = false;
     $('detail-title').textContent = course.title;
     const count = course.parts.filter(p=>p.has_transcript).length;
-    $('course-status').textContent = `${course.status==='open'?'開課中，可跨日接續':'已結課'} · ${count}/${course.parts.length} 段逐字稿完成 · ${course.processing_mode==='local'?'機密本地處理':'一般雲端處理'}`;
+    const progress = `${course.status==='open'?'開課中':'已結課'} · ${count}/${course.parts.length} 段逐字稿完成`;
+    setText($('course-status'), `${progress} · ${course.processing_mode==='local'?'機密本地處理':'一般雲端處理'}`);
+    const courseCard = $('course-list').querySelector(`[data-course="${course.id}"]`);
+    setText(courseCard?.querySelector('[data-course-progress]'), progress);
+    setText(courseCard?.querySelector('[data-course-notes]'), notesPhase(course, count, course.parts.length));
     $('record-part').hidden = !canWrite || course.status!=='open';
     $('record-part').href = `/static/index.html?training_course=${course.id}`;
     $('record-part').textContent = course.parts.length ? '繼續下一段錄製' : '開始本段錄製';
     $('add-source').hidden = !canWrite || course.status!=='open';
     $('finish-course').hidden = !canWrite;
-    $('finish-course').textContent = course.status==='open'?'結束課程並整理筆記':
-      course.notes_job && ['failed','cancelled'].includes(course.notes_job.status) && !course.notes_current?'重試課程筆記':'重新開課，加入下一段';
+    const retryNotes = course.status==='closed' && course.parts.length>0 && count===course.parts.length && !course.notes_current && notesFailed(course);
+    $('finish-course').textContent = course.status==='open'?'結課（收齊逐字稿後整理筆記）':retryNotes?'重試課程筆記':'重新開課，加入下一段';
+    setText($('notes-status'), notesStatus(course, count));
     const pending = await localRecordings();
     $('finish-course').disabled = uploading || (course.status==='open' && (!course.parts.length || pending>0));
-    $('part-list').innerHTML = course.parts.map(partRow).join('');
-    $('notes-status').textContent = notesStatus(course);
+    const rows = course.parts.map(partRow).join('');
+    if ($('part-list').renderedRows !== rows) {
+      $('part-list').innerHTML = rows;
+      $('part-list').renderedRows = rows;
+    }
+    $('stale-notes').hidden = !course.notes_markdown || course.notes_current;
     if ($('course-notes').dataset.markdown !== course.notes_markdown) {
       $('course-notes').innerHTML = DOMPurify.sanitize(marked.parse(course.notes_markdown || ''));
       $('course-notes').dataset.markdown = course.notes_markdown;
@@ -97,14 +138,24 @@
     }
   }
 
-  function openPart(part, seconds=0) {
+  function openPart(part, seconds=0, focus=false) {
+    if (!part?.source_audio) return;
     selectedPart = part;
     $('player-panel').hidden = false; $('player-error').hidden = true; $('part-transcript').hidden = true;
-    $('player-title').textContent = `第 ${part.position} 段 · ${part.title}`;
+    $('player-title').textContent = `第 ${part.position} 段 · ${part.title}${seconds>0 ? `（核聽 ${timeLabel(Math.floor(seconds))}）` : ''}`;
     const player = $('course-player');
-    player.onloadedmetadata = () => { if (Number.isFinite(player.duration)) player.currentTime = Math.min(seconds, player.duration); };
-    player.onerror = () => { $('player-error').textContent = '原始媒體目前無法播放，請更新狀態或聯絡管理員補回來源。'; $('player-error').hidden = false; };
+    const playbackError = text => { $('player-error').textContent = text; $('player-error').hidden = false; };
+    player.onloadedmetadata = () => {
+      if (!seconds) return;
+      if (!Number.isFinite(player.duration) || seconds >= player.duration) {
+        playbackError('無法定位這個時間點：媒體長度不足或尚未取得。請確認來源媒體。');
+        return;
+      }
+      player.currentTime = seconds;
+    };
+    player.onerror = () => playbackError('原始媒體目前無法播放，請更新狀態或聯絡管理員確認來源。');
     player.src = `/training/courses/${course.id}/parts/${part.id}/media`;
+    if (focus) $('player-title').focus({preventScroll:true});
     $('player-panel').scrollIntoView({block:'start',behavior:'smooth'});
   }
 
@@ -129,7 +180,7 @@
   });
   $('part-list').addEventListener('click',event=>action(async()=>{
     const play=event.target.closest('[data-play]'),retry=event.target.closest('[data-retry]'),move=event.target.closest('[data-move]');
-    if(play) openPart(course.parts.find(p=>p.id===play.dataset.play));
+    if(play) openPart(course.parts.find(p=>p.id===play.dataset.play), Number(play.dataset.seek) || 0, true);
     if(retry) {await api(`/jobs/${retry.dataset.retry}/retry`,{method:'POST'});await loadDetail();}
     if(move) {const ids=course.parts.map(p=>p.id),i=ids.indexOf(move.dataset.move),j=i+Number(move.dataset.direction);[ids[i],ids[j]]=[ids[j],ids[i]];await api(`/training/courses/${course.id}/order`,json('PUT',{part_ids:ids,version:course.version}));await loadDetail();}
   }));
@@ -153,7 +204,15 @@
       }
     });
   });
-  $('show-transcript').onclick=()=>action(async()=>{const data=await api(`/training/courses/${course.id}/parts/${selectedPart.id}/transcript`);$('part-transcript').textContent=data.transcript||'逐字稿尚未完成，請稍後更新狀態。';$('part-transcript').hidden=false;});
+  $('show-transcript').onclick=()=>action(async()=>{
+    const opened = selectedPart;
+    if (!opened) return;
+    const data = await api(`/training/courses/${course.id}/parts/${opened.id}/transcript`);
+    if (selectedPart !== opened) return;
+    const part = course.parts.find(p=>p.id===opened.id) || opened;
+    $('part-transcript').textContent = data.transcript || `逐字稿尚未完成：${partStatus(part)}。`;
+    $('part-transcript').hidden = false;
+  });
   $('attach-meeting').onsubmit=event=>{event.preventDefault();action(async()=>{if(!$('meeting-source').value)throw new Error('請先選擇一份既有紀錄。');await api(`/training/courses/${course.id}/meetings`,json('POST',{meeting_id:Number($('meeting-source').value)}));await loadDetail();await loadCourses();});};
   $('upload-parts').onsubmit=event=>{event.preventDefault();if(uploading)return;action(async()=>{
     uploading=true; const target={...course},files=Array.from($('part-files').files);$('upload-parts').querySelector('button').disabled=true;

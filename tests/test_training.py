@@ -92,6 +92,62 @@ class TrainingTests(unittest.TestCase):
         self.assertIsNone(c["notes_job_id"])
         self.assertEqual(c["parts"][0]["state"],"saved")
 
+    def test_closed_course_exposes_safe_review_ranges_without_queuing_notes(self):
+        p1, a1 = self.part()
+        p2, a2 = self.part("two")
+        p3, a3 = self.part("three")
+        self.complete(p3, a3)
+        self.close()
+        for part, cut, start, end in ((p1, 22, 3857, 3873), (p2, 4, 678, 703), (p3, 1, 0, 5)):
+            database.update_job_status(part["job_id"], "failed", "需核聽", error_detail=(
+                f"TRANSCRIPTION_RECOVERY_NO_PROGRESS: 第 {cut} 段連續 3 個補救視窗未取得可用語句；"
+                f"最近視窗 {start}-{end} 秒，需人工核聽來源音訊"
+            ))
+        originals = [a.read_bytes() for a in (a1, a2, a3)]
+        job_snapshots = [database.get_job(p["job_id"]) for p in (p1, p2, p3)]
+        with patch("backend.training_api.actor_from_request", return_value=AuthActor("viewer", "viewer", enabled=True)):
+            response = asgi_request(self.app, "GET", f"/training/courses/{self.course}")
+            courses = asgi_request(self.app, "GET", "/training/courses").json()["courses"]
+        self.assertEqual(response.status_code, 200)
+        detail = response.json()
+        self.assertEqual(detail["status"], "closed")
+        self.assertFalse(detail["notes_current"])
+        self.assertIsNone(detail["notes_job_id"])
+        self.assertEqual(courses[0]["completed_parts"], 1)
+        self.assertFalse(courses[0]["notes_current"])
+        for part, expected in zip(detail["parts"][:2], ((22, 3857, 3873), (4, 678, 703))):
+            self.assertEqual(part["state"], "failed")
+            self.assertEqual(part["failure"]["code"], "needs_review")
+            self.assertEqual(tuple(part["failure"][key] for key in ("segment_number", "start_seconds", "end_seconds")), expected)
+            self.assertNotIn("job_error_detail", part)
+        self.assertEqual(detail["parts"][2]["state"], "done")
+        self.assertIsNone(detail["parts"][2]["failure"])
+        self.assertNotIn("TRANSCRIPTION_RECOVERY_NO_PROGRESS", response.text)
+        self.assertEqual([database.get_job(p["job_id"]) for p in (p1, p2, p3)], job_snapshots)
+        self.assertEqual([a.read_bytes() for a in (a1, a2, a3)], originals)
+
+    def test_unknown_error_and_invalid_review_range_are_not_exposed(self):
+        p1, _ = self.part()
+        p2, _ = self.part("two")
+        database.update_job_status(p1["job_id"], "failed", "轉錄失敗", error_detail="private error from provider")
+        database.update_job_status(p2["job_id"], "failed", "轉錄失敗", error_detail=(
+            "TRANSCRIPTION_RECOVERY_NO_PROGRESS: 第 4 段連續 3 個補救視窗未取得可用語句；"
+            "最近視窗 703-678 秒，需人工核聽來源音訊"
+        ))
+        detail = store.get_course(self.course, include_transcripts=True)
+        self.assertNotIn("private error from provider", str(detail))
+        self.assertEqual(detail["parts"][0]["failure"]["code"], "failed")
+        self.assertEqual(detail["parts"][1]["failure"]["code"], "needs_review")
+        self.assertNotIn("start_seconds", detail["parts"][1]["failure"])
+
+    def test_notes_current_requires_content_and_matching_version(self):
+        for version_offset, markdown, expected in ((0, "", False), (-1, "# 舊版筆記", False), (0, "# 本版筆記", True)):
+            with database.get_db() as conn:
+                conn.execute("UPDATE training_courses SET notes_version=version+?, notes_markdown=? WHERE id=?",
+                             (version_offset, markdown, self.course))
+            self.assertIs(store.get_course(self.course)["notes_current"], expected)
+            self.assertIs(store.list_courses()[0]["notes_current"], expected)
+
     def test_closed_course_rejects_new_parts_but_accepts_existing_retry(self):
         p,_=self.part();self.close()
         self.assertEqual(store.reserve_part(self.course,"one")["id"],p["id"])

@@ -27,7 +27,8 @@
     </section>
     <section id="course-detail" aria-label="課程內容" hidden>
       <button id="back-courses" type="button">← 課程清單</button>
-      <h2 id="detail-title"></h2><p id="course-status" role="status" aria-live="polite"></p>
+      <h2 id="detail-title"></h2><p id="course-status" role="status"></p>
+      <p id="notes-status" role="status"></p>
       <div class="actions"><a id="record-part" class="button primary">開始本段錄製</a><button id="finish-course">結束課程並整理筆記</button><button id="refresh-course">更新狀態</button></div>
       <p id="local-pending" role="status" hidden></p><div id="local-recordings"></div>
       <details id="add-source"><summary>加入錄好的檔案或既有紀錄</summary>
@@ -36,8 +37,8 @@
       </details>
       <p id="part-status" role="status" aria-live="polite"></p>
       <h3>課程段落</h3><ol id="part-list"></ol>
-      <section id="player-panel" hidden><h3 id="player-title"></h3><video id="course-player" controls preload="metadata"></video><p id="player-error" role="alert" hidden></p><button id="show-transcript">查看本段逐字稿</button><pre id="part-transcript" hidden></pre></section>
-      <section aria-label="整合課程筆記"><div class="note-header"><h3>整合課程筆記</h3><a id="download-notes" hidden>下載 Markdown</a></div><p id="notes-status" role="status"></p><div id="course-notes"></div></section>
+      <section id="player-panel" hidden><h3 id="player-title" tabindex="-1"></h3><video id="course-player" controls preload="metadata"></video><p id="player-error" role="alert" hidden></p><button id="show-transcript">查看本段逐字稿</button><pre id="part-transcript" hidden></pre></section>
+      <section aria-label="整合課程筆記"><div class="note-header"><h3>整合課程筆記</h3><a id="download-notes" hidden>下載 Markdown</a></div><p id="stale-notes" class="warning" hidden>以下為上一版筆記，不代表本次整合已完成。</p><div id="course-notes"></div></section>
     </section>
     <p id="choose-course" class="subtle">選擇課程或建立新課程，開始加入第一段。</p>
   </div>

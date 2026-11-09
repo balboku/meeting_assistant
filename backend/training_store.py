@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import sqlite3
 import uuid
 
 from backend import database
 from backend.processing_policy import meeting_is_private
+from backend.recovery_progress import NO_PROGRESS_ERROR_MARKER
 from backend.training_schema import ensure_schema
 from backend.transcript_sections import _extract_transcript_section_body
 
@@ -21,9 +23,34 @@ def _course(conn, course_id):
 
 def _parts(conn, course_id):
     return [dict(row) for row in conn.execute("""SELECT p.*, j.status AS job_status,
-        j.message AS job_message, j.progress_current, j.progress_total
+        j.message AS job_message, j.progress_current, j.progress_total,
+        j.error_detail AS job_error_detail
         FROM training_parts p LEFT JOIN jobs j ON j.job_id=p.job_id
         WHERE course_id=? ORDER BY position""", (course_id,))]
+
+
+def _part_failure(state, raw_error):
+    """Project known failure data without sending provider errors to the page."""
+    if state != "failed":
+        return None
+    raw_error = raw_error or ""
+    if not raw_error.startswith(NO_PROGRESS_ERROR_MARKER + ":"):
+        return {"code": "failed", "reason": "轉錄未完成，沒有可顯示的詳細原因。可查看任務紀錄或聯絡管理員。"}
+    failure = {"code": "needs_review", "reason": "連續補救未取得可用語句，已停止自動重試。請先核聽來源錄音。"}
+    match = re.fullmatch(
+        rf"{NO_PROGRESS_ERROR_MARKER}: 第 ([1-9][0-9]{{0,5}}) 段連續 [1-9][0-9]{{0,5}} 個補救視窗未取得可用語句；"
+        r"最近視窗 ([0-9]{1,8})-([0-9]{1,8}) 秒，需人工核聽來源音訊",
+        raw_error.strip(),
+    )
+    if match:
+        segment_number, start, end = map(int, match.groups())
+        if start < end:
+            failure.update(segment_number=segment_number, start_seconds=start, end_seconds=end)
+    return failure
+
+
+def _notes_current(course):
+    return bool(course["notes_markdown"].strip()) and course["notes_version"] == course["version"]
 
 
 def _touch(conn, course_id):
@@ -47,10 +74,14 @@ def create_course(title, processing_mode):
 def list_courses():
     with database.get_db() as conn:
         ensure_schema(conn)
-        return [dict(row) for row in conn.execute("""SELECT c.*,
+        courses = [dict(row) for row in conn.execute("""SELECT c.*, j.status AS notes_job_status,
             (SELECT count(*) FROM training_parts p WHERE p.course_id=c.id) AS part_count,
             (SELECT count(*) FROM training_parts p WHERE p.course_id=c.id AND p.transcript<>'') AS completed_parts
-            FROM training_courses c ORDER BY updated_at DESC,id DESC LIMIT 200""")]
+            FROM training_courses c LEFT JOIN jobs j ON j.job_id=c.notes_job_id
+            ORDER BY c.updated_at DESC,c.id DESC LIMIT 200""")]
+        for course in courses:
+            course["notes_current"] = _notes_current(course)
+        return courses
 
 
 def get_course(course_id, *, include_transcripts=False):
@@ -64,11 +95,12 @@ def get_course(course_id, *, include_transcripts=False):
         part["warnings"] = json.loads(part.pop("warnings_json"))
         part["has_transcript"] = bool(part["transcript"])
         part["state"] = "done" if part["has_transcript"] else part.get("job_status") or "saved"
+        part["failure"] = _part_failure(part["state"], part.pop("job_error_detail"))
         if not include_transcripts:
             part.pop("transcript")
     course["parts"] = parts
     course["notes_job"] = dict(job) if job else None
-    course["notes_current"] = course["notes_version"] == course["version"]
+    course["notes_current"] = _notes_current(course)
     return course
 
 
