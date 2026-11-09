@@ -1,6 +1,7 @@
 """Course lifecycle and durable recording parts, independent of AI clients."""
 from __future__ import annotations
 
+from contextlib import closing, contextmanager
 import json
 from pathlib import Path
 import re
@@ -84,9 +85,26 @@ def list_courses():
         return courses
 
 
-def get_course(course_id, *, include_transcripts=False):
+@contextmanager
+def _course_connection(read_only):
+    if read_only:
+        if not database.DB_PATH.is_file():
+            raise KeyError("找不到課程，請返回課程清單。")
+        uri = database.DB_PATH.resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN")  # Keep all course and part reads on one snapshot.
+            if not conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='training_courses'").fetchone():
+                raise KeyError("找不到課程，請返回課程清單。")
+            yield conn
+        return
     with database.get_db() as conn:
         ensure_schema(conn)
+        yield conn
+
+
+def get_course(course_id, *, include_transcripts=False, read_only=False):
+    with _course_connection(read_only) as conn:
         course = _course(conn, course_id)
         parts = _parts(conn, course_id)
         job = conn.execute("SELECT status,message FROM jobs WHERE job_id=?",

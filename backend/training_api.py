@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -13,6 +13,7 @@ from backend.auth import actor_from_request, require_permission
 from backend.local_speech import capabilities
 from backend.processing_policy import cloud_enabled
 from backend.seekable_media import ensure_seekable_playback_media, SeekableMediaError
+from backend.training_draft import build_draft
 from backend.training_gap_review import project_review_windows
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,6 +80,14 @@ def detail(course_id: int, request: Request):
     course = _run(request, "meeting:read", store.get_course, course_id)
     project_review_windows(OUTPUT_DIR, course)
     return course
+
+
+@router.get("/courses/{course_id}/draft")
+def draft(course_id: int, request: Request, response: Response):
+    course = _run(request, "meeting:read", store.get_course, course_id,
+                  include_transcripts=True, read_only=True)
+    response.headers["Cache-Control"] = "no-store"
+    return build_draft(OUTPUT_DIR, course)
 
 
 @router.post("/courses/{course_id}/parts", status_code=201)

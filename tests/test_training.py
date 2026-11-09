@@ -92,6 +92,28 @@ class TrainingTests(unittest.TestCase):
         self.assertIsNone(c["notes_job_id"])
         self.assertEqual(c["parts"][0]["state"],"saved")
 
+    def test_draft_read_uses_completed_text_without_changing_database_jobs_or_media(self):
+        failed, failed_media = self.part("failed")
+        completed, completed_media = self.part("completed")
+        self.complete(completed, completed_media)
+        self.close()
+        database.update_job_status(failed["job_id"], "failed", "停在缺漏")
+        before = store.get_course(self.course, include_transcripts=True, read_only=True)
+        jobs = [database.get_job(p["job_id"]) for p in (failed, completed)]
+        media = [p.read_bytes() for p in (failed_media, completed_media)]
+        with patch.object(database, "get_db", side_effect=AssertionError("Write-capable DB path")), \
+                patch("backend.training_api.actor_from_request", return_value=AuthActor("viewer", "viewer", enabled=True)):
+            response = asgi_request(self.app, "GET", f"/training/courses/{self.course}/draft")
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertEqual(result["kind"], "extracts")
+        self.assertEqual(result["parts"][0]["extracts"], [])
+        self.assertIn("Learn the workflow.", result["parts"][1]["extracts"][0])
+        self.assertEqual(store.get_course(self.course, include_transcripts=True, read_only=True), before)
+        self.assertIsNone(before["notes_job_id"])
+        self.assertEqual([database.get_job(p["job_id"]) for p in (failed, completed)], jobs)
+        self.assertEqual([p.read_bytes() for p in (failed_media, completed_media)], media)
+
     def test_closed_course_exposes_safe_review_ranges_without_queuing_notes(self):
         p1, a1 = self.part()
         p2, a2 = self.part("two")

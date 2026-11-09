@@ -3,6 +3,7 @@
   const $ = id => document.getElementById(id);
   const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   let course = null, canWrite = false, selectedPart = null, uploading = false;
+  let draftRequest = 0;
   const params = new URLSearchParams(location.search);
   let courseId = Number(params.get('course')) || null;
   const labels = {done:'逐字稿完成',saved:'等待送出檔案',pending:'背景等待中',processing:'正在轉錄',failed:'轉錄失敗',cancelled:'轉錄已取消'};
@@ -42,6 +43,69 @@
           ? `<button type="button" class="review-jump" data-play="${escape(part.id)}" data-seek="${window.start_seconds}" data-review-end="${window.end_seconds}" aria-label="${label}"><span class="review-index">${i + 1}.</span> ${range}</button>`
           : `<span>${i + 1}. ${range}</span>`}</li>`;
       }).join('')}</ul>${part.source_audio ? '' : '<p class="warning">本段沒有可供播放的來源檔，請聯絡管理員。</p>'}</div>`;
+  }
+
+  function closeDraft(restoreFocus = false) {
+    draftRequest++;
+    $('draft-panel').hidden = true;
+    const button = $('open-draft');
+    button.disabled = false;
+    button.setAttribute('aria-expanded', 'false');
+    $('draft-body').replaceChildren();
+    $('draft-gaps').replaceChildren();
+    if (restoreFocus && !button.hidden) button.focus();
+  }
+
+  async function openDraft() {
+    if (!course || course.id !== courseId) return;
+    const requested = ++draftRequest, id = course.id;
+    $('open-draft').disabled = true;
+    $('open-draft').setAttribute('aria-expanded', 'true');
+    $('draft-panel').hidden = false;
+    $('draft-body').replaceChildren();
+    $('draft-gaps').replaceChildren();
+    $('draft-status').textContent = '正在讀取已保留的內容…';
+    $('draft-title').focus();
+    try {
+      const draft = await api(`/training/courses/${id}/draft`, {cache:'no-store'});
+      if (requested !== draftRequest) return;
+      if (draft.kind === 'official') {
+        $('draft-status').textContent = '正式筆記已完成，請更新狀態後查看下方的整合課程筆記。';
+        return;
+      }
+      const hasExtracts = draft.parts.some(part => part.extracts.length);
+      const count = draft.parts.reduce((sum, p) => sum + p.unconfirmed_windows.length, 0);
+      $('draft-status').textContent = draft.kind === 'reviewed'
+        ? (count ? `已整理可採用的內容；${count} 處缺漏標為未確認。` : '已整理可採用的內容。')
+        : hasExtracts ? '目前只顯示已完成段落的逐字稿摘錄，未納入未整理的快取。'
+        : '目前沒有可顯示的筆記內容，可收起草稿並查看下方的段落狀態。';
+      if (draft.kind === 'reviewed') {
+        $('draft-body').innerHTML = DOMPurify.sanitize(marked.parse(draft.markdown), {
+          ALLOWED_TAGS: ['h2','h3','h4','p','strong','em','ul','ol','li','blockquote','table','thead','tbody','tr','td','th','br'],
+          ALLOWED_ATTR: [],
+        });
+      } else {
+        $('draft-body').innerHTML = draft.parts.filter(p => p.extracts.length).map(p =>
+          `<h4>第 ${p.position} 段 · 逐字稿摘錄</h4><ul>${p.extracts.map(line => `<li>${escape(line)}</li>`).join('')}</ul>`).join('');
+      }
+      $('draft-gaps').innerHTML = [
+        count ? `<h4>${count} 處未確認</h4>` : '',
+        ...draft.parts.filter(p => !p.complete).map(p => {
+          const part = course.parts.find(item => item.id === p.id);
+          if (!p.unconfirmed_windows.length) return `<p>第 ${p.position} 段：未確認（未有可標註的時間窗）。</p>`;
+          return `<p>第 ${p.position} 段</p><ul>${p.unconfirmed_windows.map(w => {
+            const label = `${preciseTime(w.start_seconds)}–${preciseTime(w.end_seconds)} · 未確認`;
+            return `<li>${part?.source_audio
+              ? `<button type="button" data-play="${escape(p.id)}" data-seek="${w.start_seconds}" data-review-end="${w.end_seconds}">${label}</button>`
+              : label}</li>`;
+          }).join('')}</ul>`;
+        }),
+      ].join('');
+    } catch (_) {
+      if (requested === draftRequest) $('draft-status').textContent = '草稿暫時無法讀取。請再按「先看草稿」重試，或收起草稿。';
+    } finally {
+      if (requested === draftRequest) $('open-draft').disabled = false;
+    }
   }
 
   async function api(path, options = {}) {
@@ -120,7 +184,13 @@
 
   async function loadDetail() {
     if (!courseId) return;
-    course = await api(`/training/courses/${courseId}`);
+    const id = courseId, next = await api(`/training/courses/${courseId}`);
+    if (courseId !== id) return;
+    const signature = c => JSON.stringify([c.version, c.parts.map(p =>
+      [p.id, p.job_id, p.state, p.has_transcript, p.source_sha256, p.review_windows])]);
+    if (course?.id !== id || next.notes_current ||
+        (!$('draft-panel').hidden && signature(course) !== signature(next))) closeDraft();
+    course = next;
     document.body.classList.add('has-course'); $('choose-course').hidden = true; $('course-detail').hidden = false;
     $('detail-title').textContent = course.title;
     const count = course.parts.filter(p=>p.has_transcript).length;
@@ -137,6 +207,7 @@
     const retryNotes = course.status==='closed' && course.parts.length>0 && count===course.parts.length && !course.notes_current && notesFailed(course);
     $('finish-course').textContent = course.status==='open'?'結課（收齊逐字稿後整理筆記）':retryNotes?'重試課程筆記':'重新開課，加入下一段';
     setText($('notes-status'), notesStatus(course, count));
+    $('open-draft').hidden = course.notes_current || !course.parts.some(p => p.has_transcript || p.review_windows?.length);
     const pending = await localRecordings();
     $('finish-course').disabled = uploading || (course.status==='open' && (!course.parts.length || pending>0));
     const rows = course.parts.map(partRow).join('');
@@ -184,6 +255,7 @@
   }
 
   async function choose(id) {
+    if (id !== courseId) closeDraft();
     courseId=id; selectedPart=null; $('player-panel').hidden=true;
     history.replaceState(null,'',`?course=${id}`);
     await loadDetail(); await loadCourses();
@@ -194,7 +266,17 @@
     $('course-title').value=''; await choose(c.id);
   }); });
   $('course-list').addEventListener('click', event => {const b=event.target.closest('[data-course]'); if(b) action(()=>choose(Number(b.dataset.course)));});
-  $('back-courses').onclick=()=>{document.body.classList.remove('has-course'); $('course-detail').hidden=true; $('choose-course').hidden=false; courseId=null; selectedPart=null; $('course-player').pause(); history.replaceState(null,'',location.pathname);};
+  $('back-courses').onclick=()=>{closeDraft(); document.body.classList.remove('has-course'); $('course-detail').hidden=true; $('choose-course').hidden=false; courseId=null; selectedPart=null; $('course-player').pause(); history.replaceState(null,'',location.pathname);};
+  $('open-draft').onclick = openDraft;
+  $('close-draft').onclick = () => closeDraft(true);
+  function playFrom(button) {
+    openPart(course.parts.find(p => p.id === button.dataset.play), Number(button.dataset.seek) || 0, true,
+      button.dataset.reviewEnd === undefined ? null : Number(button.dataset.reviewEnd));
+  }
+  $('draft-gaps').addEventListener('click', event => {
+    const play = event.target.closest('[data-play]');
+    if (play) playFrom(play);
+  });
   $('refresh-course').onclick=()=>action(async()=>{await loadDetail();await loadCourses();});
   $('finish-course').onclick=()=>action(async()=>{
     const retry = $('finish-course').textContent==='重試課程筆記';
@@ -204,8 +286,7 @@
   });
   $('part-list').addEventListener('click',event=>action(async()=>{
     const play=event.target.closest('[data-play]'),retry=event.target.closest('[data-retry]'),move=event.target.closest('[data-move]');
-    if(play) openPart(course.parts.find(p=>p.id===play.dataset.play), Number(play.dataset.seek) || 0, true,
-      play.dataset.reviewEnd === undefined ? null : Number(play.dataset.reviewEnd));
+    if(play) playFrom(play);
     if(retry) {await api(`/jobs/${retry.dataset.retry}/retry`,{method:'POST'});await loadDetail();}
     if(move) {const ids=course.parts.map(p=>p.id),i=ids.indexOf(move.dataset.move),j=i+Number(move.dataset.direction);[ids[i],ids[j]]=[ids[j],ids[i]];await api(`/training/courses/${course.id}/order`,json('PUT',{part_ids:ids,version:course.version}));await loadDetail();}
   }));

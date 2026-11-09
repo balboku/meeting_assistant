@@ -1,5 +1,6 @@
 """Read-only projection of an operator-reviewed, source-bound gap snapshot."""
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -25,13 +26,20 @@ def _ranges(value):
     return result
 
 
-def project_review_windows(output_dir: Path, course: dict) -> None:
-    """Attach playback coordinates only. Never load or serve checkpoint text."""
+def review_file(output_dir: Path, course_id: int, name: str) -> Path:
+    root = (output_dir / DIRECTORY).resolve()
+    path = (root / str(course_id) / name).resolve()
+    if path.parent != root / str(course_id) or path.name != name:
+        raise ValueError("Unexpected review path")
+    return path
+
+
+def project_review_windows(output_dir: Path, course: dict) -> str | None:
+    """Attach playback coordinates only; return the snapshot digest to local callers."""
+    for part in course["parts"]:
+        part.pop("review_windows", None)
     try:
-        root = (output_dir / DIRECTORY).resolve()
-        manifest = (root / str(course["id"]) / "review.json").resolve()
-        if manifest.parent.parent != root or manifest.parent.name != str(course["id"]):
-            return
+        manifest = review_file(output_dir, course["id"], "review.json")
         with manifest.open("rb") as stream:
             data = stream.read(MAX_MANIFEST_BYTES + 1)
         if len(data) > MAX_MANIFEST_BYTES:
@@ -60,3 +68,4 @@ def project_review_windows(output_dir: Path, course: dict) -> None:
         if pending:
             part["review_windows"] = [{"start_seconds": w.start / SAMPLE_RATE, "end_seconds": w.end / SAMPLE_RATE}
                                       for w in pending]
+    return hashlib.sha256(data).hexdigest()
