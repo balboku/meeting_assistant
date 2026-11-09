@@ -9,6 +9,8 @@ from functools import wraps
 from pathlib import Path
 
 from backend.model_availability import is_quota_error, quota_wait_until
+from backend.training_context import ACTIVE_TRAINING
+from backend.training_draft_sources import record_verified_slice
 
 ACTIVE_CHECKPOINTS = ContextVar("meeting_job_checkpoints", default=None)
 
@@ -33,6 +35,7 @@ def _write_checkpoint(path, value):
 class JobCheckpoints:
     def __init__(self, output_dir, job_id, source_sha256, error_detail="", forced=False, resume_verified=False):
         self.root = Path(output_dir) / "job_checkpoints" / hashlib.sha256(job_id.encode()).hexdigest()
+        self.job_id = job_id
         self.source_sha256, self.forced = source_sha256, forced
         self.quota_resume = is_quota_error(error_detail) or quota_wait_until(error_detail) is not None
         self.resume_verified = resume_verified and not forced
@@ -105,5 +108,9 @@ def load_verified_segment(index, context):
 def save_verified_segment(index, context, transcript, responding_models):
     scope = ACTIVE_CHECKPOINTS.get()
     if scope:
-        _write_checkpoint(scope.path("verified_segment", {"index": index, "context": context}),
+        path = scope.path("verified_segment", {"index": index, "context": context})
+        _write_checkpoint(path,
                           {"transcript": transcript, "responding_models": responding_models})
+        part_id = ACTIVE_TRAINING.get()
+        if isinstance(part_id, str):
+            record_verified_slice(scope.root, scope.job_id, part_id, scope.source_sha256, index, context, path)

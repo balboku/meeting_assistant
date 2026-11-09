@@ -50,22 +50,55 @@
     $('draft-panel').hidden = true;
     const button = $('open-draft');
     button.disabled = false;
+    button.textContent = '先看草稿';
     button.setAttribute('aria-expanded', 'false');
     $('draft-body').replaceChildren();
     $('draft-gaps').replaceChildren();
     if (restoreFocus && !button.hidden) button.focus();
   }
 
-  async function openDraft() {
+  function renderDraftSections(parts) {
+    const origin = {complete: '已完成逐字稿', accepted: '已驗收片段'};
+    return parts.filter(part => part.sections?.length || part.extracts.length).map(part => {
+      const sections = part.sections || [{label:'原文重點',lines:part.extracts}];
+      return `<section class="draft-part"><h4>第 ${part.position} 段 · ${origin[part.basis] || origin.complete}</h4>
+        ${sections.map(s => `<p><strong>${escape(s.label)}</strong></p><ul>${s.lines.map(line =>
+          `<li>${escape(line)}</li>`).join('')}</ul>`).join('')}</section>`;
+    }).join('');
+  }
+
+  function renderDraftGaps(parts, count) {
+    const hasUntimed = parts.some(p => p.unconfirmed_untimed ?? (!p.complete && !p.unconfirmed_windows.length));
+    const title = count ? `${count} 處${hasUntimed ? '有時間的未確認內容' : '未確認'}` : hasUntimed ? '未確認的段落' : '';
+    return [
+      title ? `<h4>${title}</h4>` : '',
+      ...parts.map(p => {
+        const windows = p.unconfirmed_windows, points = p.unconfirmed_points || [];
+        const untimed = p.unconfirmed_untimed ?? (!p.complete && !windows.length);
+        if (!windows.length && !points.length && !untimed) return '';
+        const part = course.parts.find(item => item.id === p.id);
+        const jump = (start, end, label) => `<li>${part?.source_audio
+          ? `<button type="button" data-play="${escape(p.id)}" data-seek="${start}" ${end === undefined ? '' : `data-review-end="${end}"`}>${label}</button>`
+          : label}</li>`;
+        return `<p>第 ${p.position} 段${untimed ? '：未確認（沒有可標註的時間）' : ''}</p>${windows.length || points.length
+          ? `<ul>${windows.map(w => jump(w.start_seconds, w.end_seconds,
+            `${preciseTime(w.start_seconds)}–${preciseTime(w.end_seconds)} · 未確認`)).join('')}
+            ${points.map(s => jump(s, undefined, `${timeLabel(s)} · 未確認（逐字稿標記）`)).join('')}</ul>` : ''}`;
+      }),
+    ].join('');
+  }
+
+  async function openDraft(manual = true) {
     if (!course || course.id !== courseId) return;
     const requested = ++draftRequest, id = course.id;
     $('open-draft').disabled = true;
+    $('open-draft').textContent = '更新草稿';
     $('open-draft').setAttribute('aria-expanded', 'true');
     $('draft-panel').hidden = false;
     $('draft-body').replaceChildren();
     $('draft-gaps').replaceChildren();
     $('draft-status').textContent = '正在讀取已保留的內容…';
-    $('draft-title').focus();
+    if (manual) $('draft-title').focus();
     try {
       const draft = await api(`/training/courses/${id}/draft`, {cache:'no-store'});
       if (requested !== draftRequest) return;
@@ -74,35 +107,22 @@
         return;
       }
       const hasExtracts = draft.parts.some(part => part.extracts.length);
-      const count = draft.parts.reduce((sum, p) => sum + p.unconfirmed_windows.length, 0);
+      const count = draft.parts.reduce((sum, p) => sum + p.unconfirmed_windows.length + (p.unconfirmed_points?.length || 0), 0);
       $('draft-status').textContent = draft.kind === 'reviewed'
         ? (count ? `已整理可採用的內容；${count} 處缺漏標為未確認。` : '已整理可採用的內容。')
-        : hasExtracts ? '目前只顯示已完成段落的逐字稿摘錄，未納入未整理的快取。'
-        : '目前沒有可顯示的筆記內容，可收起草稿並查看下方的段落狀態。';
+        : hasExtracts ? '依已完成逐字稿與已驗收片段自動整理原句，未確認的內容不會寫進筆記。'
+        : '目前還沒有可用內容。可以先收起草稿；有已驗收內容後再開啟即可查看。';
       if (draft.kind === 'reviewed') {
         $('draft-body').innerHTML = DOMPurify.sanitize(marked.parse(draft.markdown), {
           ALLOWED_TAGS: ['h2','h3','h4','p','strong','em','ul','ol','li','blockquote','table','thead','tbody','tr','td','th','br'],
           ALLOWED_ATTR: [],
         });
       } else {
-        $('draft-body').innerHTML = draft.parts.filter(p => p.extracts.length).map(p =>
-          `<h4>第 ${p.position} 段 · 逐字稿摘錄</h4><ul>${p.extracts.map(line => `<li>${escape(line)}</li>`).join('')}</ul>`).join('');
+        $('draft-body').innerHTML = renderDraftSections(draft.parts);
       }
-      $('draft-gaps').innerHTML = [
-        count ? `<h4>${count} 處未確認</h4>` : '',
-        ...draft.parts.filter(p => !p.complete).map(p => {
-          const part = course.parts.find(item => item.id === p.id);
-          if (!p.unconfirmed_windows.length) return `<p>第 ${p.position} 段：未確認（未有可標註的時間窗）。</p>`;
-          return `<p>第 ${p.position} 段</p><ul>${p.unconfirmed_windows.map(w => {
-            const label = `${preciseTime(w.start_seconds)}–${preciseTime(w.end_seconds)} · 未確認`;
-            return `<li>${part?.source_audio
-              ? `<button type="button" data-play="${escape(p.id)}" data-seek="${w.start_seconds}" data-review-end="${w.end_seconds}">${label}</button>`
-              : label}</li>`;
-          }).join('')}</ul>`;
-        }),
-      ].join('');
+      $('draft-gaps').innerHTML = renderDraftGaps(draft.parts, count);
     } catch (_) {
-      if (requested === draftRequest) $('draft-status').textContent = '草稿暫時無法讀取。請再按「先看草稿」重試，或收起草稿。';
+      if (requested === draftRequest) $('draft-status').textContent = '草稿暫時無法讀取。請按「更新草稿」重試，或收起草稿。';
     } finally {
       if (requested === draftRequest) $('open-draft').disabled = false;
     }
@@ -187,9 +207,10 @@
     const id = courseId, next = await api(`/training/courses/${courseId}`);
     if (courseId !== id) return;
     const signature = c => JSON.stringify([c.version, c.parts.map(p =>
-      [p.id, p.job_id, p.state, p.has_transcript, p.source_sha256, p.review_windows])]);
-    if (course?.id !== id || next.notes_current ||
-        (!$('draft-panel').hidden && signature(course) !== signature(next))) closeDraft();
+      [p.id, p.job_id, p.state, p.progress_current, p.has_transcript, p.source_sha256, p.review_windows])]);
+    const refreshDraft = course?.id === id && !next.notes_current && !$('draft-panel').hidden &&
+      signature(course) !== signature(next);
+    if (course?.id !== id || next.notes_current) closeDraft();
     course = next;
     document.body.classList.add('has-course'); $('choose-course').hidden = true; $('course-detail').hidden = false;
     $('detail-title').textContent = course.title;
@@ -207,7 +228,8 @@
     const retryNotes = course.status==='closed' && course.parts.length>0 && count===course.parts.length && !course.notes_current && notesFailed(course);
     $('finish-course').textContent = course.status==='open'?'結課（收齊逐字稿後整理筆記）':retryNotes?'重試課程筆記':'重新開課，加入下一段';
     setText($('notes-status'), notesStatus(course, count));
-    $('open-draft').hidden = course.notes_current || !course.parts.some(p => p.has_transcript || p.review_windows?.length);
+    $('open-draft').hidden = course.notes_current || !course.parts.length;
+    if (refreshDraft && !$('open-draft').hidden) void openDraft(false);
     const pending = await localRecordings();
     $('finish-course').disabled = uploading || (course.status==='open' && (!course.parts.length || pending>0));
     const rows = course.parts.map(partRow).join('');
@@ -267,7 +289,7 @@
   }); });
   $('course-list').addEventListener('click', event => {const b=event.target.closest('[data-course]'); if(b) action(()=>choose(Number(b.dataset.course)));});
   $('back-courses').onclick=()=>{closeDraft(); document.body.classList.remove('has-course'); $('course-detail').hidden=true; $('choose-course').hidden=false; courseId=null; selectedPart=null; $('course-player').pause(); history.replaceState(null,'',location.pathname);};
-  $('open-draft').onclick = openDraft;
+  $('open-draft').onclick = () => openDraft();
   $('close-draft').onclick = () => closeDraft(true);
   function playFrom(button) {
     openPart(course.parts.find(p => p.id === button.dataset.play), Number(button.dataset.seek) || 0, true,

@@ -2,13 +2,13 @@
 
 import hashlib
 import json
-import re
 from pathlib import Path
 
-from backend.training_gap_review import project_review_windows, review_file
+from backend.training_draft_extract import extract_notes
+from backend.training_draft_sources import DraftReadBudget, reviewed_slices, uncovered, verified_slices
+from backend.training_gap_review import SAMPLE_RATE, project_review_windows, review_file
 
 MAX_DRAFT_BYTES = 128 * 1024
-_TIMESTAMPED = re.compile(r"^\[\d{1,3}:\d{2}(?::\d{2})?\]\s+\S")
 
 
 def source_fingerprint(course: dict, review_sha256: str | None) -> str:
@@ -37,28 +37,41 @@ def _reviewed_markdown(output_dir: Path, course: dict, review_sha256: str | None
     return ""
 
 
-def _extract(transcript: str) -> list[str]:
-    """Pick intact timestamped lines from across a transcript, not a generated summary."""
-    lines = [line.strip() for line in transcript.splitlines()
-             if _TIMESTAMPED.match(line) and len(line) <= 700]
-    if len(lines) <= 5:
-        return lines
-    return [lines[i * (len(lines) - 1) // 4] for i in range(5)]
+def _automatic_part(output_dir, course_id, part, review, budget):
+    complete = bool(part["transcript"].strip())
+    windows = part.get("review_windows", [])
+    untimed = False
+    if complete:
+        sources = [(None, part["transcript"])]
+    else:
+        extent, sources = verified_slices(output_dir, part, budget)
+        if review is not None:
+            sources = [(window, text) for window, text in sources
+                       if any(w.start <= window.start and window.end <= w.end for w in review.retained)
+                       and not any(window.overlaps(w) for w in review.pending)]
+            sources = sorted([*sources, *reviewed_slices(output_dir, course_id, part, review, budget)])
+        elif extent is not None:
+            windows = [{"start_seconds": w.start / SAMPLE_RATE, "end_seconds": w.end / SAMPLE_RATE}
+                       for w in uncovered(extent, sources)]
+        untimed = not windows
+    extracts, sections, points, unknown_markers = extract_notes(sources)
+    return {"id": part["id"], "position": part["position"], "complete": complete,
+            "basis": "complete" if complete else "accepted" if extracts else "none",
+            "extracts": extracts, "sections": sections, "unconfirmed_windows": windows,
+            "unconfirmed_points": points, "unconfirmed_untimed": untimed or unknown_markers}
 
 
 def build_draft(output_dir: Path, course: dict) -> dict:
     if course["notes_current"]:
         return {"kind": "official"}
-    review_sha256 = project_review_windows(output_dir, course)
+    reviewed = {}
+    review_sha256 = project_review_windows(output_dir, course, reviewed=reviewed)
     markdown = _reviewed_markdown(output_dir, course, review_sha256)
-    parts = []
-    for part in course["parts"]:
-        transcript = part["transcript"]
-        parts.append({
-            "id": part["id"],
-            "position": part["position"],
-            "complete": bool(transcript),
-            "extracts": [] if markdown else _extract(transcript),
-            "unconfirmed_windows": part.get("review_windows", []),
-        })
-    return {"kind": "reviewed" if markdown else "extracts", "markdown": markdown, "parts": parts}
+    if markdown:
+        parts = [{"id": p["id"], "position": p["position"], "complete": bool(p["transcript"]),
+                  "extracts": [], "unconfirmed_windows": p.get("review_windows", [])} for p in course["parts"]]
+        return {"kind": "reviewed", "markdown": markdown, "parts": parts}
+    budget = DraftReadBudget()
+    parts = [_automatic_part(output_dir, course["id"], part, reviewed.get(part["id"]), budget)
+             for part in course["parts"]]
+    return {"kind": "extracts", "markdown": "", "parts": parts}

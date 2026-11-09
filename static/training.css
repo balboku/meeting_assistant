@@ -17,6 +17,9 @@
 #draft-body blockquote{margin:12px 0;border-left:3px solid var(--yellow);padding:0 12px;color:var(--muted)}
 #draft-body table{width:100%;border-collapse:collapse}
 #draft-body td,#draft-body th{border:1px solid var(--border);padding:8px;text-align:left;vertical-align:top}
+#draft-body .draft-part{border-top:1px solid var(--border);padding-top:14px;margin-top:14px}
+#draft-body .draft-part p{margin-bottom:4px}
+#draft-body .draft-part ul{margin:0 0 12px;padding-inline-start:24px}
 #draft-gaps ul{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,245px),1fr));gap:8px;list-style:none;padding:0}
 #draft-gaps button{width:100%;min-height:44px;padding:7px;text-align:left;color:var(--blue);font-variant-numeric:tabular-nums}
 .review-index{color:var(--muted);display:inline-block;min-width:1.25em}

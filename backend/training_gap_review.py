@@ -1,5 +1,6 @@
 """Read-only projection of an operator-reviewed, source-bound gap snapshot."""
 
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -10,6 +11,13 @@ from backend.transcription_windows import Window
 DIRECTORY = "training_gap_reviews"
 SAMPLE_RATE = 16000
 MAX_MANIFEST_BYTES = 128 * 1024
+
+
+@dataclass(frozen=True)
+class ReviewedPart:
+    pending: list[Window]
+    retained: list[Window]
+    artifacts: object
 
 
 def _ranges(value):
@@ -34,7 +42,7 @@ def review_file(output_dir: Path, course_id: int, name: str) -> Path:
     return path
 
 
-def project_review_windows(output_dir: Path, course: dict) -> str | None:
+def project_review_windows(output_dir: Path, course: dict, *, reviewed: dict | None = None) -> str | None:
     """Attach playback coordinates only; return the snapshot digest to local callers."""
     for part in course["parts"]:
         part.pop("review_windows", None)
@@ -65,6 +73,8 @@ def project_review_windows(output_dir: Path, course: dict) -> str | None:
                 continue
         except ValueError:
             continue
+        if reviewed is not None:
+            reviewed[part["id"]] = ReviewedPart(pending, retained, entry.get("accepted_artifacts"))
         if pending:
             part["review_windows"] = [{"start_seconds": w.start / SAMPLE_RATE, "end_seconds": w.end / SAMPLE_RATE}
                                       for w in pending]

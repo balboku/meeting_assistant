@@ -7,7 +7,8 @@ ACTIVE_TRAINING = ContextVar("training_transcription", default=False)
 
 @contextmanager
 def training_context(enabled):
-    token = ACTIVE_TRAINING.set(bool(enabled))
+    # Real course jobs carry their part ID; older callers can still use a boolean.
+    token = ACTIVE_TRAINING.set(enabled or False)
     try:
         yield
     finally:
