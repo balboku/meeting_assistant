@@ -5,4 +5,11 @@
 .part-issue{margin:8px 0;color:var(--text);overflow-wrap:anywhere}
 .time-range{white-space:nowrap}.part-state{flex:none;font-size:14px}
 .part-actions .review-jump{min-height:44px;border-color:var(--blue);color:var(--blue);font-weight:650}
+.review-windows{margin-top:10px}
+.review-windows p{margin-bottom:6px}
+#part-list .review-windows ul{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,225px),1fr));gap:8px;list-style:none;padding:0;margin:0}
+#part-list .review-windows li{padding:0;border:0}
+.review-windows .review-jump{width:100%;min-height:44px;padding:7px 9px;text-align:left;font-size:14px;font-variant-numeric:tabular-nums;color:var(--blue);overflow-wrap:anywhere}
+.review-index{color:var(--muted);display:inline-block;min-width:1.25em}
+#player-title{overflow-wrap:anywhere}
 @media(max-width:800px){.part-main{display:flex;flex-wrap:wrap;justify-content:flex-start;gap:4px 10px;align-items:baseline}}

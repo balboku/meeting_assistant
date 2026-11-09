@@ -13,6 +13,7 @@ from backend.auth import actor_from_request, require_permission
 from backend.local_speech import capabilities
 from backend.processing_policy import cloud_enabled
 from backend.seekable_media import ensure_seekable_playback_media, SeekableMediaError
+from backend.training_gap_review import project_review_windows
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = Path(os.getenv("MEETING_OUTPUT_DIR") or ROOT / "output")
@@ -75,7 +76,9 @@ def create(payload: NewCourse, request: Request):
 
 @router.get("/courses/{course_id}")
 def detail(course_id: int, request: Request):
-    return _run(request, "meeting:read", store.get_course, course_id)
+    course = _run(request, "meeting:read", store.get_course, course_id)
+    project_review_windows(OUTPUT_DIR, course)
+    return course
 
 
 @router.post("/courses/{course_id}/parts", status_code=201)

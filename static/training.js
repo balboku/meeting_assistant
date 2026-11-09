@@ -6,7 +6,7 @@
   const params = new URLSearchParams(location.search);
   let courseId = Number(params.get('course')) || null;
   const labels = {done:'逐字稿完成',saved:'等待送出檔案',pending:'背景等待中',processing:'正在轉錄',failed:'轉錄失敗',cancelled:'轉錄已取消'};
-  const needsReview = part => part.failure?.code === 'needs_review';
+  const needsReview = part => part.failure?.code === 'needs_review' || Boolean(part.review_windows?.length);
   const partStatus = part => needsReview(part) ? '待核聽' :
     (part.state === 'done' && !part.has_transcript ? '缺少逐字稿' : labels[part.state] || '逐字稿尚未就緒');
   const notesFailed = c => ['failed','cancelled'].includes(c.notes_job?.status ?? c.notes_job_status);
@@ -24,6 +24,24 @@
     const pad = n => String(n).padStart(2, '0');
     const minutes = Math.floor(seconds / 60);
     return `${minutes >= 60 ? `${Math.floor(minutes / 60)}:` : ''}${pad(minutes % 60)}:${pad(seconds % 60)}`;
+  }
+
+  function preciseTime(seconds) {
+    const ms = Math.round(seconds * 1000);
+    return `${timeLabel(Math.floor(ms / 1000))}.${String(ms % 1000).padStart(3, '0')}`;
+  }
+
+  function reviewList(part) {
+    const windows = part.review_windows || [];
+    if (!windows.length) return '';
+    return `<div class="review-windows"><p><strong>${windows.length} 個待核聽時間窗</strong><span class="course-meta">選擇時間跳到錄音，再按播放；不會送出補轉錄。</span></p>
+      <ul aria-label="第 ${part.position} 段待核聽時間窗">${windows.map((window, i) => {
+        const range = `${preciseTime(window.start_seconds)}–${preciseTime(window.end_seconds)}`;
+        const label = `第 ${part.position} 段，核聽 ${i + 1}：${range}`;
+        return `<li>${part.source_audio
+          ? `<button type="button" class="review-jump" data-play="${escape(part.id)}" data-seek="${window.start_seconds}" data-review-end="${window.end_seconds}" aria-label="${label}"><span class="review-index">${i + 1}.</span> ${range}</button>`
+          : `<span>${i + 1}. ${range}</span>`}</li>`;
+      }).join('')}</ul>${part.source_audio ? '' : '<p class="warning">本段沒有可供播放的來源檔，請聯絡管理員。</p>'}</div>`;
   }
 
   async function api(path, options = {}) {
@@ -77,13 +95,14 @@
       ? `<p class="warning">來源需複核：${escape(part.warnings.join('；'))}</p>` : '';
     const play = part.source_audio ? `<button data-play="${part.id}">${part.has_transcript ? '播放／查看逐字稿' : '從頭播放'}</button>` : '';
     const issue = part.failure;
+    const hasReviewList = Boolean(part.review_windows?.length);
     const hasRange = Number.isInteger(issue?.start_seconds) && Number.isInteger(issue?.end_seconds)
       && issue.start_seconds >= 0 && issue.end_seconds > issue.start_seconds;
     const start = hasRange ? timeLabel(issue.start_seconds) : '';
-    const failure = issue ? `<p class="part-issue">${escape(issue.reason)}${hasRange
+    const failure = hasReviewList ? '' : issue ? `<p class="part-issue">${escape(issue.reason)}${hasRange
       ? `<br>錄音內第 ${escape(issue.segment_number)} 個切片，最近補救範圍：<span class="time-range">${start}–${timeLabel(issue.end_seconds)}</span>。${part.source_audio ? '' : ' 本段沒有可供播放的來源檔。'}`
       : needsReview(part) ? ' 系統未留下可跳播的時間點。' : ''}</p>` : '';
-    const review = needsReview(part) && hasRange && part.source_audio
+    const review = !hasReviewList && needsReview(part) && hasRange && part.source_audio
       ? `<button class="review-jump" data-play="${part.id}" data-seek="${issue.start_seconds}" aria-label="第 ${part.position} 段，跳到 ${start} 核聽">跳到 ${start} 核聽</button>` : '';
     const retry = canWrite && !needsReview(part) && ['failed', 'cancelled'].includes(part.state)
       ? `<button data-retry="${part.job_id}">重試本段</button>` : '';
@@ -94,7 +113,7 @@
       <button data-move="${part.id}" data-direction="1" ${index === course.parts.length - 1 ? 'disabled' : ''} aria-label="第 ${part.position} 段下移">下移</button>` : '';
     return `<li>
       <div class="part-main"><span class="part-title">第 ${part.position} 段 · ${escape(part.title)}</span><span class="part-state${issue?' warning':''}">${escape(partStatus(part))}</span></div>
-      <span class="course-meta">${escape(part.created_at)}${progress}</span>${failure}${warning}
+      <span class="course-meta">${escape(part.created_at)}${progress}</span>${failure}${reviewList(part)}${warning}
       <div class="part-actions">${review}${play}${retry}${move}</div>${missing}
     </li>`;
   }
@@ -138,23 +157,28 @@
     }
   }
 
-  function openPart(part, seconds=0, focus=false) {
+  function openPart(part, seconds=0, focus=false, reviewEnd=null) {
     if (!part?.source_audio) return;
     selectedPart = part;
     $('player-panel').hidden = false; $('player-error').hidden = true; $('part-transcript').hidden = true;
-    $('player-title').textContent = `第 ${part.position} 段 · ${part.title}${seconds>0 ? `（核聽 ${timeLabel(Math.floor(seconds))}）` : ''}`;
+    const range = reviewEnd === null ? (seconds>0 ? timeLabel(Math.floor(seconds)) : '')
+      : `${preciseTime(seconds)}–${preciseTime(reviewEnd)}`;
+    $('player-title').textContent = `第 ${part.position} 段 · ${part.title}${range ? `（核聽 ${range}）` : ''}`;
     const player = $('course-player');
+    const mediaUrl = `/training/courses/${course.id}/parts/${part.id}/media`;
     const playbackError = text => { $('player-error').textContent = text; $('player-error').hidden = false; };
-    player.onloadedmetadata = () => {
-      if (!seconds) return;
+    const seek = () => {
       if (!Number.isFinite(player.duration) || seconds >= player.duration) {
         playbackError('無法定位這個時間點：媒體長度不足或尚未取得。請確認來源媒體。');
         return;
       }
       player.currentTime = seconds;
     };
+    player.onloadedmetadata = seek;
     player.onerror = () => playbackError('原始媒體目前無法播放，請更新狀態或聯絡管理員確認來源。');
-    player.src = `/training/courses/${course.id}/parts/${part.id}/media`;
+    player.pause();
+    if (player.getAttribute('src') !== mediaUrl || player.error) player.src = mediaUrl;
+    else if (player.readyState >= 1) seek();
     if (focus) $('player-title').focus({preventScroll:true});
     $('player-panel').scrollIntoView({block:'start',behavior:'smooth'});
   }
@@ -180,7 +204,8 @@
   });
   $('part-list').addEventListener('click',event=>action(async()=>{
     const play=event.target.closest('[data-play]'),retry=event.target.closest('[data-retry]'),move=event.target.closest('[data-move]');
-    if(play) openPart(course.parts.find(p=>p.id===play.dataset.play), Number(play.dataset.seek) || 0, true);
+    if(play) openPart(course.parts.find(p=>p.id===play.dataset.play), Number(play.dataset.seek) || 0, true,
+      play.dataset.reviewEnd === undefined ? null : Number(play.dataset.reviewEnd));
     if(retry) {await api(`/jobs/${retry.dataset.retry}/retry`,{method:'POST'});await loadDetail();}
     if(move) {const ids=course.parts.map(p=>p.id),i=ids.indexOf(move.dataset.move),j=i+Number(move.dataset.direction);[ids[i],ids[j]]=[ids[j],ids[i]];await api(`/training/courses/${course.id}/order`,json('PUT',{part_ids:ids,version:course.version}));await loadDetail();}
   }));
