@@ -38,6 +38,15 @@ const visualHtml = reader.itemBody(visual,{source_media_available:true});
 assert(visualHtml.includes('畫面補充') && visualHtml.includes('待確認'));
 assert(visualHtml.includes('data-mr-seek="92"') && visualHtml.includes('目標 85%'));
 assert(visualHtml.includes('&lt;table&gt;') && !visualHtml.includes('<table>'));
+const digest = 'a'.repeat(64);
+const withImage = {...visual, visual_notes:[{...visual.visual_notes[0], frame_sha256:digest}]};
+const preview = reader.itemBody(withImage,{id:17,source_media_available:true});
+assert(preview.includes(`src="/meetings/17/visual-frames/${digest}"`) && preview.includes('loading="lazy"'));
+assert(preview.includes('data-mr-seek="92"') && preview.includes('畫面來源'));
+assert(!reader.itemBody(withImage,{id:'"/><script>'}).includes('<img'));
+assert(!reader.itemBody({...visual, visual_notes:[{...visual.visual_notes[0],frame_sha256:'https://example.test'}]},{id:17}).includes('<img'));
+assert(reader.render({id:17,full_content:`- 畫面補充：示例 <!-- visual-frame:${digest} -->`},
+  {markdown:s=>s}).includes(`![引用的關鍵截圖](/meetings/17/visual-frames/${digest})`));
 assert(reader.itemBody(visual,{source_media_available:false}).includes('原始檔不可播放'));
 assert(!reader.itemBody({...r,visual_notes:visual.visual_notes},{}).includes('畫面補充'));
 assert(reader.render({minutes_view:view,quality_report:{visual_evidence:{status:'unavailable'}}},

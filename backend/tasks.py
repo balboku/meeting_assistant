@@ -60,6 +60,7 @@ from backend.processing_policy import require_cloud, require_cloud_for_meeting
 from backend.local_speech import diarize_transcript, speech_report, set_speech_check
 from backend.transcript_translation import append_chinese_translation
 from backend.visual_evidence import supplement_new_video
+from backend.visual_frames import discard_frame_bundle
 from backend.transcript_diagnostics import transcript_turns as _transcript_turns, transcript_speaker_labels
 from backend.transcript_sections import (
     TRANSCRIPT_SECTION_HEADING, TRANSCRIPT_SECTION_PATTERN, NEXT_TOP_LEVEL_SECTION_PATTERN,
@@ -8975,6 +8976,7 @@ def process_audio_task(
     segment_paths: list[Path] = []
     temporary_segment_paths: list[Path] = []
     pending_output_path: Optional[Path] = None
+    output_path: Optional[Path] = None
     audio_report: dict[str, Any] = {}
     segment_report: list[dict[str, Any]] = []
     existing_segment_transcripts: dict[int, str] = {}
@@ -10829,7 +10831,8 @@ def process_audio_task(
         if (job_record.get("payload") or {}).get("capture_visual_evidence") is True:
             meeting_content, visual_report = supplement_new_video(client, audio_path, meeting_content,
                 full_transcript, summary_secondary_model,
-                lambda: (_raise_if_cancelled(job_id), _raise_if_job_lease_lost(job_id, worker_id, worker_generation)))
+                lambda: (_raise_if_cancelled(job_id), _raise_if_job_lease_lost(job_id, worker_id, worker_generation)),
+                output_path=output_path)
             if visual_report: quality_report["visual_evidence"] = visual_report
         quality_report["summary_quality_mode"] = "high" if high_quality_summary else "standard"
         if previous_minutes_context:
@@ -10894,8 +10897,6 @@ quality_label: {quality_report['label']}
         pending_output_path = None
         logger.info(f"[{job_id}] 💾 Markdown 已儲存：{output_path}")
 
-        # 步驟 7：寫入 SQLite
-        # ------------------------------------------------------------------
         _raise_if_job_lease_lost(job_id, worker_id, worker_generation)
         summary_preview = _extract_summary_preview(meeting_content)
         save_meeting(
@@ -10909,9 +10910,7 @@ quality_label: {quality_report['label']}
             structured_summary=structured_summary,
         )
 
-        # ------------------------------------------------------------------
         # 步驟 8：更新任務狀態為完成
-        # ------------------------------------------------------------------
         update_job_status(
             job_id,
             status="done",
@@ -10957,6 +10956,8 @@ quality_label: {quality_report['label']}
     finally:
         ACTIVE_TRANSCRIPTION_BUDGET.reset(budget_token)
         ACTIVE_CHECKPOINTS.reset(checkpoint_token)
+        if output_path is not None and not output_path.exists():
+            discard_frame_bundle(output_path)
         if pending_output_path is not None and pending_output_path.exists():
             try:
                 pending_output_path.unlink()

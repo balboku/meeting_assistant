@@ -397,6 +397,8 @@ async def outbound_policy_error(request: Request, exc: PermissionError):
 app.include_router(recording_launcher_router)
 app.include_router(source_media_recovery_router)
 app.include_router(training_router)
+from backend.visual_frames_api import router as visual_frames_router
+app.include_router(visual_frames_router)
 
 def _host_without_port(host: str) -> str:
     host = host.strip()

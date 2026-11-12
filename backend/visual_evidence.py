@@ -15,12 +15,13 @@ from google.genai import types
 
 from backend.processing_policy import require_cloud
 from backend.visual_notes import insert_visual_notes, topics_for_visual_analysis
+from backend.visual_frames import MAX_FRAME_BYTES, attach_referenced_frames
 from backend.visual_sampling import HEIGHT, MAX_REQUEST_IMAGES, MAX_SCAN_SECONDS, SAMPLE_HZ, WIDTH, select_scene_times
 
 
 logger = logging.getLogger(__name__)
 VIDEO_SUFFIXES = frozenset({".webm", ".mp4", ".mov", ".avi", ".mkv", ".mpeg", ".mpg", ".wmv"})
-MAX_JPEG_BYTES = 400_000
+MAX_JPEG_BYTES = MAX_FRAME_BYTES
 MAX_REQUEST_JPEG_BYTES = 4_800_000  # Keep the original per-meeting image byte ceiling.
 MAX_CONTEXT_CHARS = 34_000
 _TIMED_LINE = re.compile(r"^\s*\[(\d{1,3}):([0-5]\d)\]")
@@ -171,12 +172,13 @@ def _validated_notes(raw: str, topics: dict, frames: dict, transcript: str) -> d
         seconds = frames[frame][0]
         grouped.setdefault(topic, []).append({
             "observed": observed, "source": source, "timecode": f"{seconds // 60:02d}:{seconds % 60:02d}",
-            "pending": kind == "conflict", "transcript_quote": quote,
+            "pending": kind == "conflict", "transcript_quote": quote, "frame_id": frame,
         })
     return grouped
 
 
-def supplement_new_video(client, path: Path, content: str, transcript: str, model: str, check):
+def supplement_new_video(client, path: Path, content: str, transcript: str, model: str, check,
+                         *, output_path: Path | None = None):
     """Return the untouched text on optional-stage failure; cancellation still propagates."""
     enabled = os.getenv("MEETING_VISUAL_EVIDENCE", "1").strip().lower() not in {"0", "false", "no", "off"}
     if not enabled or path.suffix.lower() not in VIDEO_SUFFIXES:
@@ -214,10 +216,13 @@ def supplement_new_video(client, path: Path, content: str, transcript: str, mode
         raw = _request_notes(client, selected_model, topics, transcript, frames)
         checked()
         notes = _validated_notes(raw, topics, frames, transcript)
-        return insert_visual_notes(content, notes), {
+        report = {
             "status": "complete" if notes else "no_evidence",
             "frame_count": len(frames), "item_count": sum(map(len, notes.values())),
         }
+        if output_path is not None and notes:
+            report["screenshot_count"] = attach_referenced_frames(output_path, notes, frames)
+        return insert_visual_notes(content, notes), report
     except Exception as exc:
         if interrupted:
             raise interrupted[0]

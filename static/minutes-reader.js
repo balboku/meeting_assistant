@@ -47,15 +47,32 @@
   function fields(item, pairs) {
     return pairs.map(([label,key]) => `<p><strong>${label}：</strong>${esc(text(item[key]))}</p>`).join('');
   }
+  function frameUrl(meeting, digest) {
+    return /^\d+$/.test(String(meeting.id)) && /^[0-9a-f]{64}$/.test(String(digest))
+      ? `/meetings/${meeting.id}/visual-frames/${digest}` : '';
+  }
+  function originalMarkdown(meeting) {
+    return String(meeting.full_content || '').replace(
+      /^(- 畫面補充[^\r\n]+) <!-- visual-frame:([0-9a-f]{64}) -->\r?$/gm,
+      (_, line, digest) => {
+        const url = frameUrl(meeting, digest);
+        return url ? `${line}\n\n![引用的關鍵截圖](${url})\n` : line;
+      });
+  }
   function visualNotes(item, meeting) {
     return list(item.visual_notes).map(note => {
       const time = Number(note.seconds);
       const canSeek = Number.isFinite(time) && time >= 0 && meeting.source_media_available !== false;
+      const url = frameUrl(meeting, note.frame_sha256);
+      const screenshot = url ? `<figure class="mr-visual-frame"><a href="${url}" target="_blank" rel="noopener"
+        aria-label="開啟完整截圖：${esc(note.source)}，錄影 ${esc(note.timecode)}"><img src="${url}" loading="lazy"
+        decoding="async" alt="${esc(note.source)}，錄影 ${esc(note.timecode)} 的關鍵截圖"></a>
+        <figcaption class="mr-meta" hidden>截圖無法載入；仍可參考畫面說明與錄影時間。</figcaption></figure>` : '';
       return `<div class="mr-visual-note"><p><strong>畫面補充</strong> ${note.pending ? '<span class="mr-risk">待確認</span>' : ''}：${esc(note.observed)}</p>
         ${note.pending ? `<p>逐字稿：「${esc(note.transcript_quote)}」</p>` : ''}
         <div class="mr-evidence">畫面來源：${esc(note.source)}
           ${canSeek ? `<button type="button" data-mr-seek="${time}" aria-label="跳到錄影畫面 ${esc(note.timecode)}">${esc(note.timecode)} 跳播</button>`
-            : `<span>錄影時間 ${esc(note.timecode)}（原始檔不可播放）</span>`}</div></div>`;
+            : `<span>錄影時間 ${esc(note.timecode)}（原始檔不可播放）</span>`}</div>${screenshot}</div>`;
     }).join('');
   }
   function itemBody(item, meeting) {
@@ -105,7 +122,7 @@
     const visualMessage = visualStatus === 'unavailable' ? '可照常閱讀逐字稿版；本次未能完成錄影畫面辨識。'
       : visualStatus === 'no_evidence' ? '可照常閱讀逐字稿版；本次未找到可補充的清楚畫面。' : '';
     const visualNotice = visualMessage ? `<p class="mr-meta">${visualMessage}</p>` : '';
-    if (!view?.available) return `<div class="minutes-reader"><p class="mr-meta">${esc(view?.reason || '請閱讀原文；這份紀錄尚無可安全整合的議題資料。')}</p>${visualNotice}<div class="md-content">${options.markdown(meeting.full_content || '')}</div></div>`;
+    if (!view?.available) return `<div class="minutes-reader"><p class="mr-meta">${esc(view?.reason || '請閱讀原文；這份紀錄尚無可安全整合的議題資料。')}</p>${visualNotice}<div class="md-content">${options.markdown(originalMarkdown(meeting))}</div></div>`;
     return `<section class="minutes-reader" aria-label="會議紀錄閱讀器"><nav class="mr-modes" aria-label="會議閱讀方式">${Object.entries(modes).map(([key,label])=>`<button type="button" data-mr-mode="${key}" aria-pressed="${key==='topics'}">${label}</button>`).join('')}</nav>
       <p class="mr-meta">${view.discussions.length} 個議題 · ${view.decisions.length} 項決議 · ${view.actions.length} 項待辦 · ${esc(reviewLabels[view.review_status] || '待人工確認')}</p>
       ${visualNotice}
@@ -117,6 +134,12 @@
   function mount(host, meeting, options) {
     const el = host.querySelector('.minutes-reader');
     if (!el) return;
+    el.addEventListener('error', event => {
+      if (!event.target.matches?.('img[src*="/visual-frames/"]')) return;
+      const frame = event.target.closest('.mr-visual-frame');
+      if (frame) { frame.querySelector('a').hidden = true; frame.querySelector('figcaption').hidden = false; }
+      else event.target.replaceWith(document.createTextNode('截圖無法載入；仍可參考畫面說明與錄影時間。'));
+    }, true);
     if (!meeting.minutes_view?.available) { options.enhance(el.querySelector('.md-content')); return; }
     const view = meeting.minutes_view, data = model(view), body = el.querySelector('.mr-body');
     const drawer = el.querySelector('.mr-drawer');
@@ -136,7 +159,7 @@
       }
       el.querySelector('.mr-prefix').hidden = mode==='original';
       body.innerHTML = mode==='map' ? map(data,meeting) : mode==='actions' ? `<h3>全會議待辦總覽</h3><p class="mr-meta">每個 A 編號列一次；不自動合併或判定完成。</p>${actions(view.actions,meeting)}`
-        : mode==='original' ? `<div class="md-content">${options.markdown(meeting.full_content || '')}</div>` : topics(data,meeting);
+        : mode==='original' ? `<div class="md-content">${options.markdown(originalMarkdown(meeting))}</div>` : topics(data,meeting);
       if (mode==='original') options.enhance(body.querySelector('.md-content'));
       else if (appendix.hidden) {
         appendix.hidden = false;

@@ -237,7 +237,7 @@ class VisualEvidenceTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(tasks, "_append_transcript_chinese_translation",
                                                 side_effect=lambda client, content, *_: (content, {})))
             stack.enter_context(mock.patch.object(tasks.genai, "Client", return_value=self.client))
-            stack.enter_context(mock.patch.object(visual, "_keyframes", return_value=FRAMES))
+            extract = stack.enter_context(mock.patch.object(visual, "_keyframes", return_value=FRAMES))
             probe = stack.enter_context(mock.patch.object(visual, "_video_stream", return_value=True))
             self.client.models.generate_content.side_effect = RuntimeError("429 fixture")
             worker = JobQueueWorker()
@@ -253,3 +253,17 @@ class VisualEvidenceTests(unittest.TestCase):
             probe.assert_called_once()
             self.client.models.generate_content.assert_called_once()
             self.assertEqual(source.read_bytes(), b"synthetic-visual-fixture")
+
+            from backend.visual_frames import read_frame
+            jpeg = b"\xff\xd8worker fixture\xff\xd9"
+            extract.return_value = {"F01": (12, jpeg)}
+            self.client.models.generate_content.side_effect = None
+            self.client.models.generate_content.return_value = SimpleNamespace(
+                text=json.dumps({"items": [SUPPLEMENT]}))
+            enqueue_audio_job("new-with-screenshot", source, root / "output", capture_visual_evidence=True)
+            worker.process_job(database.claim_next_pending_job())
+            self.assertEqual(database.get_job("new-with-screenshot")["status"], "done")
+            meeting = database.get_meeting(database.get_meeting_by_job_id("new-with-screenshot")["id"])
+            self.assertEqual(meeting["quality_report"]["visual_evidence"]["screenshot_count"], 1)
+            image = read_visual_notes(meeting["full_content"])["D1"][0]["frame_sha256"]
+            self.assertEqual(read_frame(Path(meeting["output_path"]), image), jpeg)

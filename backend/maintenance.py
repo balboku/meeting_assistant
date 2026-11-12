@@ -25,6 +25,7 @@ from typing import Mapping
 from backend.backup_policy import local_snapshot_keep
 from backend.snapshot_media import SnapshotArchive, file_digest, shared_objects, shared_signature, materialize_media, replicate_media, safe_member
 from backend.training_backup import snapshot_parts as snapshot_training_parts, restore_parts as restore_training_parts
+from backend.visual_frame_snapshot import restore_visual_frames, snapshot_visual_frames
 
 
 _SNAPSHOT_VERIFICATION_CACHE: dict[
@@ -444,6 +445,8 @@ def create_record_snapshot(
                     "bytes": output_path.stat().st_size,
                 })
                 meeting_entry["markdown_archive_path"] = arcname
+                if frames_arcname := snapshot_visual_frames(archive, output_path, arcname, int(row["id"]), entries, missing):
+                    meeting_entry["visual_frames_archive_path"] = frames_arcname
             else:
                 missing.append({
                     "category": "markdown",
@@ -829,6 +832,8 @@ def restore_record_snapshot(snapshot_path: Path, target_dir: Path) -> dict[str, 
                 )
                 shutil.copy2(markdown_source, markdown_target)
                 restored_files += 1
+                if frame_arcname := meeting.get("visual_frames_archive_path"):
+                    restored_files += restore_visual_frames(target, markdown_target, markdown_arcname, frame_arcname)
                 conn.execute(
                     "UPDATE meetings SET output_path=? WHERE id=?",
                     (str(markdown_target), meeting_id),

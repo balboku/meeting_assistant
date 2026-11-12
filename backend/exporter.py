@@ -11,6 +11,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor, Twips
 from backend.minutes_view import topic_minutes_markdown
+from backend.visual_notes import strip_frame_markers
 
 logger = logging.getLogger("MeetingAssistant.Exporter")
 
@@ -68,7 +69,7 @@ def export_meeting_to_docx(meeting_record: dict, output_filepath: str, *, layout
             content = content_with_quality_review_note(meeting_record)
             if layout == "topics":
                 content = topic_minutes_markdown({**meeting_record, "full_content": content})
-            _set_cell_markdown(table.cell(5, 0), content)
+            _set_cell_markdown(table.cell(5, 0), strip_frame_markers(content))
 
         doc.save(output_filepath)
         logger.info(f"成功匯出 Word 文件：{output_filepath}")

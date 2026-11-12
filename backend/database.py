@@ -4352,5 +4352,8 @@ def delete_meeting(meeting_id: int) -> bool:
             parent.rmdir()
         except OSError:
             pass
+    if output_file.suffix.lower() == ".md":
+        from backend.visual_frames import discard_frame_bundle
+        discard_frame_bundle(output_file)
 
     return True

@@ -24,6 +24,10 @@
 .mr-evidence button { color:var(--blue); min-height:32px; padding:4px 8px; }
 .mr-visual-note { padding:4px 12px; margin:8px 0; border-inline-start:3px solid var(--blue-dim); background:var(--bg-card2); }
 .mr-visual-note .mr-evidence button { min-height:44px; }
+.mr-visual-frame { margin:10px 0 8px; max-width:42rem; }
+.mr-visual-frame a { display:block; width:fit-content; max-width:100%; }
+.mr-visual-frame img,.minutes-reader .md-content img[src*="/visual-frames/"] { display:block; max-width:100%; height:auto; border:1px solid var(--border); border-radius:6px; }
+.mr-visual-frame a:focus-visible { outline:2px solid var(--blue); outline-offset:3px; }
 .mr-actions { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; }
 .mr-actions th,.mr-actions td { text-align:left; padding:10px; border:1px solid var(--border); vertical-align:top; }
 .mr-actions th { background:var(--bg-card2); }
