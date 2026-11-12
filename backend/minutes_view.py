@@ -197,8 +197,9 @@ def _decision_lines(items: list[dict]) -> list[str]:
     return lines
 
 
-def topic_minutes_markdown(record: dict, view: dict | None = None) -> str:
-    """Export projection; the original Markdown remains byte-for-byte untouched."""
+def topic_minutes_markdown(record: dict, view: dict | None = None, *,
+                           visual_notes_at: dict[int, dict] | None = None) -> str:
+    """Project topics, optionally recording output line numbers of cited screenshots for Word."""
     view = view if view is not None else build_minutes_view(record)
     if not view.get("available"):
         return str(record.get("full_content") or "")
@@ -212,13 +213,17 @@ def topic_minutes_markdown(record: dict, view: dict | None = None) -> str:
                      _cell([r["id"] for r in rs if d["id"] in r["related_discussions"]]),
                      _cell([a["id"] for a in aa if d["id"] in a["related_discussions"]])]) + " |")
     lines += ["", "## 議題式會議紀錄", ""]
+    note_parts = {}
     for d in ds:
         lines += [f"### {d['id']}. {d['topic']}"]
         for label, field in [("討論摘要", "summary"), ("背景", "context"), ("重點", "key_points"),
                              ("影響／風險", "impact"), ("待釐清", "open_questions"), ("佐證時間", "evidence_timecodes")]:
             lines.append(f"- {label}：{_text(d.get(field))}")
         lines.append("- " + _review_note(d))
-        lines.extend(visual_note_line(note) for note in d.get("visual_notes", []))
+        for note in d.get("visual_notes", []):
+            if visual_notes_at is not None and note.get("frame_sha256"):
+                note_parts[len(lines)] = note
+            lines.append(visual_note_line(note))
         lines += ["", "#### 決議", ""] + _decision_lines([r for r in rs if d["id"] in r["related_discussions"]])
         lines += ["#### 後續行動", ""] + _actions_table([a for a in aa if d["id"] in a["related_discussions"]])
     if view["unassigned"]:
@@ -227,4 +232,10 @@ def topic_minutes_markdown(record: dict, view: dict | None = None) -> str:
         lines += _actions_table([a for a in aa if a["id"] in view["unassigned"]])
     lines += ["## 待辦總覽", "", "每個 A 編號列一次；相同工作不自動合併。", ""] + _actions_table(aa)
     lines += [view["appendix_markdown"]]
+    if note_parts:
+        index = 0
+        for part, value in enumerate(lines):
+            if part in note_parts:
+                visual_notes_at[index] = note_parts[part]
+            index += len((value + "\n").splitlines())
     return "\n".join(lines)

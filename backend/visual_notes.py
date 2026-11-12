@@ -39,20 +39,31 @@ def topics_for_visual_analysis(content: str) -> dict[str, str]:
             for key, title, start, end in blocks}
 
 
-def read_visual_notes(content: str) -> dict[str, list[dict]]:
-    grouped = defaultdict(list)
+def _indexed_notes(content: str):
     for key, _, start, end in _topic_blocks(content):
-        for line in content[start:end].splitlines():
+        first_line = len(content[:start].splitlines()) - 1
+        for index, line in enumerate(content[start:end].splitlines(), start=first_line):
             match = VISUAL_LINE.fullmatch(line.strip())
             if match and bool(match[1]) == bool(match[5]):
                 pending, observed, source, code, quote, frame = match.groups()
                 minutes, seconds = map(int, code.split(":"))
-                grouped[key].append({"observed": observed, "source": source,
-                                     "timecode": code, "seconds": minutes * 60 + seconds,
-                                     "pending": bool(pending), "transcript_quote": quote})
+                note = {"observed": observed, "source": source,
+                        "timecode": code, "seconds": minutes * 60 + seconds,
+                        "pending": bool(pending), "transcript_quote": quote}
                 if frame:
-                    grouped[key][-1]["frame_sha256"] = frame
+                    note["frame_sha256"] = frame
+                yield key, index, note
+
+
+def read_visual_notes(content: str) -> dict[str, list[dict]]:
+    grouped = defaultdict(list)
+    for key, _, note in _indexed_notes(content):
+        grouped[key].append(note)
     return dict(grouped)
+
+
+def cited_notes_by_line(content: str) -> dict[int, dict]:
+    return {index: note for _, index, note in _indexed_notes(content) if note.get("frame_sha256")}
 
 
 def visual_note_line(note: dict, *, include_frame: bool = False) -> str:

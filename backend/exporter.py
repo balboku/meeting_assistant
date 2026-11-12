@@ -10,8 +10,9 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor, Twips
-from backend.minutes_view import topic_minutes_markdown
-from backend.visual_notes import strip_frame_markers
+from backend.minutes_view import build_minutes_view, topic_minutes_markdown
+from backend.visual_notes import cited_notes_by_line, strip_frame_markers
+from backend.word_visual_frames import WordVisualFrames
 
 logger = logging.getLogger("MeetingAssistant.Exporter")
 
@@ -67,9 +68,19 @@ def export_meeting_to_docx(meeting_record: dict, output_filepath: str, *, layout
         # 討論內容 (Row 5, Cell 0)
         if len(table.rows) > 5 and len(table.rows[5].cells) > 0:
             content = content_with_quality_review_note(meeting_record)
+            notes = None
             if layout == "topics":
-                content = topic_minutes_markdown({**meeting_record, "full_content": content})
-            _set_cell_markdown(table.cell(5, 0), strip_frame_markers(content))
+                record = {**meeting_record, "full_content": content}
+                view = build_minutes_view(record)
+                if view["available"]:
+                    notes = {}
+                    content = topic_minutes_markdown(record, view, visual_notes_at=notes)
+            body_cell = table.cell(5, 0)
+            section = doc.sections[0] if doc.sections else None
+            page_width = ((section.page_width or Inches(8.5)) - (section.left_margin or 0) - (section.right_margin or 0)
+                          if section else Inches(6))
+            frames = WordVisualFrames(meeting_record.get("output_path"), min(body_cell.width or page_width, page_width))
+            _set_cell_markdown(body_cell, content, notes=notes, frames=frames)
 
         doc.save(output_filepath)
         logger.info(f"成功匯出 Word 文件：{output_filepath}")
@@ -198,10 +209,16 @@ def _insert_after_frontmatter(markdown: str, insertion: str) -> str:
     return text[:after] + insertion + text[after:]
 
 
-def _set_cell_markdown(cell, markdown: str) -> None:
+def _set_cell_markdown(cell, markdown: str, *, notes=None, frames=None) -> None:
     """將會議 Markdown 轉成較可讀的 Word 內容，特別處理待辦事項表格。"""
     _clear_cell_content(cell)
-    lines = _strip_frontmatter(markdown).splitlines()
+    original = _strip_frontmatter(markdown)
+    lines = strip_frame_markers(original).splitlines()
+    if notes is None:
+        notes = cited_notes_by_line(original) if frames else {}
+    else:
+        offset = len(markdown.splitlines()) - len(original.splitlines())
+        notes = {index - offset: note for index, note in notes.items()}
     first_paragraph_used = False
     in_transcript = False
     in_translation = False
@@ -243,6 +260,8 @@ def _set_cell_markdown(cell, markdown: str) -> None:
             )
             paragraph.paragraph_format.space_before = Pt(6)
             paragraph.paragraph_format.space_after = Pt(4)
+            if notes and heading_match[1] == "###" and re.match(r"D\d+\.", heading):
+                paragraph.paragraph_format.keep_with_next = True
             index += 1
             continue
 
@@ -267,6 +286,8 @@ def _set_cell_markdown(cell, markdown: str) -> None:
                 italic=(role == "note"),
                 color=RGBColor(89, 89, 89) if role == "note" else None,
             )
+            if frames and index in notes:
+                frames.append(cell, paragraph, notes[index])
         index += 1
 
 
