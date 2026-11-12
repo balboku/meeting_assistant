@@ -47,12 +47,23 @@
   function fields(item, pairs) {
     return pairs.map(([label,key]) => `<p><strong>${label}：</strong>${esc(text(item[key]))}</p>`).join('');
   }
+  function visualNotes(item, meeting) {
+    return list(item.visual_notes).map(note => {
+      const time = Number(note.seconds);
+      const canSeek = Number.isFinite(time) && time >= 0 && meeting.source_media_available !== false;
+      return `<div class="mr-visual-note"><p><strong>畫面補充</strong> ${note.pending ? '<span class="mr-risk">待確認</span>' : ''}：${esc(note.observed)}</p>
+        ${note.pending ? `<p>逐字稿：「${esc(note.transcript_quote)}」</p>` : ''}
+        <div class="mr-evidence">畫面來源：${esc(note.source)}
+          ${canSeek ? `<button type="button" data-mr-seek="${time}" aria-label="跳到錄影畫面 ${esc(note.timecode)}">${esc(note.timecode)} 跳播</button>`
+            : `<span>錄影時間 ${esc(note.timecode)}（原始檔不可播放）</span>`}</div></div>`;
+    }).join('');
+  }
   function itemBody(item, meeting) {
     const kind = item.id[0];
     const pairs = kind === 'D' ? [['討論摘要','summary'],['背景','context'],['重點','key_points'],['影響／風險','impact'],['待釐清','open_questions']]
       : kind === 'R' ? [['決議','decision'],['依據／條件','basis'],['關聯議題','related_discussions']]
       : [['任務','task'],['負責人','owner'],['期限（原文）','due'],['優先級','priority'],['關聯議題','related_discussions'],['關聯決議','related_decisions']];
-    return badges(item)+status(item)+fields(item,pairs)+evidence(item,meeting);
+    return badges(item)+status(item)+fields(item,pairs)+evidence(item,meeting)+(kind === 'D' ? visualNotes(item,meeting) : '');
   }
   function actions(items, meeting) {
     if (!items.length) return '<p class="mr-meta">原稿未列明此議題的待辦；不代表無需後續行動。</p>';
@@ -71,7 +82,7 @@
     return `<nav class="mr-jump" aria-label="議題跳轉">${data.branches.map(b=>`<button type="button" data-mr-topic="${esc(b.discussion.id)}">${esc(b.discussion.id+' '+b.discussion.topic)}</button>`).join('')}</nav>` + data.branches.map(b => {
       const d = b.discussion;
       return `<article class="mr-topic" id="minutes-topic-${esc(d.id)}" tabindex="-1"><h3>${esc(d.id)} ${esc(d.topic)}</h3>${badges(d)}<p>${esc(text(d.summary))}</p>
-        <p><strong>影響／風險：</strong>${esc(text(d.impact))}</p>${evidence(d,meeting)}
+        <p><strong>影響／風險：</strong>${esc(text(d.impact))}</p>${evidence(d,meeting)}${visualNotes(d,meeting)}
         <details><summary>背景與討論重點</summary>${fields(d,[['背景','context'],['重點','key_points'],['待釐清','open_questions']])}${status(d)}</details>
         <h4>決議</h4>${decisions(b.decisions,meeting)}<h4>後續行動</h4>${actions(b.actions,meeting)}</article>`;
     }).join('') + unassigned(data.unassigned,meeting);
@@ -90,9 +101,14 @@
   }
   function render(meeting, options) {
     const view = meeting.minutes_view;
-    if (!view?.available) return `<div class="minutes-reader"><p class="mr-meta">${esc(view?.reason || '請閱讀原文；這份紀錄尚無可安全整合的議題資料。')}</p><div class="md-content">${options.markdown(meeting.full_content || '')}</div></div>`;
+    const visualStatus = meeting.quality_report?.visual_evidence?.status;
+    const visualMessage = visualStatus === 'unavailable' ? '可照常閱讀逐字稿版；本次未能完成錄影畫面辨識。'
+      : visualStatus === 'no_evidence' ? '可照常閱讀逐字稿版；本次未找到可補充的清楚畫面。' : '';
+    const visualNotice = visualMessage ? `<p class="mr-meta">${visualMessage}</p>` : '';
+    if (!view?.available) return `<div class="minutes-reader"><p class="mr-meta">${esc(view?.reason || '請閱讀原文；這份紀錄尚無可安全整合的議題資料。')}</p>${visualNotice}<div class="md-content">${options.markdown(meeting.full_content || '')}</div></div>`;
     return `<section class="minutes-reader" aria-label="會議紀錄閱讀器"><nav class="mr-modes" aria-label="會議閱讀方式">${Object.entries(modes).map(([key,label])=>`<button type="button" data-mr-mode="${key}" aria-pressed="${key==='topics'}">${label}</button>`).join('')}</nav>
       <p class="mr-meta">${view.discussions.length} 個議題 · ${view.decisions.length} 項決議 · ${view.actions.length} 項待辦 · ${esc(reviewLabels[view.review_status] || '待人工確認')}</p>
+      ${visualNotice}
       <details class="mr-help"><summary>閱讀與確認說明</summary><p>各模式共用同一份資料。決議「原稿已確認」不等於人工核准；跨議題項目沿用相同編號，待辦總覽每個編號只列一次，不自動合併任務。背景、佐證與審查操作仍保留。</p><p>議題內容${view.source === 'structured_summary' ? '含結構化資料中的人工欄位確認' : '由原文規則式解析'}；「原文」可查看原始文件。切換閱讀模式不會修改或核准紀錄。</p></details>
       <div class="mr-prefix md-content">${options.markdown(view.prefix_markdown.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/,''))}</div>
       <div class="mr-body"></div><div class="mr-appendix md-content">${options.markdown(view.appendix_markdown)}</div>

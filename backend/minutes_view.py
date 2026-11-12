@@ -10,6 +10,7 @@ from copy import deepcopy
 import re
 
 from backend.structured_minutes import parse_standardized_minutes
+from backend.visual_notes import VISUAL_LINE, read_visual_notes, visual_note_line
 
 
 FIELDS = {"discussions": ("discussion_summary", "D", "topic"),
@@ -35,7 +36,7 @@ def _parts(content: str) -> tuple[str, str] | None:
         r"(?:##\s+.*|###\s+D\d+\.\s*.+|-{3,}|-\s*未提及|"
         r"-\s*(?:摘要|背景|重點|影響[/／]風險|待釐清|佐證時間)[：:].*|\|.*\|)", re.I)
     for line in content[found[0].start():found[3].start()].splitlines():
-        if line.strip() and not known_line.fullmatch(line.strip()):
+        if line.strip() and not (known_line.fullmatch(line.strip()) or VISUAL_LINE.fullmatch(line.strip())):
             return None
     for start, end, prefix, columns in zip(found, found[1:], ("D", "R", "A"), (0, 5, 7)):
         for line in content[start.end():end.start()].splitlines():
@@ -130,6 +131,15 @@ def build_minutes_view(record: dict) -> dict:
     if not groups["discussions"]:
         return fallback
     topic_ids = {d["id"] for d in groups["discussions"]}
+    visual_notes = read_visual_notes(content)
+    body = content[len(parts[0]):len(content) - len(parts[1])]
+    if (set(visual_notes) - topic_ids or
+            sum(map(len, visual_notes.values())) != sum(
+                bool(VISUAL_LINE.fullmatch(line.strip())) for line in body.splitlines())):
+        return fallback
+    for discussion in groups["discussions"]:
+        if discussion["id"] in visual_notes:
+            discussion["visual_notes"] = visual_notes[discussion["id"]]
     # Sibling membership only. An action's related_decisions never implies a topic.
     unassigned = [i["id"] for i in groups["decisions"] + groups["actions"]
                   if not topic_ids.intersection(i["related_discussions"])]
@@ -208,6 +218,7 @@ def topic_minutes_markdown(record: dict, view: dict | None = None) -> str:
                              ("影響／風險", "impact"), ("待釐清", "open_questions"), ("佐證時間", "evidence_timecodes")]:
             lines.append(f"- {label}：{_text(d.get(field))}")
         lines.append("- " + _review_note(d))
+        lines.extend(visual_note_line(note) for note in d.get("visual_notes", []))
         lines += ["", "#### 決議", ""] + _decision_lines([r for r in rs if d["id"] in r["related_discussions"]])
         lines += ["#### 後續行動", ""] + _actions_table([a for a in aa if d["id"] in a["related_discussions"]])
     if view["unassigned"]:

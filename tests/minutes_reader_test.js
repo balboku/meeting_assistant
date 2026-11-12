@@ -32,6 +32,16 @@ assert(shell.includes('data-mr-mode="original"'));
 assert(shell.includes('每個編號只列一次'));
 const fallback=reader.render({full_content:'保留原文',minutes_view:{available:false,reason:'請閱讀原文'}},{markdown:s=>s});
 assert(fallback.includes('保留原文')); assert(!fallback.includes('data-mr-mode'));
+const visual = {...d, visual_notes:[{source:'<table>測試條件', observed:'90%', pending:true,
+  transcript_quote:'目標 85%', seconds:92, timecode:'01:32'}]};
+const visualHtml = reader.itemBody(visual,{source_media_available:true});
+assert(visualHtml.includes('畫面補充') && visualHtml.includes('待確認'));
+assert(visualHtml.includes('data-mr-seek="92"') && visualHtml.includes('目標 85%'));
+assert(visualHtml.includes('&lt;table&gt;') && !visualHtml.includes('<table>'));
+assert(reader.itemBody(visual,{source_media_available:false}).includes('原始檔不可播放'));
+assert(!reader.itemBody({...r,visual_notes:visual.visual_notes},{}).includes('畫面補充'));
+assert(reader.render({minutes_view:view,quality_report:{visual_evidence:{status:'unavailable'}}},
+  {markdown:s=>s}).includes('可照常閱讀逐字稿版'));
 // Minimal mount adapter: exercise real mode handlers without adding a DOM dependency.
 const appendix = {innerHTML:'transcript',hidden:false,replaceChildren(){this.innerHTML='';}};
 const prefix = {hidden:false}, body = {innerHTML:'',querySelector(){return this;}};

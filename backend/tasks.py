@@ -59,6 +59,7 @@ from backend.processing_context import processing_context
 from backend.processing_policy import require_cloud, require_cloud_for_meeting
 from backend.local_speech import diarize_transcript, speech_report, set_speech_check
 from backend.transcript_translation import append_chinese_translation
+from backend.visual_evidence import supplement_new_video
 from backend.transcript_diagnostics import transcript_turns as _transcript_turns, transcript_speaker_labels
 from backend.transcript_sections import (
     TRANSCRIPT_SECTION_HEADING, TRANSCRIPT_SECTION_PATTERN, NEXT_TOP_LEVEL_SECTION_PATTERN,
@@ -9002,7 +9003,8 @@ def process_audio_task(
     budget_token = ACTIVE_TRANSCRIPTION_BUDGET.set(TranscriptionRequestBudget(job_id))
     checkpoint_token = ACTIVE_CHECKPOINTS.set(None)
     try:
-        ACTIVE_CHECKPOINTS.set(JobCheckpoints.for_job(output_dir, job_id, _sha256_file(audio_path), get_job(job_id) or {},
+        job_record = get_job(job_id) or {}
+        ACTIVE_CHECKPOINTS.set(JobCheckpoints.for_job(output_dir, job_id, _sha256_file(audio_path), job_record,
             bool(forced_segments or force_full_meeting_rerun or force_all_segments_full_rerun or full_rerun_ranges)))
         set_speech_check(lambda: (_raise_if_cancelled(job_id), _raise_if_job_lease_lost(job_id, worker_id, worker_generation)))
         if previous_minutes_path is not None:
@@ -10798,11 +10800,6 @@ def process_audio_task(
             client, meeting_content, full_transcript, job_id,
             summary_primary_model, summary_secondary_model, worker_id, worker_generation,
         )
-        logger.info(f"[{job_id}] ✅ 會議記錄生成成功")
-
-        # ------------------------------------------------------------------
-        # 步驟 6：儲存 Markdown 輸出檔案
-        # ------------------------------------------------------------------
         _raise_if_cancelled(job_id)
         _raise_if_job_lease_lost(job_id, worker_id, worker_generation)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -10829,6 +10826,11 @@ def process_audio_task(
         quality_report["vocabulary_snapshot"] = ACTIVE_VOCABULARY.get()
         quality_report["processing_policy"] = {"mode": "cloud"}
         _refresh_quality_report_summary_warnings(quality_report, meeting_content)
+        if (job_record.get("payload") or {}).get("capture_visual_evidence") is True:
+            meeting_content, visual_report = supplement_new_video(client, audio_path, meeting_content,
+                full_transcript, summary_secondary_model,
+                lambda: (_raise_if_cancelled(job_id), _raise_if_job_lease_lost(job_id, worker_id, worker_generation)))
+            if visual_report: quality_report["visual_evidence"] = visual_report
         quality_report["summary_quality_mode"] = "high" if high_quality_summary else "standard"
         if previous_minutes_context:
             quality_report["previous_minutes"] = previous_minutes_metadata(
@@ -10892,7 +10894,6 @@ quality_label: {quality_report['label']}
         pending_output_path = None
         logger.info(f"[{job_id}] 💾 Markdown 已儲存：{output_path}")
 
-        # ------------------------------------------------------------------
         # 步驟 7：寫入 SQLite
         # ------------------------------------------------------------------
         _raise_if_job_lease_lost(job_id, worker_id, worker_generation)

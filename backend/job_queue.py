@@ -126,6 +126,7 @@ def enqueue_audio_job(
     previous_minutes_filename: Optional[str] = None,
     previous_minutes_sha256: Optional[str] = None,
     regeneration_context: Optional[dict[str, Any]] = None,
+    capture_visual_evidence: bool = False,
 ) -> None:
     """Persist an uploaded audio job for the local worker."""
     from backend.company_vocabulary import snapshot, prompt_terms
@@ -152,6 +153,8 @@ def enqueue_audio_job(
             "custom_vocabulary": prompt_terms(custom_vocabulary, frozen_vocabulary),
             "vocabulary_snapshot": frozen_vocabulary,
             "processing_mode": processing_mode,
+            "capture_visual_evidence": capture_visual_evidence is True and source == "upload"
+                and processing_mode == "cloud" and not training_part_id,
             "training_part_id": training_part_id,
             "meeting_title": meeting_title,
             "force_segment_indices": sorted(set(force_segment_indices or [])),

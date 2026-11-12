@@ -2036,6 +2036,7 @@ async def upload_media(
             custom_vocabulary=custom_vocabulary_terms,
             processing_mode=processing_mode,
             training_part_id=training_part_id,
+            capture_visual_evidence=created_new_source_audio,
             previous_minutes_path=(
                 Path(previous_minutes_context["stored_path"])
                 if previous_minutes_context
