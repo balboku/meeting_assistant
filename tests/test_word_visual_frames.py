@@ -81,12 +81,13 @@ class WordVisualFramesTests(TestCase):
                     heading = next(p for p in reversed(paragraphs[:image]) if p.text.startswith(("D1.", "D2.")))
                     self.assertTrue(heading.text.startswith(owner))
                     self.assertTrue(heading.paragraph_format.keep_with_next)
-                    caption = paragraphs[image - 1]
+                    caption = paragraphs[image]
                     self.assertIn(expected["source"], caption.text)
                     self.assertIn(expected["timecode"], caption.text)
-                    self.assertTrue(caption.paragraph_format.keep_with_next)
-                self.assertIn("待確認", paragraphs[images[1] - 1].text)
-                self.assertIn("口述為 85%", paragraphs[images[1] - 1].text)
+                    self.assertTrue(caption.paragraph_format.keep_together)
+                    self.assertTrue(caption._p.xpath("./w:r/w:br"))
+                self.assertIn("待確認", paragraphs[images[1]].text)
+                self.assertIn("口述為 85%", paragraphs[images[1]].text)
                 self.assertNotIn("visual-frame:", "\n".join(p.text for p in paragraphs))
                 self.assertEqual(doc.inline_shapes[1]._inline.docPr.get("descr"), "畫面來源：驗證條件；錄影時間：00:26")
                 with ZipFile(path) as archive:

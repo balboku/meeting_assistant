@@ -31,20 +31,20 @@ class WordVisualFrames:
         except (InvalidImageStreamError, UnexpectedEndOfFileError, UnrecognizedImageError, StructError, ValueError):
             return None
 
-    def append(self, cell, caption, note: dict) -> None:
+    def append(self, caption, note: dict) -> None:
         digest = note["frame_sha256"]
         if digest not in self.cache:
             self.cache[digest] = self._picture(digest)
         if not self.cache[digest]:
             return
         data, width, height = self.cache[digest]
-        paragraph = cell.add_paragraph()
-        fmt = paragraph.paragraph_format
-        fmt.space_before = Pt(2)
+        # A caption and a separate picture paragraph can split even with
+        # keep-with-next inside the template's multi-page discussion table.
+        fmt = caption.paragraph_format
         fmt.space_after = Pt(6)
         fmt.keep_together = True
         fmt.keep_with_next = False
         fmt.line_spacing = 1.0
-        shape = paragraph.add_run().add_picture(BytesIO(data), width=width, height=height)
+        caption.add_run().add_break()
+        shape = caption.add_run().add_picture(BytesIO(data), width=width, height=height)
         shape._inline.docPr.set("descr", f"畫面來源：{note['source']}；錄影時間：{note['timecode']}")
-        caption.paragraph_format.keep_with_next = True

@@ -287,7 +287,7 @@ def _set_cell_markdown(cell, markdown: str, *, notes=None, frames=None) -> None:
                 color=RGBColor(89, 89, 89) if role == "note" else None,
             )
             if frames and index in notes:
-                frames.append(cell, paragraph, notes[index])
+                frames.append(paragraph, notes[index])
         index += 1
 
 

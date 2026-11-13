@@ -49,6 +49,8 @@ class VisualFrameTests(unittest.TestCase):
         ]}))
         with mock.patch.dict(os.environ, {"MEETING_ALLOW_CLOUD": "1", "MEETING_VISUAL_EVIDENCE": "1"}), \
              mock.patch.object(visual_evidence, "_video_stream", return_value=True), \
+             mock.patch("backend.visual_grounding.read_frame_text", return_value={
+                 "F01": "開發時程\n表格欄位標為 PVT 試組", "F03": "驗證條件\n表列驗證目標 90%"}), \
              mock.patch.object(visual_evidence, "_keyframes", return_value=self.frames):
             content, result = visual_evidence.supplement_new_video(
                 client, Path("fixture.mp4"), CONTENT, TRANSCRIPT, "mock", lambda: None,

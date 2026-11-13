@@ -32,6 +32,9 @@ CONFLICT = {"topic_id": "D1", "frame_id": "F02", "kind": "conflict",
 
 class VisualEvidenceTests(unittest.TestCase):
     def setUp(self):
+        self.ocr = self.enterContext(mock.patch("backend.visual_grounding.read_frame_text", return_value={
+            "F01": "開發時程\n表格欄位標為 PVT 試組", "F02": "驗證條件\n表列驗證目標 90%",
+        }))
         self.check = mock.Mock()
         self.client = mock.Mock()
         self.client.models.generate_content.return_value = SimpleNamespace(
@@ -82,6 +85,17 @@ class VisualEvidenceTests(unittest.TestCase):
                                          topics_for_visual_analysis(self.content), FRAMES, TRANSCRIPT)
         self.assertEqual(len(result["D1"]), 1)
         self.assertEqual(result["D1"][0]["timecode"], "00:12")
+
+    def test_unreadable_or_misbound_evidence_is_never_published(self):
+        for ocr in ({}, {"F01": "驗證條件\n表列驗證目標 90%", "F02": "開發時程\n表格欄位標為 PVT 試組"}):
+            self.ocr.return_value = ocr
+            with self.subTest(ocr=ocr), mock.patch.dict(os.environ, {
+                    "MEETING_ALLOW_CLOUD": "1", "MEETING_VISUAL_EVIDENCE": "1"}), \
+                 mock.patch.object(visual, "_video_stream", return_value=True), \
+                 mock.patch.object(visual, "_keyframes", return_value=FRAMES):
+                content, report = self.enhance()
+                self.assertEqual(content, self.content)
+                self.assertEqual(report["status"], "no_evidence")
 
     def test_skips_local_disabled_and_pure_audio_without_outbound_call(self):
         with mock.patch.dict(os.environ, {"MEETING_ALLOW_CLOUD": "1", "MEETING_VISUAL_EVIDENCE": "1"}), \
